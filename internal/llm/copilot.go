@@ -29,9 +29,11 @@ func NewCopilotProvider(cfg *config.Config) (*CopilotProvider, error) {
 	}
 
 	providerCfg := types.ProviderConfig{
-		Name:           "copilot",
-		DefaultModel:   cfg.Claude.SonnetModel,
-		ProviderConfig: providerConfig,
+		Name:                  "copilot",
+		DefaultModel:          cfg.Claude.SonnetModel,
+		ProviderConfig:        providerConfig,
+		Timeout:               cfg.LLM.Timeout,
+		ResponseHeaderTimeout: cfg.LLM.ResponseHeaderTimeout,
 	}
 
 	if cfg.LLM.APIKey != "" {
@@ -69,7 +71,7 @@ func (p *CopilotProvider) Complete(ctx context.Context, req CompletionRequest) (
 		Model:     model,
 		Messages:  msgs,
 		MaxTokens: req.MaxTokens,
-		Stream:    false,
+		Stream:    true,
 	}
 
 	stream, err := p.provider.GenerateChatCompletion(ctx, opts)

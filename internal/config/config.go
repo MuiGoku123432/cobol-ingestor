@@ -2,6 +2,7 @@ package config
 
 import (
 	"fmt"
+	"time"
 
 	"github.com/joho/godotenv"
 	"github.com/spf13/viper"
@@ -17,10 +18,12 @@ type Config struct {
 
 // LLMConfig selects which provider backend to use.
 type LLMConfig struct {
-	Provider           string // "anthropic" or "copilot"
-	APIKey             string // ANTHROPIC_API_KEY or GitHub token depending on provider
-	CopilotGitHubToken string // GitHub personal access token for Copilot auth
-	CopilotAccountType string // "individual", "business", or "enterprise"
+	Provider              string        // "anthropic" or "copilot"
+	APIKey                string        // ANTHROPIC_API_KEY or GitHub token depending on provider
+	CopilotGitHubToken    string        // GitHub personal access token for Copilot auth
+	CopilotAccountType    string        // "individual", "business", or "enterprise"
+	Timeout               time.Duration // Overall HTTP client timeout (LLM_TIMEOUT)
+	ResponseHeaderTimeout time.Duration // Time to wait for first response byte (LLM_RESPONSE_HEADER_TIMEOUT)
 }
 
 // ClaudeConfig holds model names and concurrency settings (used by both providers).
@@ -63,6 +66,8 @@ func Load() (*Config, error) {
 	// LLM provider defaults
 	viper.SetDefault("LLM_PROVIDER", "anthropic")
 	viper.SetDefault("COPILOT_ACCOUNT_TYPE", "individual")
+	viper.SetDefault("LLM_TIMEOUT", "180s")
+	viper.SetDefault("LLM_RESPONSE_HEADER_TIMEOUT", "120s")
 
 	// Claude model defaults (used by both providers)
 	viper.SetDefault("CLAUDE_OPUS_MODEL", "claude-opus-4-6")
@@ -89,12 +94,23 @@ func Load() (*Config, error) {
 	viper.SetDefault("API_PORT", "8080")
 	viper.SetDefault("API_LOG_LEVEL", "info")
 
+	llmTimeout, err := time.ParseDuration(viper.GetString("LLM_TIMEOUT"))
+	if err != nil {
+		llmTimeout = 180 * time.Second
+	}
+	llmResponseHeaderTimeout, err := time.ParseDuration(viper.GetString("LLM_RESPONSE_HEADER_TIMEOUT"))
+	if err != nil {
+		llmResponseHeaderTimeout = 120 * time.Second
+	}
+
 	cfg := &Config{
 		LLM: LLMConfig{
-			Provider:           viper.GetString("LLM_PROVIDER"),
-			APIKey:             viper.GetString("ANTHROPIC_API_KEY"),
-			CopilotGitHubToken: viper.GetString("COPILOT_GITHUB_TOKEN"),
-			CopilotAccountType: viper.GetString("COPILOT_ACCOUNT_TYPE"),
+			Provider:              viper.GetString("LLM_PROVIDER"),
+			APIKey:                viper.GetString("ANTHROPIC_API_KEY"),
+			CopilotGitHubToken:    viper.GetString("COPILOT_GITHUB_TOKEN"),
+			CopilotAccountType:    viper.GetString("COPILOT_ACCOUNT_TYPE"),
+			Timeout:               llmTimeout,
+			ResponseHeaderTimeout: llmResponseHeaderTimeout,
 		},
 		Claude: ClaudeConfig{
 			OpusModel:   viper.GetString("CLAUDE_OPUS_MODEL"),
