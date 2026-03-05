@@ -155,7 +155,7 @@ func TestParsePass1Response_ExternalInterfaces(t *testing.T) {
 		"executionMode": "CICS",
 		"copyReferences": [],
 		"callTargets": [],
-		"paragraphs": ["1000-MQ", "2000-CICS", "3000-IMS"],
+		"paragraphs": ["1000-MQ", "2000-CICS", "3000-IMS", "4000-IDMS", "5000-ADABAS", "6000-SORT", "7000-BATCH"],
 		"sections": [],
 		"fileDefinitions": [],
 		"dataItems": [],
@@ -170,7 +170,13 @@ func TestParsePass1Response_ExternalInterfaces(t *testing.T) {
 			{"type": "CICS_TS", "details": "WRITEQ TS QUEUE('TEMPQ')", "paragraph": "2000-CICS"},
 			{"type": "CICS_TD", "details": "WRITEQ TD QUEUE('LOGQ')", "paragraph": "2000-CICS"},
 			{"type": "CICS_START", "details": "START TRANSID('TXN1')", "paragraph": "2000-CICS"},
+			{"type": "CICS_FILE", "details": "READ FILE('CUSTFILE') INTO(CUST-REC)", "paragraph": "2000-CICS"},
+			{"type": "CICS_ENQ", "details": "ENQ RESOURCE('CUST-LOCK') LENGTH(10)", "paragraph": "2000-CICS"},
 			{"type": "IMS", "details": "CBLTDLI GU CUSTOMER-PCB", "paragraph": "3000-IMS"},
+			{"type": "IDMS", "details": "OBTAIN CALC CUSTOMER-RECORD", "paragraph": "4000-IDMS"},
+			{"type": "ADABAS", "details": "CALL ADABAS command L3 file 20", "paragraph": "5000-ADABAS"},
+			{"type": "SORT", "details": "SORT SORT-FILE ON ASCENDING KEY SORT-KEY INPUT PROCEDURE 6100-INPUT", "paragraph": "6000-SORT"},
+			{"type": "BATCH_UTIL", "details": "CALL DFSORT for inline sort", "paragraph": "7000-BATCH"},
 			{"type": "TCP", "details": "Socket call to external service", "paragraph": "1000-MQ"},
 			{"type": "FILE_TRANSFER", "details": "FTP transfer of report file", "paragraph": "1000-MQ"}
 		]
@@ -179,10 +185,14 @@ func TestParsePass1Response_ExternalInterfaces(t *testing.T) {
 	result, err := ParsePass1Response(jsonStr, "/src/INTFTEST.CBL")
 	require.NoError(t, err)
 
-	// All 9 interface types parsed
-	require.Len(t, result.ExternalInterfaces, 9)
+	// All 15 interface types parsed
+	require.Len(t, result.ExternalInterfaces, 15)
 
-	expectedTypes := []string{"MQ", "CICS_LINK", "CICS_XCTL", "CICS_TS", "CICS_TD", "CICS_START", "IMS", "TCP", "FILE_TRANSFER"}
+	expectedTypes := []string{
+		"MQ", "CICS_LINK", "CICS_XCTL", "CICS_TS", "CICS_TD", "CICS_START",
+		"CICS_FILE", "CICS_ENQ", "IMS", "IDMS", "ADABAS", "SORT", "BATCH_UTIL",
+		"TCP", "FILE_TRANSFER",
+	}
 	for i, expected := range expectedTypes {
 		assert.Equal(t, expected, result.ExternalInterfaces[i].Type, "interface %d type", i)
 		assert.NotEmpty(t, result.ExternalInterfaces[i].Details, "interface %d details", i)
@@ -200,5 +210,5 @@ func TestParsePass1Response_ExternalInterfaces(t *testing.T) {
 			assert.Equal(t, "ExternalInterface", r.ToLabel)
 		}
 	}
-	assert.Equal(t, 9, hasInterfaceCount)
+	assert.Equal(t, 15, hasInterfaceCount)
 }

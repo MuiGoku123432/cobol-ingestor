@@ -288,7 +288,7 @@ func registerGetProgramExternalInterfaces(s *mcp.Server, reader n4j.Reader) {
 	}
 	mcp.AddTool(s, &mcp.Tool{
 		Name:        "get_program_external_interfaces",
-		Description: "List external integration points (MQ, CICS LINK/XCTL, TCP, file transfers) for a program.",
+		Description: "List external integration points (MQ, CICS LINK/XCTL/TS/TD/START/FILE/ENQ, IMS, IDMS, ADABAS, SORT, batch utilities, TCP, file transfers) for a program.",
 	}, func(ctx context.Context, req *mcp.CallToolRequest, input GetProgramInput) (*mcp.CallToolResult, *output, error) {
 		items, err := reader.GetProgramExternalInterfaces(ctx, input.ProgramID)
 		if err != nil {

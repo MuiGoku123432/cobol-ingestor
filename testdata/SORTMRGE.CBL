@@ -1,0 +1,78 @@
+       IDENTIFICATION DIVISION.
+       PROGRAM-ID. SORTMRGE.
+      *
+      * Test program exercising SORT and MERGE verbs:
+      * SORT with INPUT/OUTPUT PROCEDURE, MERGE with USING/GIVING.
+      *
+       ENVIRONMENT DIVISION.
+       INPUT-OUTPUT SECTION.
+       FILE-CONTROL.
+           SELECT SORT-FILE ASSIGN TO SORTWORK.
+           SELECT MERGE-FILE ASSIGN TO MRGWORK.
+           SELECT INPUT-FILE ASSIGN TO INFILE.
+           SELECT INPUT-FILE2 ASSIGN TO INFILE2.
+           SELECT OUTPUT-FILE ASSIGN TO OUTFILE.
+           SELECT MERGE-OUT ASSIGN TO MRGOUT.
+       DATA DIVISION.
+       FILE SECTION.
+       SD  SORT-FILE.
+       01  SORT-RECORD.
+           05  SORT-KEY              PIC X(10).
+           05  SORT-DATA             PIC X(90).
+       SD  MERGE-FILE.
+       01  MERGE-RECORD.
+           05  MERGE-KEY             PIC X(10).
+           05  MERGE-DATA            PIC X(90).
+       FD  INPUT-FILE.
+       01  INPUT-RECORD              PIC X(100).
+       FD  INPUT-FILE2.
+       01  INPUT-RECORD2             PIC X(100).
+       FD  OUTPUT-FILE.
+       01  OUTPUT-RECORD             PIC X(100).
+       FD  MERGE-OUT.
+       01  MERGE-OUT-RECORD          PIC X(100).
+       WORKING-STORAGE SECTION.
+       01  WS-EOF-FLAG               PIC X VALUE 'N'.
+           88  EOF-REACHED           VALUE 'Y'.
+       01  WS-RECORD-COUNT           PIC 9(8) VALUE 0.
+       PROCEDURE DIVISION.
+       0000-MAIN.
+           PERFORM 1000-SORT-PROCESS
+           PERFORM 2000-MERGE-PROCESS
+           GOBACK.
+       1000-SORT-PROCESS.
+           SORT SORT-FILE
+               ON ASCENDING KEY SORT-KEY
+               INPUT PROCEDURE 1100-INPUT-PROC
+               OUTPUT PROCEDURE 1200-OUTPUT-PROC.
+       1100-INPUT-PROC.
+           OPEN INPUT INPUT-FILE
+           READ INPUT-FILE INTO SORT-RECORD
+               AT END SET EOF-REACHED TO TRUE
+           END-READ
+           PERFORM UNTIL EOF-REACHED
+               RELEASE SORT-RECORD
+               READ INPUT-FILE INTO SORT-RECORD
+                   AT END SET EOF-REACHED TO TRUE
+               END-READ
+           END-PERFORM
+           CLOSE INPUT-FILE.
+       1200-OUTPUT-PROC.
+           OPEN OUTPUT OUTPUT-FILE
+           RETURN SORT-FILE INTO OUTPUT-RECORD
+               AT END SET EOF-REACHED TO TRUE
+           END-RETURN
+           PERFORM UNTIL EOF-REACHED
+               WRITE OUTPUT-RECORD
+               ADD 1 TO WS-RECORD-COUNT
+               RETURN SORT-FILE INTO OUTPUT-RECORD
+                   AT END SET EOF-REACHED TO TRUE
+               END-RETURN
+           END-PERFORM
+           CLOSE OUTPUT-FILE
+           DISPLAY 'SORTED RECORDS: ' WS-RECORD-COUNT.
+       2000-MERGE-PROCESS.
+           MERGE MERGE-FILE
+               ON ASCENDING KEY MERGE-KEY
+               USING INPUT-FILE INPUT-FILE2
+               GIVING MERGE-OUT.

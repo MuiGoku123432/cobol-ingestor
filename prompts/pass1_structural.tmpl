@@ -60,7 +60,7 @@ Return a single JSON object with these fields:
   ],
   "externalInterfaces": [
     {
-      "type": "string — MQ, CICS_LINK, CICS_XCTL, CICS_TS, CICS_TD, CICS_START, IMS, TCP, or FILE_TRANSFER",
+      "type": "string — MQ, CICS_LINK, CICS_XCTL, CICS_TS, CICS_TD, CICS_START, CICS_FILE, CICS_ENQ, IMS, IDMS, ADABAS, SORT, BATCH_UTIL, TCP, or FILE_TRANSFER",
       "details": "string — brief description (queue name, linked program, function code, PCB name, etc.)",
       "paragraph": "string — paragraph name where this interface is invoked, or empty"
     }
@@ -88,5 +88,11 @@ Rules:
   - CALL 'MQPUT' / 'MQGET' / 'MQOPEN' / 'MQCLOSE' / 'MQCONN' / 'MQDISC' / 'MQINQ' / 'MQSET' → MQ
   - CALL 'CBLTDLI' or 'AIBTDLI' → IMS. Details should include function code (GU, GN, GHU, GNP, ISRT, DLET, REPL) and PCB/PSB name if identifiable
   - CALL to socket libraries → TCP
+  - EXEC CICS READ / WRITE / REWRITE / DELETE / STARTBR / READNEXT / READPREV / ENDBR → CICS_FILE. Details should include DATASET/FILE name and operation
+  - EXEC CICS ENQ / DEQ → CICS_ENQ. Details should include RESOURCE name and length
+  - BIND / READY / FINISH / OBTAIN / STORE / MODIFY / ERASE / FIND / GET in DML context (CA-IDMS) → IDMS. Details should include record name and area if identifiable
+  - CALL 'ADABAS' or CALL 'ADACALL' → ADABAS. Details should include command code and file number if identifiable
+  - SORT or MERGE verb → SORT. Details should include sort file name and INPUT/OUTPUT PROCEDURE or USING/GIVING clause
+  - CALL 'DFSORT' / 'ICETOOL' / 'IDCAMS' / 'IEBGENER' / 'IEBCOPY' → BATCH_UTIL. Details should include utility name and operation
   - Always populate the paragraph field with the paragraph name where the interface is invoked
 - Return ONLY the JSON object, no markdown fences, no explanation

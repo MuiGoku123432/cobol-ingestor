@@ -162,7 +162,7 @@ type BusinessDomain struct {
 // ExternalInterface represents an external integration point.
 type ExternalInterface struct {
 	ID        string
-	Type      string // MQ, CICS_LINK, CICS_XCTL, CICS_TS, CICS_TD, CICS_START, IMS, TCP, FILE_TRANSFER
+	Type      string // MQ, CICS_LINK, CICS_XCTL, CICS_TS, CICS_TD, CICS_START, CICS_FILE, CICS_ENQ, IMS, IDMS, ADABAS, SORT, BATCH_UTIL, TCP, FILE_TRANSFER
 	Details   string
 	Paragraph string
 	ProgramID string
