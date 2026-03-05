@@ -140,3 +140,23 @@ func (m *MockReader) ListRiskPrograms(_ context.Context, _ float64) ([]n4j.RiskP
 func (m *MockReader) ListVolumeEstimates(_ context.Context) ([]n4j.VolumeEstimateInfo, error) {
 	return nil, m.Err
 }
+
+func (m *MockReader) GetProgramSQL(_ context.Context, _ string) ([]n4j.SQLStatementInfo, error) {
+	return nil, m.Err
+}
+
+func (m *MockReader) GetProgramCICS(_ context.Context, _ string) ([]n4j.CICSTransactionInfo, error) {
+	return nil, m.Err
+}
+
+func (m *MockReader) GetParagraphFlow(_ context.Context, _ string) ([]n4j.ParagraphFlowInfo, error) {
+	return nil, m.Err
+}
+
+func (m *MockReader) GetDataFlow(_ context.Context, _ string) ([]n4j.DataFlowInfo, error) {
+	return nil, m.Err
+}
+
+func (m *MockReader) GetDataHierarchy(_ context.Context, _ string) ([]n4j.DataHierarchyInfo, error) {
+	return nil, m.Err
+}

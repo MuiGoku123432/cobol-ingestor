@@ -13,6 +13,7 @@ func registerAllTools(s *mcp.Server, reader n4j.Reader) {
 	registerGetProgram(s, reader)
 	registerSearchPrograms(s, reader)
 	registerListPrograms(s, reader)
+	registerListCopybooks(s, reader)
 	registerGetCallChain(s, reader)
 	registerGetImpactAnalysis(s, reader)
 	registerGetCopybookUsage(s, reader)
@@ -30,6 +31,11 @@ func registerAllTools(s *mcp.Server, reader n4j.Reader) {
 	registerListModernizationCandidates(s, reader)
 	registerListRiskPrograms(s, reader)
 	registerListVolumeEstimates(s, reader)
+	registerGetProgramSQL(s, reader)
+	registerGetProgramCICS(s, reader)
+	registerGetParagraphFlow(s, reader)
+	registerGetDataFlow(s, reader)
+	registerGetDataHierarchy(s, reader)
 }
 
 func toolError(msg string) *mcp.CallToolResult {
@@ -383,5 +389,106 @@ func registerListVolumeEstimates(s *mcp.Server, reader n4j.Reader) {
 			return nil, nil, err
 		}
 		return nil, &output{Estimates: items}, nil
+	})
+}
+
+func registerListCopybooks(s *mcp.Server, reader n4j.Reader) {
+	mcp.AddTool(s, &mcp.Tool{
+		Name:        "list_copybooks",
+		Description: "List all copybooks with pagination and usage counts. Optionally filter by name substring.",
+	}, func(ctx context.Context, req *mcp.CallToolRequest, input ListProgramsInput) (*mcp.CallToolResult, any, error) {
+		page := input.Page
+		if page <= 0 {
+			page = 1
+		}
+		pageSize := input.PageSize
+		if pageSize <= 0 {
+			pageSize = 20
+		}
+		result, err := reader.ListCopybooks(ctx, n4j.Filter{Search: input.Search}, page, pageSize)
+		if err != nil {
+			return nil, nil, err
+		}
+		return marshalResult(result)
+	})
+}
+
+func registerGetProgramSQL(s *mcp.Server, reader n4j.Reader) {
+	type output struct {
+		Statements []n4j.SQLStatementInfo `json:"statements"`
+	}
+	mcp.AddTool(s, &mcp.Tool{
+		Name:        "get_program_sql",
+		Description: "List SQL statements (SELECT, INSERT, UPDATE, DELETE, etc.) embedded in a COBOL program.",
+	}, func(ctx context.Context, req *mcp.CallToolRequest, input GetProgramInput) (*mcp.CallToolResult, *output, error) {
+		items, err := reader.GetProgramSQL(ctx, input.ProgramID)
+		if err != nil {
+			return nil, nil, err
+		}
+		return nil, &output{Statements: items}, nil
+	})
+}
+
+func registerGetProgramCICS(s *mcp.Server, reader n4j.Reader) {
+	type output struct {
+		Transactions []n4j.CICSTransactionInfo `json:"transactions"`
+	}
+	mcp.AddTool(s, &mcp.Tool{
+		Name:        "get_program_cics",
+		Description: "List CICS transaction commands (SEND, RECEIVE, READ, WRITE, LINK, XCTL, etc.) used by a program.",
+	}, func(ctx context.Context, req *mcp.CallToolRequest, input GetProgramInput) (*mcp.CallToolResult, *output, error) {
+		items, err := reader.GetProgramCICS(ctx, input.ProgramID)
+		if err != nil {
+			return nil, nil, err
+		}
+		return nil, &output{Transactions: items}, nil
+	})
+}
+
+func registerGetParagraphFlow(s *mcp.Server, reader n4j.Reader) {
+	type output struct {
+		Flow []n4j.ParagraphFlowInfo `json:"flow"`
+	}
+	mcp.AddTool(s, &mcp.Tool{
+		Name:        "get_paragraph_flow",
+		Description: "Get PERFORMS and PERFORMS THRU control flow between paragraphs in a program. Shows which paragraphs call which, with loop and condition info.",
+	}, func(ctx context.Context, req *mcp.CallToolRequest, input GetProgramInput) (*mcp.CallToolResult, *output, error) {
+		items, err := reader.GetParagraphFlow(ctx, input.ProgramID)
+		if err != nil {
+			return nil, nil, err
+		}
+		return nil, &output{Flow: items}, nil
+	})
+}
+
+func registerGetDataFlow(s *mcp.Server, reader n4j.Reader) {
+	type output struct {
+		Flows []n4j.DataFlowInfo `json:"flows"`
+	}
+	mcp.AddTool(s, &mcp.Tool{
+		Name:        "get_data_flow",
+		Description: "Get MOVES_TO data flow relationships between data items in a program. Shows how data moves between variables.",
+	}, func(ctx context.Context, req *mcp.CallToolRequest, input GetProgramInput) (*mcp.CallToolResult, *output, error) {
+		items, err := reader.GetDataFlow(ctx, input.ProgramID)
+		if err != nil {
+			return nil, nil, err
+		}
+		return nil, &output{Flows: items}, nil
+	})
+}
+
+func registerGetDataHierarchy(s *mcp.Server, reader n4j.Reader) {
+	type output struct {
+		Hierarchy []n4j.DataHierarchyInfo `json:"hierarchy"`
+	}
+	mcp.AddTool(s, &mcp.Tool{
+		Name:        "get_data_hierarchy",
+		Description: "Get data item hierarchy (CHILD_OF parent-child relationships) and REDEFINES relationships for a program.",
+	}, func(ctx context.Context, req *mcp.CallToolRequest, input GetProgramInput) (*mcp.CallToolResult, *output, error) {
+		items, err := reader.GetDataHierarchy(ctx, input.ProgramID)
+		if err != nil {
+			return nil, nil, err
+		}
+		return nil, &output{Hierarchy: items}, nil
 	})
 }

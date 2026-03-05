@@ -573,12 +573,13 @@ func (w *BatchWriter) WritePass2Result(ctx context.Context, result *graph.Pass2R
 			}
 			annRows = append(annRows, map[string]any{
 				"name": a.Paragraph,
+				"pid":  programID,
 				"desc": a.Description,
 				"cat":  a.Category,
 			})
 		}
 		if err := w.batchUpdate(ctx,
-			"UNWIND $rows AS row MATCH (p:Paragraph {name: row.name}) "+
+			"UNWIND $rows AS row MATCH (p:Paragraph {name: row.name, programId: row.pid}) "+
 				"SET p.description = row.desc, p.category = row.cat",
 			annRows); err != nil {
 			w.logger.Warn("failed to update paragraph annotations", zap.Error(err))

@@ -345,6 +345,7 @@ func (p *Pipeline) RunPass3(ctx context.Context) error {
 
 	offset := 0
 	totalBatches := 0
+	var failedPrograms []string
 	for {
 		slices, err := p.Neo4jClient.QueryCallGraphSlice(ctx, batchSize, offset)
 		if err != nil {
@@ -354,27 +355,38 @@ func (p *Pipeline) RunPass3(ctx context.Context) error {
 			break
 		}
 
-		graphText := n4j.FormatGraphSlice(slices, orphans, hubs)
+		if err := p.processPass3Batch(ctx, slices, orphans, hubs); err != nil {
+			p.Logger.Error("pass 3: batch failed, retrying halves",
+				zap.Int("offset", offset), zap.Int("size", len(slices)), zap.Error(err))
 
-		jsonResp, err := p.Claude.AnalyzeCrossCutting(ctx, graphText)
-		if err != nil {
-			p.Logger.Error("pass 3: Claude analysis failed", zap.Error(err))
-			offset += batchSize
-			continue
+			half := len(slices) / 2
+			if half > 0 {
+				if err := p.processPass3Batch(ctx, slices[:half], orphans, hubs); err != nil {
+					p.Logger.Error("pass 3: first half retry failed", zap.Error(err))
+					for _, s := range slices[:half] {
+						failedPrograms = append(failedPrograms, s.ProgramID)
+					}
+				} else {
+					totalBatches++
+				}
+				if err := p.processPass3Batch(ctx, slices[half:], orphans, hubs); err != nil {
+					p.Logger.Error("pass 3: second half retry failed", zap.Error(err))
+					for _, s := range slices[half:] {
+						failedPrograms = append(failedPrograms, s.ProgramID)
+					}
+				} else {
+					totalBatches++
+				}
+			} else {
+				// Single program batch still failed
+				for _, s := range slices {
+					failedPrograms = append(failedPrograms, s.ProgramID)
+				}
+			}
+		} else {
+			totalBatches++
 		}
 
-		result, err := parser.ParsePass3Response(jsonResp)
-		if err != nil {
-			p.Logger.Error("pass 3: parsing failed", zap.Error(err))
-			offset += batchSize
-			continue
-		}
-
-		if err := p.Writer.WritePass3Result(ctx, result); err != nil {
-			p.Logger.Error("pass 3: write failed", zap.Error(err))
-		}
-
-		totalBatches++
 		offset += batchSize
 
 		if len(slices) < batchSize {
@@ -382,6 +394,33 @@ func (p *Pipeline) RunPass3(ctx context.Context) error {
 		}
 	}
 
+	if len(failedPrograms) > 0 {
+		p.Logger.Warn("pass 3: programs failed analysis",
+			zap.Int("count", len(failedPrograms)),
+			zap.Strings("programIds", failedPrograms))
+	}
+
 	p.Logger.Info("pass 3 complete", zap.Int("batches", totalBatches))
+	return nil
+}
+
+// processPass3Batch runs Claude analysis and writes results for a batch of program slices.
+func (p *Pipeline) processPass3Batch(ctx context.Context, slices []n4j.ProgramSlice, orphans, hubs []string) error {
+	graphText := n4j.FormatGraphSlice(slices, orphans, hubs)
+
+	jsonResp, err := p.Claude.AnalyzeCrossCutting(ctx, graphText)
+	if err != nil {
+		return fmt.Errorf("claude analysis: %w", err)
+	}
+
+	result, err := parser.ParsePass3Response(jsonResp)
+	if err != nil {
+		return fmt.Errorf("parsing: %w", err)
+	}
+
+	if err := p.Writer.WritePass3Result(ctx, result); err != nil {
+		return fmt.Errorf("write: %w", err)
+	}
+
 	return nil
 }

@@ -30,6 +30,11 @@ type Reader interface {
 	ListModernizationCandidates(ctx context.Context) ([]ModernizationCandidateInfo, error)
 	ListRiskPrograms(ctx context.Context, minScore float64) ([]RiskProgramInfo, error)
 	ListVolumeEstimates(ctx context.Context) ([]VolumeEstimateInfo, error)
+	GetProgramSQL(ctx context.Context, programID string) ([]SQLStatementInfo, error)
+	GetProgramCICS(ctx context.Context, programID string) ([]CICSTransactionInfo, error)
+	GetParagraphFlow(ctx context.Context, programID string) ([]ParagraphFlowInfo, error)
+	GetDataFlow(ctx context.Context, programID string) ([]DataFlowInfo, error)
+	GetDataHierarchy(ctx context.Context, programID string) ([]DataHierarchyInfo, error)
 }
 
 // Ensure Client implements Reader.
@@ -46,7 +51,7 @@ func (c *Client) ListPrograms(ctx context.Context, filter Filter, page, pageSize
 	listCypher := "MATCH (p:Program) " +
 		"OPTIONAL MATCH (p)-[:CALLS]->(callee:Program) " +
 		"RETURN p.programId AS programId, p.filePath AS filePath, p.language AS language, " +
-		"p.deadCode AS deadCode, count(callee) AS callCount " +
+		"p.deadCode AS deadCode, p.executionMode AS executionMode, p.lineCount AS lineCount, count(callee) AS callCount " +
 		"ORDER BY p.programId SKIP $skip LIMIT $limit"
 
 	if filter.Search != "" {
@@ -54,7 +59,7 @@ func (c *Client) ListPrograms(ctx context.Context, filter Filter, page, pageSize
 		listCypher = "MATCH (p:Program) WHERE p.programId CONTAINS $search " +
 			"OPTIONAL MATCH (p)-[:CALLS]->(callee:Program) " +
 			"RETURN p.programId AS programId, p.filePath AS filePath, p.language AS language, " +
-			"p.deadCode AS deadCode, count(callee) AS callCount " +
+			"p.deadCode AS deadCode, p.executionMode AS executionMode, p.lineCount AS lineCount, count(callee) AS callCount " +
 			"ORDER BY p.programId SKIP $skip LIMIT $limit"
 	}
 
@@ -74,11 +79,13 @@ func (c *Client) ListPrograms(ctx context.Context, filter Filter, page, pageSize
 	for result.Next(ctx) {
 		rec := result.Record()
 		p := ProgramSummary{
-			ProgramID: getStr(rec, "programId"),
-			FilePath:  getStr(rec, "filePath"),
-			Language:  getStr(rec, "language"),
-			CallCount: int(getInt64(rec, "callCount")),
-			DeadCode:  getBool(rec, "deadCode"),
+			ProgramID:     getStr(rec, "programId"),
+			FilePath:      getStr(rec, "filePath"),
+			Language:      getStr(rec, "language"),
+			CallCount:     int(getInt64(rec, "callCount")),
+			DeadCode:      getBool(rec, "deadCode"),
+			ExecutionMode: getStr(rec, "executionMode"),
+			LineCount:     int(getInt64(rec, "lineCount")),
 		}
 		programs = append(programs, p)
 	}
@@ -95,7 +102,9 @@ func (c *Client) GetProgram(ctx context.Context, programID string) (*ProgramDeta
 	// Check program exists
 	res, err := session.Run(ctx,
 		"MATCH (p:Program {programId: $id}) RETURN p.filePath AS filePath, p.language AS language, "+
-			"p.deadCode AS deadCode, p.riskScore AS riskScore, p.riskType AS riskType",
+			"p.lineCount AS lineCount, p.executionMode AS executionMode, "+
+			"p.deadCode AS deadCode, p.deadCodeReason AS deadCodeReason, "+
+			"p.riskScore AS riskScore, p.riskType AS riskType, p.riskDetails AS riskDetails",
 		params)
 	if err != nil {
 		return nil, fmt.Errorf("getting program: %w", err)
@@ -106,21 +115,27 @@ func (c *Client) GetProgram(ctx context.Context, programID string) (*ProgramDeta
 
 	rec := res.Record()
 	detail := &ProgramDetail{
-		ProgramID: programID,
-		FilePath:  getStr(rec, "filePath"),
-		Language:  getStr(rec, "language"),
-		DeadCode:  getBool(rec, "deadCode"),
-		RiskScore: getFloat64(rec, "riskScore"),
-		RiskType:  getStr(rec, "riskType"),
+		ProgramID:      programID,
+		FilePath:       getStr(rec, "filePath"),
+		Language:       getStr(rec, "language"),
+		LineCount:      int(getInt64(rec, "lineCount")),
+		ExecutionMode:  getStr(rec, "executionMode"),
+		DeadCode:       getBool(rec, "deadCode"),
+		DeadCodeReason: getStr(rec, "deadCodeReason"),
+		RiskScore:      getFloat64(rec, "riskScore"),
+		RiskType:       getStr(rec, "riskType"),
+		RiskDetails:    getStr(rec, "riskDetails"),
 	}
 
 	// Callers
-	detail.Callers, _ = c.queryStringList(ctx, session,
-		"MATCH (caller:Program)-[:CALLS]->(p:Program {programId: $id}) RETURN caller.programId AS val", params)
+	detail.Callers, _ = c.queryCallInfoList(ctx, session,
+		"MATCH (caller:Program)-[r:CALLS]->(p:Program {programId: $id}) "+
+			"RETURN caller.programId AS programId, r.isDynamic AS isDynamic, r.resolvedFrom AS resolvedFrom, r.fromParagraph AS fromParagraph", params)
 
 	// Callees
-	detail.Callees, _ = c.queryStringList(ctx, session,
-		"MATCH (p:Program {programId: $id})-[:CALLS]->(callee:Program) RETURN callee.programId AS val", params)
+	detail.Callees, _ = c.queryCallInfoList(ctx, session,
+		"MATCH (p:Program {programId: $id})-[r:CALLS]->(callee:Program) "+
+			"RETURN callee.programId AS programId, r.isDynamic AS isDynamic, r.resolvedFrom AS resolvedFrom, r.fromParagraph AS fromParagraph", params)
 
 	// Copybooks
 	detail.Copybooks, _ = c.queryStringList(ctx, session,
@@ -146,8 +161,21 @@ func (c *Client) GetProgram(ctx context.Context, programID string) (*ProgramDeta
 		"MATCH (s:Section)-[:BELONGS_TO]->(p:Program {programId: $id}) RETURN s.name AS val", params)
 
 	// File defs
-	detail.FileDefs, _ = c.queryStringList(ctx, session,
-		"MATCH (p:Program {programId: $id})-[:READS|WRITES]->(f:File) RETURN DISTINCT f.name AS val", params)
+	fileRes, err := session.Run(ctx,
+		"MATCH (p:Program {programId: $id})-[r:READS|WRITES]->(f:File) "+
+			"RETURN DISTINCT f.name AS name, type(r) AS accessType, f.organization AS organization, f.vsamType AS vsamType, f.dataStoreType AS dataStoreType", params)
+	if err == nil {
+		for fileRes.Next(ctx) {
+			r := fileRes.Record()
+			detail.FileDefs = append(detail.FileDefs, FileDefInfo{
+				Name:          getStr(r, "name"),
+				AccessType:    getStr(r, "accessType"),
+				Organization:  getStr(r, "organization"),
+				VSAMType:      getStr(r, "vsamType"),
+				DataStoreType: getStr(r, "dataStoreType"),
+			})
+		}
+	}
 
 	// Domains
 	detail.Domains, _ = c.queryStringList(ctx, session,
@@ -171,18 +199,20 @@ func (c *Client) GetCallChain(ctx context.Context, programID, direction string, 
 	if direction == "upstream" {
 		cypher = fmt.Sprintf(
 			"MATCH path = (caller:Program)-[:CALLS*1..%d]->(p:Program {programId: $id}) "+
-				"UNWIND nodes(path) AS n "+
-				"WITH DISTINCT n, length(shortestPath((n)-[:CALLS*]->(p))) AS d "+
-				"MATCH (p:Program {programId: $id}) "+
-				"RETURN n.programId AS programId, d AS depth ORDER BY d",
+				"WITH p, nodes(path) AS ns, length(path) AS pathLen "+
+				"UNWIND range(0, pathLen - 1) AS idx "+
+				"WITH DISTINCT ns[idx] AS n, pathLen - idx AS d "+
+				"RETURN n.programId AS programId, min(d) AS depth "+
+				"ORDER BY depth",
 			depth)
 	} else {
 		cypher = fmt.Sprintf(
 			"MATCH path = (p:Program {programId: $id})-[:CALLS*1..%d]->(callee:Program) "+
-				"UNWIND nodes(path) AS n "+
-				"WITH DISTINCT n, length(shortestPath((p)-[:CALLS*]->(n))) AS d "+
-				"MATCH (p:Program {programId: $id}) "+
-				"RETURN n.programId AS programId, d AS depth ORDER BY d",
+				"WITH p, nodes(path) AS ns, length(path) AS pathLen "+
+				"UNWIND range(1, pathLen) AS idx "+
+				"WITH DISTINCT ns[idx] AS n, idx AS d "+
+				"RETURN n.programId AS programId, min(d) AS depth "+
+				"ORDER BY depth",
 			depth)
 	}
 
@@ -212,7 +242,7 @@ func (c *Client) GetDataItems(ctx context.Context, programID string) ([]DataItem
 	defer session.Close(ctx)
 
 	result, err := session.Run(ctx,
-		"MATCH (d:DataItem {programId: $id}) RETURN d.name AS name, d.level AS level, d.fqn AS fqn, d.picture AS picture ORDER BY d.level, d.name",
+		"MATCH (d:DataItem {programId: $id}) RETURN d.name AS name, d.level AS level, d.fqn AS fqn, d.picture AS picture, d.usage AS usage ORDER BY d.level, d.name",
 		map[string]any{"id": programID})
 	if err != nil {
 		return nil, fmt.Errorf("data items query: %w", err)
@@ -226,6 +256,7 @@ func (c *Client) GetDataItems(ctx context.Context, programID string) ([]DataItem
 			Level:   int(getInt64(rec, "level")),
 			FQN:     getStr(rec, "fqn"),
 			Picture: getStr(rec, "picture"),
+			Usage:   getStr(rec, "usage"),
 		})
 	}
 
@@ -332,7 +363,14 @@ func (c *Client) GetDashboardStats(ctx context.Context) (*DashboardStats, error)
 		{"MATCH (p:Program) RETURN count(p) AS c", &stats.ProgramCount},
 		{"MATCH (cb:Copybook) RETURN count(cb) AS c", &stats.CopybookCount},
 		{"MATCH (p:Paragraph) RETURN count(p) AS c", &stats.ParagraphCount},
+		{"MATCH (s:Section) RETURN count(s) AS c", &stats.SectionCount},
 		{"MATCH (d:DataItem) RETURN count(d) AS c", &stats.DataItemCount},
+		{"MATCH (f:File) RETURN count(f) AS c", &stats.FileCount},
+		{"MATCH (s:SQLStatement) RETURN count(s) AS c", &stats.SQLStatementCount},
+		{"MATCH (c:CICSTransaction) RETURN count(c) AS c", &stats.CICSTransactionCount},
+		{"MATCH (e:ExternalInterface) RETURN count(e) AS c", &stats.ExternalInterfaceCount},
+		{"MATCH (c:Condition) RETURN count(c) AS c", &stats.ConditionCount},
+		{"MATCH (p:Parameter) RETURN count(p) AS c", &stats.ParameterCount},
 		{"MATCH ()-[r]->() RETURN count(r) AS c", &stats.RelationshipCount},
 		{"MATCH (p:Program) WHERE NOT ()-[:CALLS]->(p) RETURN count(p) AS c", &stats.OrphanCount},
 		{"MATCH (d:BusinessDomain) RETURN count(d) AS c", &stats.DomainCount},
@@ -706,7 +744,186 @@ func (c *Client) ListVolumeEstimates(ctx context.Context) ([]VolumeEstimateInfo,
 	return items, nil
 }
 
+func (c *Client) GetProgramSQL(ctx context.Context, programID string) ([]SQLStatementInfo, error) {
+	session := c.NewSession(ctx)
+	defer session.Close(ctx)
+
+	result, err := session.Run(ctx,
+		"MATCH (s:SQLStatement {programId: $id}) RETURN s.id AS id, s.text AS text, s.type AS type, s.targetTable AS targetTable ORDER BY s.type, s.id",
+		map[string]any{"id": programID})
+	if err != nil {
+		return nil, fmt.Errorf("sql statements query: %w", err)
+	}
+
+	var items []SQLStatementInfo
+	for result.Next(ctx) {
+		rec := result.Record()
+		items = append(items, SQLStatementInfo{
+			ID:          getStr(rec, "id"),
+			Text:        getStr(rec, "text"),
+			Type:        getStr(rec, "type"),
+			TargetTable: getStr(rec, "targetTable"),
+		})
+	}
+	return items, nil
+}
+
+func (c *Client) GetProgramCICS(ctx context.Context, programID string) ([]CICSTransactionInfo, error) {
+	session := c.NewSession(ctx)
+	defer session.Close(ctx)
+
+	result, err := session.Run(ctx,
+		"MATCH (t:CICSTransaction {programId: $id}) RETURN t.id AS id, t.command AS command ORDER BY t.command",
+		map[string]any{"id": programID})
+	if err != nil {
+		return nil, fmt.Errorf("cics transactions query: %w", err)
+	}
+
+	var items []CICSTransactionInfo
+	for result.Next(ctx) {
+		rec := result.Record()
+		items = append(items, CICSTransactionInfo{
+			ID:      getStr(rec, "id"),
+			Command: getStr(rec, "command"),
+		})
+	}
+	return items, nil
+}
+
+func (c *Client) GetParagraphFlow(ctx context.Context, programID string) ([]ParagraphFlowInfo, error) {
+	session := c.NewSession(ctx)
+	defer session.Close(ctx)
+
+	var items []ParagraphFlowInfo
+
+	// PERFORMS relationships
+	performsRes, err := session.Run(ctx,
+		"MATCH (from:Paragraph {programId: $id})-[r:PERFORMS]->(to:Paragraph {programId: $id}) "+
+			"RETURN from.name AS fromParagraph, to.name AS toParagraph, r.isLoop AS isLoop, r.condition AS condition",
+		map[string]any{"id": programID})
+	if err != nil {
+		return nil, fmt.Errorf("paragraph flow query: %w", err)
+	}
+	for performsRes.Next(ctx) {
+		rec := performsRes.Record()
+		items = append(items, ParagraphFlowInfo{
+			FromParagraph: getStr(rec, "fromParagraph"),
+			ToParagraph:   getStr(rec, "toParagraph"),
+			Type:          "PERFORMS",
+			IsLoop:        getBool(rec, "isLoop"),
+			Condition:     getStr(rec, "condition"),
+		})
+	}
+
+	// PERFORMS_THRU relationships
+	thruRes, err := session.Run(ctx,
+		"MATCH (from:Paragraph {programId: $id})-[r:PERFORMS_THRU]->(to:Paragraph {programId: $id}) "+
+			"RETURN from.name AS fromParagraph, to.name AS toParagraph",
+		map[string]any{"id": programID})
+	if err != nil {
+		return nil, fmt.Errorf("paragraph thru query: %w", err)
+	}
+	for thruRes.Next(ctx) {
+		rec := thruRes.Record()
+		items = append(items, ParagraphFlowInfo{
+			FromParagraph: getStr(rec, "fromParagraph"),
+			ToParagraph:   getStr(rec, "toParagraph"),
+			Type:          "PERFORMS_THRU",
+		})
+	}
+
+	return items, nil
+}
+
+func (c *Client) GetDataFlow(ctx context.Context, programID string) ([]DataFlowInfo, error) {
+	session := c.NewSession(ctx)
+	defer session.Close(ctx)
+
+	result, err := session.Run(ctx,
+		"MATCH (from:DataItem {programId: $id})-[r:MOVES_TO]->(to:DataItem {programId: $id}) "+
+			"RETURN from.name AS fromItem, to.name AS toItem, r.context AS context",
+		map[string]any{"id": programID})
+	if err != nil {
+		return nil, fmt.Errorf("data flow query: %w", err)
+	}
+
+	var items []DataFlowInfo
+	for result.Next(ctx) {
+		rec := result.Record()
+		items = append(items, DataFlowInfo{
+			FromItem: getStr(rec, "fromItem"),
+			ToItem:   getStr(rec, "toItem"),
+			Context:  getStr(rec, "context"),
+		})
+	}
+	return items, nil
+}
+
+func (c *Client) GetDataHierarchy(ctx context.Context, programID string) ([]DataHierarchyInfo, error) {
+	session := c.NewSession(ctx)
+	defer session.Close(ctx)
+
+	var items []DataHierarchyInfo
+
+	// CHILD_OF relationships
+	childRes, err := session.Run(ctx,
+		"MATCH (child:DataItem {programId: $id})-[:CHILD_OF]->(parent:DataItem {programId: $id}) "+
+			"RETURN child.name AS name, child.level AS level, parent.name AS parent, parent.level AS parentLevel",
+		map[string]any{"id": programID})
+	if err != nil {
+		return nil, fmt.Errorf("data hierarchy query: %w", err)
+	}
+	for childRes.Next(ctx) {
+		rec := childRes.Record()
+		items = append(items, DataHierarchyInfo{
+			Name:        getStr(rec, "name"),
+			Level:       int(getInt64(rec, "level")),
+			Parent:      getStr(rec, "parent"),
+			ParentLevel: int(getInt64(rec, "parentLevel")),
+			Relation:    "CHILD_OF",
+		})
+	}
+
+	// REDEFINES relationships
+	redefRes, err := session.Run(ctx,
+		"MATCH (item:DataItem {programId: $id})-[:REDEFINES]->(target:DataItem {programId: $id}) "+
+			"RETURN item.name AS name, target.name AS redefines",
+		map[string]any{"id": programID})
+	if err != nil {
+		return nil, fmt.Errorf("redefines query: %w", err)
+	}
+	for redefRes.Next(ctx) {
+		rec := redefRes.Record()
+		items = append(items, DataHierarchyInfo{
+			Name:      getStr(rec, "name"),
+			Redefines: getStr(rec, "redefines"),
+			Relation:  "REDEFINES",
+		})
+	}
+
+	return items, nil
+}
+
 // Helper methods
+
+func (c *Client) queryCallInfoList(ctx context.Context, session neo4j.SessionWithContext, cypher string, params map[string]any) ([]CallInfo, error) {
+	result, err := session.Run(ctx, cypher, params)
+	if err != nil {
+		return nil, err
+	}
+
+	var items []CallInfo
+	for result.Next(ctx) {
+		rec := result.Record()
+		items = append(items, CallInfo{
+			ProgramID:     getStr(rec, "programId"),
+			IsDynamic:     getBool(rec, "isDynamic"),
+			ResolvedFrom:  getStr(rec, "resolvedFrom"),
+			FromParagraph: getStr(rec, "fromParagraph"),
+		})
+	}
+	return items, nil
+}
 
 func (c *Client) runCountQuery(ctx context.Context, session neo4j.SessionWithContext, cypher string, params map[string]any) (int, error) {
 	result, err := session.Run(ctx, cypher, params)
