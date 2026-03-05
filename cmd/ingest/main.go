@@ -87,13 +87,70 @@ var authStatusCmd = &cobra.Command{
 	},
 }
 
+var authModelsCmd = &cobra.Command{
+	Use:   "models",
+	Short: "List available Copilot models and show opus/sonnet selection",
+	RunE: func(cmd *cobra.Command, args []string) error {
+		cfg, err := config.Load()
+		if err != nil {
+			return fmt.Errorf("loading config: %w", err)
+		}
+		cfg.LLM.Provider = "copilot"
+
+		// Resolve token
+		if cfg.LLM.CopilotGitHubToken == "" {
+			if st, loadErr := auth.LoadToken(); loadErr == nil && st != nil {
+				cfg.LLM.CopilotGitHubToken = st.GitHubToken
+			}
+		}
+		if cfg.LLM.CopilotGitHubToken == "" {
+			fmt.Println("No Copilot token found. Run 'cobol-graph auth login' first.")
+			return nil
+		}
+
+		provider, err := llm.NewCopilotProvider(cfg)
+		if err != nil {
+			return fmt.Errorf("creating copilot provider: %w", err)
+		}
+		defer provider.Close()
+
+		ctx := cmd.Context()
+		models, err := provider.GetCopilotProvider().GetModels(ctx)
+		if err != nil {
+			return fmt.Errorf("fetching models: %w", err)
+		}
+
+		resolved, _ := llm.ResolveCopilotModels(ctx, provider, cfg.Claude.OpusModel, cfg.Claude.SonnetModel)
+
+		fmt.Printf("Available Copilot models (%d total):\n\n", len(models))
+		for _, m := range models {
+			marker := "  "
+			if resolved != nil {
+				if m.ID == resolved.OpusModel {
+					marker = "→ "
+				} else if m.ID == resolved.SonnetModel {
+					marker = "→ "
+				}
+			}
+			fmt.Printf("%s%-40s %s\n", marker, m.ID, m.Name)
+		}
+
+		fmt.Println()
+		if resolved != nil {
+			fmt.Printf("Selected opus:   %s\n", resolved.OpusModel)
+			fmt.Printf("Selected sonnet: %s\n", resolved.SonnetModel)
+		}
+		return nil
+	},
+}
+
 func init() {
 	ingestCmd.Flags().StringVar(&dir, "dir", "", "Root directory of COBOL source files")
 	ingestCmd.Flags().IntVar(&passFlag, "pass", 0, "Which pass to run: 0=all, 1=Pass 1, 2=Pass 2, 3=Pass 3")
 	_ = ingestCmd.MarkFlagRequired("dir")
 	rootCmd.AddCommand(ingestCmd)
 
-	authCmd.AddCommand(authLoginCmd, authLogoutCmd, authStatusCmd)
+	authCmd.AddCommand(authLoginCmd, authLogoutCmd, authStatusCmd, authModelsCmd)
 	rootCmd.AddCommand(authCmd)
 }
 
@@ -188,6 +245,22 @@ func runIngest(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("creating LLM provider: %w", err)
 	}
 	defer provider.Close()
+
+	// Auto-discover Claude model IDs from Copilot's model catalogue
+	if cfg.LLM.Provider == "copilot" {
+		resolved, err := llm.ResolveCopilotModels(ctx, provider, cfg.Claude.OpusModel, cfg.Claude.SonnetModel)
+		if err != nil {
+			logger.Warn("copilot model discovery failed, using config defaults", zap.Error(err))
+		} else {
+			cfg.Claude.OpusModel = resolved.OpusModel
+			cfg.Claude.SonnetModel = resolved.SonnetModel
+			logger.Info("resolved copilot models",
+				zap.String("opus", resolved.OpusModel),
+				zap.String("sonnet", resolved.SonnetModel),
+				zap.Int("claude_models_found", len(resolved.AllModels)),
+			)
+		}
+	}
 
 	claudeClient, err := claude.NewClient(provider, cfg.Claude, logger)
 	if err != nil {

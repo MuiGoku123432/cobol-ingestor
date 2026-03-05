@@ -66,8 +66,10 @@ func (p *CopilotProvider) Complete(ctx context.Context, req CompletionRequest) (
 	}
 
 	opts := types.GenerateOptions{
-		Messages: msgs,
-		Stream:   false,
+		Model:     model,
+		Messages:  msgs,
+		MaxTokens: req.MaxTokens,
+		Stream:    false,
 	}
 
 	stream, err := p.provider.GenerateChatCompletion(ctx, opts)
@@ -101,6 +103,11 @@ func (p *CopilotProvider) Complete(ctx context.Context, req CompletionRequest) (
 
 func (p *CopilotProvider) Name() string {
 	return "copilot"
+}
+
+// GetCopilotProvider returns the underlying copilot provider for model discovery.
+func (p *CopilotProvider) GetCopilotProvider() *copilot.CopilotProvider {
+	return p.provider
 }
 
 func (p *CopilotProvider) HealthCheck(ctx context.Context) error {
