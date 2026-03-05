@@ -9,11 +9,26 @@ import (
 )
 
 type Config struct {
-	LLM     LLMConfig
-	Claude  ClaudeConfig
-	Neo4j   Neo4jConfig
-	Ingest  IngestConfig
-	API     APIConfig
+	LLM       LLMConfig
+	Claude    ClaudeConfig
+	Neo4j     Neo4jConfig
+	Ingest    IngestConfig
+	API       APIConfig
+	MCP       MCPConfig
+	Modernize ModernizeConfig
+}
+
+type MCPConfig struct {
+	HTTPPort string // MCP_HTTP_PORT — if set, serve Streamable HTTP instead of stdio
+}
+
+type ModernizeConfig struct {
+	Port          string // MODERNIZE_PORT
+	MCPTransport  string // MCP_TRANSPORT: "command" or "http"
+	MCPServerBin  string // MCP_SERVER_BIN
+	MCPServerURL  string // MCP_SERVER_URL (for http transport)
+	ChatModel     string // MODERNIZE_CHAT_MODEL
+	ChatMaxTokens int    // MODERNIZE_CHAT_MAX_TOKENS
 }
 
 // LLMConfig selects which provider backend to use.
@@ -100,6 +115,17 @@ func Load() (*Config, error) {
 	viper.SetDefault("API_PORT", "8080")
 	viper.SetDefault("API_LOG_LEVEL", "info")
 
+	// MCP defaults
+	viper.SetDefault("MCP_HTTP_PORT", "")
+
+	// Modernize defaults
+	viper.SetDefault("MODERNIZE_PORT", "8081")
+	viper.SetDefault("MCP_TRANSPORT", "command")
+	viper.SetDefault("MCP_SERVER_BIN", "./bin/cobol-graph-mcp")
+	viper.SetDefault("MCP_SERVER_URL", "")
+	viper.SetDefault("MODERNIZE_CHAT_MODEL", "")
+	viper.SetDefault("MODERNIZE_CHAT_MAX_TOKENS", 16384)
+
 	llmTimeout, err := time.ParseDuration(viper.GetString("LLM_TIMEOUT"))
 	if err != nil {
 		llmTimeout = 180 * time.Second
@@ -146,6 +172,17 @@ func Load() (*Config, error) {
 		API: APIConfig{
 			Port:     viper.GetString("API_PORT"),
 			LogLevel: viper.GetString("API_LOG_LEVEL"),
+		},
+		MCP: MCPConfig{
+			HTTPPort: viper.GetString("MCP_HTTP_PORT"),
+		},
+		Modernize: ModernizeConfig{
+			Port:          viper.GetString("MODERNIZE_PORT"),
+			MCPTransport:  viper.GetString("MCP_TRANSPORT"),
+			MCPServerBin:  viper.GetString("MCP_SERVER_BIN"),
+			MCPServerURL:  viper.GetString("MCP_SERVER_URL"),
+			ChatModel:     viper.GetString("MODERNIZE_CHAT_MODEL"),
+			ChatMaxTokens: viper.GetInt("MODERNIZE_CHAT_MAX_TOKENS"),
 		},
 	}
 
