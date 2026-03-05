@@ -4,7 +4,6 @@ import (
 	"context"
 	"fmt"
 	"net/http"
-	"path/filepath"
 
 	"cobol-ingestor/internal/config"
 	mcpkg "cobol-ingestor/internal/mcp"
@@ -33,11 +32,6 @@ func main() {
 
 	if err := neo4jClient.VerifyConnectivity(ctx); err != nil {
 		logger.Fatal("neo4j connectivity check", zap.Error(err))
-	}
-
-	migrationsDir := filepath.Join("migrations", "neo4j")
-	if err := neo4jClient.RunMigrations(ctx, migrationsDir); err != nil {
-		logger.Fatal("running migrations", zap.Error(err))
 	}
 
 	server := mcpkg.NewServer(neo4jClient)
