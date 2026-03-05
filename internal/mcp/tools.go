@@ -2,6 +2,7 @@ package mcp
 
 import (
 	"context"
+	"encoding/json"
 
 	n4j "cobol-ingestor/internal/neo4j"
 
@@ -86,13 +87,10 @@ func registerListPrograms(s *mcp.Server, reader n4j.Reader) {
 }
 
 func registerGetCallChain(s *mcp.Server, reader n4j.Reader) {
-	type output struct {
-		Nodes []n4j.CallChainNode `json:"nodes"`
-	}
 	mcp.AddTool(s, &mcp.Tool{
 		Name:        "get_call_chain",
 		Description: "Trace the call chain for a program. Use direction=downstream to see what it calls, direction=upstream to see what calls it.",
-	}, func(ctx context.Context, req *mcp.CallToolRequest, input GetCallChainInput) (*mcp.CallToolResult, *output, error) {
+	}, func(ctx context.Context, req *mcp.CallToolRequest, input GetCallChainInput) (*mcp.CallToolResult, any, error) {
 		direction := input.Direction
 		if direction == "" {
 			direction = "downstream"
@@ -105,7 +103,13 @@ func registerGetCallChain(s *mcp.Server, reader n4j.Reader) {
 		if err != nil {
 			return nil, nil, err
 		}
-		return nil, &output{Nodes: nodes}, nil
+		b, err := json.Marshal(nodes)
+		if err != nil {
+			return nil, nil, err
+		}
+		return &mcp.CallToolResult{
+			Content: []mcp.Content{&mcp.TextContent{Text: string(b)}},
+		}, nil, nil
 	})
 }
 
