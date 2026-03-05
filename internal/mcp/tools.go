@@ -29,6 +29,18 @@ func toolError(msg string) *mcp.CallToolResult {
 	}
 }
 
+// marshalResult serializes v to JSON and returns it as a TextContent result.
+// Use this for output types that can't be schema-inferred (any, recursive types).
+func marshalResult(v any) (*mcp.CallToolResult, any, error) {
+	b, err := json.Marshal(v)
+	if err != nil {
+		return nil, nil, err
+	}
+	return &mcp.CallToolResult{
+		Content: []mcp.Content{&mcp.TextContent{Text: string(b)}},
+	}, nil, nil
+}
+
 func registerGetProgram(s *mcp.Server, reader n4j.Reader) {
 	mcp.AddTool(s, &mcp.Tool{
 		Name:        "get_program",
@@ -69,7 +81,7 @@ func registerListPrograms(s *mcp.Server, reader n4j.Reader) {
 	mcp.AddTool(s, &mcp.Tool{
 		Name:        "list_programs",
 		Description: "List all COBOL programs with pagination. Optionally filter by program ID substring.",
-	}, func(ctx context.Context, req *mcp.CallToolRequest, input ListProgramsInput) (*mcp.CallToolResult, *n4j.PagedResponse, error) {
+	}, func(ctx context.Context, req *mcp.CallToolRequest, input ListProgramsInput) (*mcp.CallToolResult, any, error) {
 		page := input.Page
 		if page <= 0 {
 			page = 1
@@ -82,7 +94,7 @@ func registerListPrograms(s *mcp.Server, reader n4j.Reader) {
 		if err != nil {
 			return nil, nil, err
 		}
-		return nil, result, nil
+		return marshalResult(result)
 	})
 }
 
@@ -103,13 +115,7 @@ func registerGetCallChain(s *mcp.Server, reader n4j.Reader) {
 		if err != nil {
 			return nil, nil, err
 		}
-		b, err := json.Marshal(nodes)
-		if err != nil {
-			return nil, nil, err
-		}
-		return &mcp.CallToolResult{
-			Content: []mcp.Content{&mcp.TextContent{Text: string(b)}},
-		}, nil, nil
+		return marshalResult(nodes)
 	})
 }
 
