@@ -37,10 +37,13 @@ type Neo4jConfig struct {
 }
 
 type IngestConfig struct {
-	RootDir    string
-	BatchSize  int
-	CacheDB    string
-	TokenLimit int
+	RootDir         string
+	BatchSize       int
+	CacheDB         string
+	TokenLimit      int
+	Pass2Workers    int
+	Pass2TokenLimit int
+	OverlapLines    int
 }
 
 type APIConfig struct {
@@ -74,6 +77,9 @@ func Load() (*Config, error) {
 	viper.SetDefault("INGEST_BATCH_SIZE", 500)
 	viper.SetDefault("INGEST_CACHE_DB", "./cache.sqlite")
 	viper.SetDefault("INGEST_TOKEN_LIMIT", 150000)
+	viper.SetDefault("PASS2_MAX_WORKERS", 3)
+	viper.SetDefault("PASS2_TOKEN_LIMIT", 100000)
+	viper.SetDefault("PASS2_OVERLAP_LINES", 20)
 
 	// API defaults
 	viper.SetDefault("API_PORT", "8080")
@@ -99,10 +105,13 @@ func Load() (*Config, error) {
 			Database: viper.GetString("NEO4J_DATABASE"),
 		},
 		Ingest: IngestConfig{
-			RootDir:    viper.GetString("INGEST_ROOT_DIR"),
-			BatchSize:  viper.GetInt("INGEST_BATCH_SIZE"),
-			CacheDB:    viper.GetString("INGEST_CACHE_DB"),
-			TokenLimit: viper.GetInt("INGEST_TOKEN_LIMIT"),
+			RootDir:         viper.GetString("INGEST_ROOT_DIR"),
+			BatchSize:       viper.GetInt("INGEST_BATCH_SIZE"),
+			CacheDB:         viper.GetString("INGEST_CACHE_DB"),
+			TokenLimit:      viper.GetInt("INGEST_TOKEN_LIMIT"),
+			Pass2Workers:    viper.GetInt("PASS2_MAX_WORKERS"),
+			Pass2TokenLimit: viper.GetInt("PASS2_TOKEN_LIMIT"),
+			OverlapLines:    viper.GetInt("PASS2_OVERLAP_LINES"),
 		},
 		API: APIConfig{
 			Port:     viper.GetString("API_PORT"),

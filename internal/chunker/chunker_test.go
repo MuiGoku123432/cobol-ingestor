@@ -1,0 +1,169 @@
+package chunker
+
+import (
+	"fmt"
+	"os"
+	"path/filepath"
+	"testing"
+
+	"cobol-ingestor/internal/graph"
+
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
+	"go.uber.org/zap"
+)
+
+func TestBuildCopybookIndex(t *testing.T) {
+	files := []graph.FileInfo{
+		{Path: "/src/CUSTFILE.CPY", Type: graph.FileTypeCopybook},
+		{Path: "/src/errhand.cpy", Type: graph.FileTypeCopybook},
+		{Path: "/src/MAIN.CBL", Type: graph.FileTypeCOBOL},
+	}
+
+	idx := BuildCopybookIndex(files)
+
+	assert.Equal(t, "/src/CUSTFILE.CPY", idx["CUSTFILE"])
+	assert.Equal(t, "/src/errhand.cpy", idx["ERRHAND"])
+	assert.Empty(t, idx["MAIN"]) // COBOL files excluded
+	assert.Len(t, idx, 2)
+}
+
+func TestInlineCopybooks(t *testing.T) {
+	dir := t.TempDir()
+
+	// Write a copybook file
+	cpyPath := filepath.Join(dir, "CUSTREC.CPY")
+	require.NoError(t, os.WriteFile(cpyPath, []byte("       01  CUSTOMER-RECORD.\n           05  CUST-ID PIC X(10)."), 0644))
+
+	index := CopybookIndex{"CUSTREC": cpyPath}
+
+	content := "       IDENTIFICATION DIVISION.\n       DATA DIVISION.\n       COPY CUSTREC.\n       PROCEDURE DIVISION."
+	result, err := InlineCopybooks(content, index, 10)
+	require.NoError(t, err)
+
+	assert.Contains(t, result, "*>> COPY CUSTREC INLINED BEGIN")
+	assert.Contains(t, result, "CUSTOMER-RECORD")
+	assert.Contains(t, result, "*>> COPY CUSTREC INLINED END")
+	assert.NotContains(t, result, "COPY CUSTREC.")
+}
+
+func TestInlineCopybooks_CircularReference(t *testing.T) {
+	dir := t.TempDir()
+
+	// Create two copybooks that reference each other
+	cpyA := filepath.Join(dir, "A.CPY")
+	cpyB := filepath.Join(dir, "B.CPY")
+	require.NoError(t, os.WriteFile(cpyA, []byte("       COPY B."), 0644))
+	require.NoError(t, os.WriteFile(cpyB, []byte("       COPY A."), 0644))
+
+	index := CopybookIndex{"A": cpyA, "B": cpyB}
+
+	// Should not hang or crash
+	result, err := InlineCopybooks("       COPY A.", index, 10)
+	require.NoError(t, err)
+	assert.NotEmpty(t, result)
+}
+
+func TestSplitDivisions(t *testing.T) {
+	content := `       IDENTIFICATION DIVISION.
+       PROGRAM-ID. TESTPROG.
+       ENVIRONMENT DIVISION.
+       INPUT-OUTPUT SECTION.
+       DATA DIVISION.
+       WORKING-STORAGE SECTION.
+       01 WS-VAR PIC X(10).
+       PROCEDURE DIVISION.
+       0000-MAIN.
+           DISPLAY "HELLO".
+           STOP RUN.`
+
+	divs := splitDivisions(content)
+
+	assert.Contains(t, divs, "IDENTIFICATION")
+	assert.Contains(t, divs, "ENVIRONMENT")
+	assert.Contains(t, divs, "DATA")
+	assert.Contains(t, divs, "PROCEDURE")
+	assert.Contains(t, divs["IDENTIFICATION"], "PROGRAM-ID")
+	assert.Contains(t, divs["PROCEDURE"], "0000-MAIN")
+}
+
+func TestSplitParagraphs(t *testing.T) {
+	procedure := `       PROCEDURE DIVISION.
+       0000-MAIN.
+           PERFORM 1000-INIT.
+           PERFORM 2000-PROCESS.
+           STOP RUN.
+       1000-INIT.
+           DISPLAY "INIT".
+       2000-PROCESS.
+           DISPLAY "PROCESS".`
+
+	paragraphs := splitParagraphs(procedure)
+
+	// Should have preamble + 3 paragraphs
+	names := make([]string, len(paragraphs))
+	for i, p := range paragraphs {
+		names[i] = p.name
+	}
+	assert.Contains(t, names, "0000-MAIN")
+	assert.Contains(t, names, "1000-INIT")
+	assert.Contains(t, names, "2000-PROCESS")
+}
+
+func TestChunkFilePass2_SingleChunk(t *testing.T) {
+	dir := t.TempDir()
+	filePath := filepath.Join(dir, "SMALL.CBL")
+
+	content := `       IDENTIFICATION DIVISION.
+       PROGRAM-ID. SMALL.
+       PROCEDURE DIVISION.
+       0000-MAIN.
+           DISPLAY "HELLO".
+           STOP RUN.`
+
+	require.NoError(t, os.WriteFile(filePath, []byte(content), 0644))
+
+	fi := graph.FileInfo{Path: filePath, Type: graph.FileTypeCOBOL}
+	opts := Pass2ChunkOptions{TokenLimit: 100000, OverlapLines: 20}
+
+	chunks, err := ChunkFilePass2(fi, opts, zap.NewNop())
+	require.NoError(t, err)
+
+	require.Len(t, chunks, 1)
+	assert.Equal(t, 0, chunks[0].Index)
+	assert.Equal(t, 1, chunks[0].Total)
+	assert.Equal(t, 2, chunks[0].Pass)
+}
+
+func TestChunkFilePass2_MultiChunk(t *testing.T) {
+	dir := t.TempDir()
+	filePath := filepath.Join(dir, "BIG.CBL")
+
+	// Generate a file that will exceed a small token limit
+	content := "       IDENTIFICATION DIVISION.\n       PROGRAM-ID. BIG.\n       DATA DIVISION.\n       WORKING-STORAGE SECTION.\n       01 WS-VAR PIC X.\n"
+	content += "       PROCEDURE DIVISION.\n"
+	for i := 0; i < 20; i++ {
+		content += fmt.Sprintf("       PARA-%04d.\n", i)
+		for j := 0; j < 10; j++ {
+			content += fmt.Sprintf("           DISPLAY \"LINE %d-%d\".\n", i, j)
+		}
+	}
+
+	require.NoError(t, os.WriteFile(filePath, []byte(content), 0644))
+
+	fi := graph.FileInfo{Path: filePath, Type: graph.FileTypeCOBOL}
+	// Set a very low token limit to force splitting
+	opts := Pass2ChunkOptions{TokenLimit: 500, OverlapLines: 5}
+
+	chunks, err := ChunkFilePass2(fi, opts, zap.NewNop())
+	require.NoError(t, err)
+
+	assert.Greater(t, len(chunks), 1, "should produce multiple chunks")
+	for i, c := range chunks {
+		assert.Equal(t, i, c.Index)
+		assert.Equal(t, len(chunks), c.Total)
+		assert.Equal(t, 2, c.Pass)
+		assert.Contains(t, c.Content, "IDENTIFICATION DIVISION") // preamble in each chunk
+	}
+}
+

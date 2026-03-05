@@ -1,0 +1,82 @@
+You are performing deep semantic analysis on a COBOL source file. Extract ALL relationships, data flows, and control flows.
+
+File: {{.FileName}}
+Chunk: {{.Index}} of {{.Total}}
+
+Return a single JSON object with these fields:
+
+{
+  "performs": [
+    {
+      "fromParagraph": "string — paragraph containing the PERFORM",
+      "toParagraph": "string — performed paragraph",
+      "thruParagraph": "string — THRU target or empty",
+      "isLoop": false,
+      "condition": "string — UNTIL/TIMES condition or empty"
+    }
+  ],
+  "dataFlows": [
+    {
+      "fromItem": "string — source data item",
+      "toItem": "string — destination data item",
+      "context": "string — paragraph or statement context"
+    }
+  ],
+  "fileOperations": [
+    {
+      "operation": "string — OPEN, CLOSE, READ, WRITE, REWRITE, DELETE, START",
+      "fileName": "string — FD name",
+      "paragraph": "string — paragraph where operation occurs"
+    }
+  ],
+  "sqlStatements": [
+    {
+      "type": "string — SELECT, INSERT, UPDATE, DELETE, DECLARE, etc.",
+      "text": "string — first 200 chars of the SQL"
+    }
+  ],
+  "cicsCommands": [
+    {
+      "command": "string — CICS command"
+    }
+  ],
+  "dataHierarchy": [
+    {
+      "name": "string — data item name",
+      "level": 1,
+      "parent": "string — parent item name or empty",
+      "picture": "string — PIC clause or empty",
+      "copybook": "string — originating copybook name or empty"
+    }
+  ],
+  "redefines": [
+    {
+      "item": "string — redefining item",
+      "redefines": "string — redefined item"
+    }
+  ],
+  "copybookDefinitions": [
+    {
+      "dataItem": "string — data item defined in copybook",
+      "copybook": "string — copybook name"
+    }
+  ],
+  "annotations": [
+    {
+      "paragraph": "string — paragraph name",
+      "description": "string — 1-2 sentence description of what this paragraph does",
+      "category": "string — INIT, VALIDATION, PROCESSING, IO, ERROR-HANDLING, CLEANUP, OTHER"
+    }
+  ]
+}
+
+Rules:
+- For PERFORM: capture PERFORM ... THRU as separate thruParagraph; PERFORM ... UNTIL/TIMES → isLoop=true with condition
+- For data flows: capture MOVE, COMPUTE, ADD, SUBTRACT, MULTIPLY, DIVIDE, STRING, UNSTRING operations
+- For file operations: only COBOL file I/O verbs (not SQL or CICS)
+- For data hierarchy: include ALL levels (01 through 88), set parent to immediate containing group item
+- For items inside inlined copybooks (between *>> COPY ... INLINED markers), set the copybook field
+- For redefines: capture both explicit REDEFINES and 66-level RENAMES
+- For annotations: provide a concise business-level description of each paragraph's purpose
+- If this is a partial chunk, extract only what is visible — do not fabricate content from other chunks
+- Return ONLY the JSON object, no markdown fences, no explanation

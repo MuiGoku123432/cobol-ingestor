@@ -8,43 +8,51 @@ import (
 	"text/template"
 	"time"
 
+	"cobol-ingestor/internal/chunker"
 	"cobol-ingestor/internal/config"
+	"cobol-ingestor/internal/llm"
 	"cobol-ingestor/prompts"
 
-	"github.com/anthropics/anthropic-sdk-go"
 	"go.uber.org/zap"
 	"golang.org/x/time/rate"
 )
 
-// Client wraps the Anthropic Claude SDK with retry and rate limiting.
+// Client wraps an LLM provider with retry, rate limiting, and prompt templates.
 type Client struct {
-	sdk        anthropic.Client
-	model      string
+	provider   llm.Provider
+	sonnetModel string
+	opusModel   string
 	maxRetries int
 	limiter    *rate.Limiter
 	logger     *zap.Logger
 	pass1Tmpl  *template.Template
+	pass2Tmpl  *template.Template
 }
 
-// NewClient creates a Claude API client from config.
-func NewClient(cfg config.ClaudeConfig, logger *zap.Logger) (*Client, error) {
-	sdk := anthropic.NewClient()
-
-	tmpl, err := template.New("pass1").Parse(prompts.Pass1Structural)
+// NewClient creates a Claude API client using an LLM provider.
+func NewClient(provider llm.Provider, cfg config.ClaudeConfig, logger *zap.Logger) (*Client, error) {
+	p1Tmpl, err := template.New("pass1").Parse(prompts.Pass1Structural)
 	if err != nil {
 		return nil, fmt.Errorf("parsing pass1 template: %w", err)
+	}
+
+	p2Tmpl, err := template.New("pass2").Parse(prompts.Pass2Deep)
+	if err != nil {
+		return nil, fmt.Errorf("parsing pass2 template: %w", err)
 	}
 
 	// Rate limit: ~50 requests per minute to stay within API limits
 	limiter := rate.NewLimiter(rate.Every(time.Second), 2)
 
 	return &Client{
-		sdk:        sdk,
-		model:      cfg.SonnetModel,
-		maxRetries: cfg.MaxRetries,
-		limiter:    limiter,
-		logger:     logger,
-		pass1Tmpl:  tmpl,
+		provider:    provider,
+		sonnetModel: cfg.SonnetModel,
+		opusModel:   cfg.OpusModel,
+		maxRetries:  cfg.MaxRetries,
+		limiter:     limiter,
+		logger:      logger,
+		pass1Tmpl:   p1Tmpl,
+		pass2Tmpl:   p2Tmpl,
 	}, nil
 }
 
@@ -58,27 +66,57 @@ func (c *Client) AnalyzeStructural(ctx context.Context, fileName, content string
 		return "", fmt.Errorf("rendering pass1 template: %w", err)
 	}
 
+	return c.completeWithRetry(ctx, llm.CompletionRequest{
+		Model:     c.sonnetModel,
+		MaxTokens: 4096,
+		Messages: []llm.Message{
+			{Role: llm.RoleSystem, Content: "You are a COBOL code analysis assistant. You extract structural information from COBOL source files and return it as JSON."},
+			{Role: llm.RoleUser, Content: userMsg.String() + "\n\n---\n\n" + content},
+		},
+	})
+}
+
+// AnalyzeDeep sends a chunk to Claude Opus for Pass 2 deep semantic analysis.
+// contextPreamble contains graph context from Pass 1 results.
+func (c *Client) AnalyzeDeep(ctx context.Context, chunk chunker.Chunk, contextPreamble string) (string, error) {
+	var userMsg bytes.Buffer
+	if err := c.pass2Tmpl.Execute(&userMsg, map[string]any{
+		"FileName": chunk.FileName,
+		"Index":    chunk.Index + 1,
+		"Total":    chunk.Total,
+	}); err != nil {
+		return "", fmt.Errorf("rendering pass2 template: %w", err)
+	}
+
+	userContent := userMsg.String()
+	if contextPreamble != "" {
+		userContent = contextPreamble + "\n\n" + userContent
+	}
+	userContent += "\n\n---\n\n" + chunk.Content
+
+	return c.completeWithRetry(ctx, llm.CompletionRequest{
+		Model:     c.opusModel,
+		MaxTokens: 10000,
+		Messages: []llm.Message{
+			{Role: llm.RoleSystem, Content: "You are an expert COBOL analyst performing deep semantic analysis. You extract detailed relationships, data flows, and control flows from COBOL source code and return structured JSON."},
+			{Role: llm.RoleUser, Content: userContent},
+		},
+	})
+}
+
+// completeWithRetry calls the LLM provider with exponential backoff retries.
+func (c *Client) completeWithRetry(ctx context.Context, req llm.CompletionRequest) (string, error) {
 	var lastErr error
 	for attempt := range c.maxRetries {
 		if err := c.limiter.Wait(ctx); err != nil {
 			return "", fmt.Errorf("rate limiter: %w", err)
 		}
 
-		resp, err := c.sdk.Messages.New(ctx, anthropic.MessageNewParams{
-			Model:     anthropic.Model(c.model),
-			MaxTokens: 4096,
-			System: []anthropic.TextBlockParam{
-				{Text: "You are a COBOL code analysis assistant. You extract structural information from COBOL source files and return it as JSON."},
-			},
-			Messages: []anthropic.MessageParam{
-				anthropic.NewUserMessage(
-					anthropic.NewTextBlock(userMsg.String()+"\n\n---\n\n"+content),
-				),
-			},
-		})
+		resp, err := c.provider.Complete(ctx, req)
 		if err != nil {
 			lastErr = err
-			c.logger.Warn("claude API call failed, retrying",
+			c.logger.Warn("LLM API call failed, retrying",
+				zap.String("provider", c.provider.Name()),
 				zap.Int("attempt", attempt+1),
 				zap.Error(err),
 			)
@@ -91,15 +129,12 @@ func (c *Client) AnalyzeStructural(ctx context.Context, fileName, content string
 			continue
 		}
 
-		// Extract text from response
-		for _, block := range resp.Content {
-			if block.Type == "text" {
-				return block.Text, nil
-			}
+		if resp.Content == "" {
+			return "", fmt.Errorf("no text content in LLM response")
 		}
 
-		return "", fmt.Errorf("no text content in claude response")
+		return resp.Content, nil
 	}
 
-	return "", fmt.Errorf("claude API failed after %d retries: %w", c.maxRetries, lastErr)
+	return "", fmt.Errorf("LLM API failed after %d retries: %w", c.maxRetries, lastErr)
 }

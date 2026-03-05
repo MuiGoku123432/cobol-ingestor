@@ -40,3 +40,48 @@ func TestCacheLifecycle(t *testing.T) {
 	require.NoError(t, err)
 	assert.False(t, changed)
 }
+
+func TestPassCacheLifecycle(t *testing.T) {
+	dbPath := filepath.Join(t.TempDir(), "test_pass.sqlite")
+
+	c, err := New(dbPath)
+	require.NoError(t, err)
+	defer c.Close()
+
+	// New file should be changed for both passes
+	changed, err := c.IsChangedForPass("/path/to/file.cbl", "abc123", 1)
+	require.NoError(t, err)
+	assert.True(t, changed)
+
+	changed, err = c.IsChangedForPass("/path/to/file.cbl", "abc123", 2)
+	require.NoError(t, err)
+	assert.True(t, changed)
+
+	// Mark processed for pass 1
+	require.NoError(t, c.MarkProcessedForPass("/path/to/file.cbl", "abc123", 1))
+
+	// Pass 1 → not changed, Pass 2 → still changed
+	changed, err = c.IsChangedForPass("/path/to/file.cbl", "abc123", 1)
+	require.NoError(t, err)
+	assert.False(t, changed)
+
+	changed, err = c.IsChangedForPass("/path/to/file.cbl", "abc123", 2)
+	require.NoError(t, err)
+	assert.True(t, changed)
+
+	// Mark processed for pass 2
+	require.NoError(t, c.MarkProcessedForPass("/path/to/file.cbl", "abc123", 2))
+
+	changed, err = c.IsChangedForPass("/path/to/file.cbl", "abc123", 2)
+	require.NoError(t, err)
+	assert.False(t, changed)
+
+	// Different hash → changed for both passes
+	changed, err = c.IsChangedForPass("/path/to/file.cbl", "newHash", 1)
+	require.NoError(t, err)
+	assert.True(t, changed)
+
+	changed, err = c.IsChangedForPass("/path/to/file.cbl", "newHash", 2)
+	require.NoError(t, err)
+	assert.True(t, changed)
+}

@@ -290,3 +290,156 @@ func groupRelationships(rels []graph.Relationship) map[relGroupKey][]graph.Relat
 	}
 	return groups
 }
+
+// WritePass2Result writes Pass 2 deep semantic analysis results to Neo4j.
+func (w *BatchWriter) WritePass2Result(ctx context.Context, result *graph.Pass2Result) error {
+	programID := result.ProgramID
+	var rels []graph.Relationship
+
+	// PERFORMS relationships
+	for _, p := range result.Performs {
+		rel := graph.Relationship{
+			Type:      graph.RelPerforms,
+			FromLabel: "Paragraph",
+			FromKey:   p.FromParagraph,
+			ToLabel:   "Paragraph",
+			ToKey:     p.ToParagraph,
+			Properties: map[string]any{
+				"isLoop":    p.IsLoop,
+				"condition": p.Condition,
+			},
+		}
+		rels = append(rels, rel)
+
+		if p.ThruParagraph != "" {
+			rels = append(rels, graph.Relationship{
+				Type:      graph.RelPerformsThru,
+				FromLabel: "Paragraph",
+				FromKey:   p.FromParagraph,
+				ToLabel:   "Paragraph",
+				ToKey:     p.ThruParagraph,
+			})
+		}
+	}
+
+	// MOVES_TO (data flow) relationships
+	for _, d := range result.DataFlows {
+		rels = append(rels, graph.Relationship{
+			Type:      graph.RelMovesTo,
+			FromLabel: "DataItem",
+			FromKey:   d.FromItem,
+			ToLabel:   "DataItem",
+			ToKey:     d.ToItem,
+			Properties: map[string]any{
+				"context": d.Context,
+			},
+		})
+	}
+
+	// File operation relationships (READS/WRITES)
+	for _, f := range result.FileOps {
+		var relType graph.RelType
+		switch f.Operation {
+		case "READ", "START":
+			relType = graph.RelReads
+		default:
+			relType = graph.RelWrites
+		}
+		rels = append(rels, graph.Relationship{
+			Type:      relType,
+			FromLabel: "Program",
+			FromKey:   programID,
+			ToLabel:   "File",
+			ToKey:     f.FileName,
+			Properties: map[string]any{
+				"operation": f.Operation,
+				"paragraph": f.Paragraph,
+			},
+		})
+	}
+
+	// Data hierarchy — CHILD_OF relationships
+	for _, d := range result.DataHierarchy {
+		if d.Parent != "" {
+			rels = append(rels, graph.Relationship{
+				Type:      graph.RelChildOf,
+				FromLabel: "DataItem",
+				FromKey:   d.Name,
+				ToLabel:   "DataItem",
+				ToKey:     d.Parent,
+			})
+		}
+	}
+
+	// REDEFINES relationships
+	for _, r := range result.Redefines {
+		rels = append(rels, graph.Relationship{
+			Type:      graph.RelRedefines,
+			FromLabel: "DataItem",
+			FromKey:   r.Item,
+			ToLabel:   "DataItem",
+			ToKey:     r.Redefines,
+		})
+	}
+
+	// DEFINED_IN (copybook definitions)
+	for _, c := range result.CopybookDefs {
+		rels = append(rels, graph.Relationship{
+			Type:      graph.RelDefinedIn,
+			FromLabel: "DataItem",
+			FromKey:   c.DataItem,
+			ToLabel:   "Copybook",
+			ToKey:     c.Copybook,
+		})
+	}
+
+	// Write relationships using existing grouped pattern
+	grouped := groupRelationships(rels)
+	for key, groupRels := range grouped {
+		rows := make([]map[string]any, len(groupRels))
+		for i, r := range groupRels {
+			props := r.Properties
+			if props == nil {
+				props = map[string]any{}
+			}
+			rows[i] = map[string]any{
+				"fromKey": r.FromKey,
+				"toKey":   r.ToKey,
+				"props":   props,
+			}
+		}
+		if err := w.WriteRelationships(ctx, string(key.relType), key.fromLabel, mergeKeyForLabel(key.fromLabel), key.toLabel, mergeKeyForLabel(key.toLabel), rows); err != nil {
+			return err
+		}
+	}
+
+	// Update Paragraph nodes with annotations (description + category)
+	if len(result.Annotations) > 0 {
+		for _, a := range result.Annotations {
+			if a.Paragraph == "" {
+				continue
+			}
+			session := w.client.NewSession(ctx)
+			_, err := session.ExecuteWrite(ctx, func(tx neo4j.ManagedTransaction) (any, error) {
+				_, err := tx.Run(ctx,
+					"MATCH (p:Paragraph {name: $name}) SET p.description = $desc, p.category = $cat",
+					map[string]any{
+						"name": a.Paragraph,
+						"desc": a.Description,
+						"cat":  a.Category,
+					},
+				)
+				return nil, err
+			})
+			session.Close(ctx)
+			if err != nil {
+				w.logger.Warn("failed to update paragraph annotation",
+					zap.String("paragraph", a.Paragraph),
+					zap.Error(err),
+				)
+			}
+		}
+	}
+
+	return nil
+}

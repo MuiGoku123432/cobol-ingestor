@@ -206,6 +206,155 @@ func stripMarkdownFences(s string) string {
 	return s
 }
 
+// Pass2JSON matches the JSON schema returned by Claude for Pass 2.
+type Pass2JSON struct {
+	Performs            []PerformJSON       `json:"performs"`
+	DataFlows           []DataFlowJSON      `json:"dataFlows"`
+	FileOperations      []FileOpJSON        `json:"fileOperations"`
+	SQLStatements       []SQLJSON           `json:"sqlStatements"`
+	CICSCommands        []CICSJSON          `json:"cicsCommands"`
+	DataHierarchy       []DataHierarchyJSON `json:"dataHierarchy"`
+	Redefines           []RedefineJSON      `json:"redefines"`
+	CopybookDefinitions []CopybookDefJSON   `json:"copybookDefinitions"`
+	Annotations         []AnnotationJSON    `json:"annotations"`
+}
+
+type PerformJSON struct {
+	FromParagraph string `json:"fromParagraph"`
+	ToParagraph   string `json:"toParagraph"`
+	ThruParagraph string `json:"thruParagraph"`
+	IsLoop        bool   `json:"isLoop"`
+	Condition     string `json:"condition"`
+}
+
+type DataFlowJSON struct {
+	FromItem string `json:"fromItem"`
+	ToItem   string `json:"toItem"`
+	Context  string `json:"context"`
+}
+
+type FileOpJSON struct {
+	Operation string `json:"operation"`
+	FileName  string `json:"fileName"`
+	Paragraph string `json:"paragraph"`
+}
+
+type DataHierarchyJSON struct {
+	Name     string `json:"name"`
+	Level    int    `json:"level"`
+	Parent   string `json:"parent"`
+	Picture  string `json:"picture"`
+	Copybook string `json:"copybook"`
+}
+
+type RedefineJSON struct {
+	Item      string `json:"item"`
+	Redefines string `json:"redefines"`
+}
+
+type CopybookDefJSON struct {
+	DataItem string `json:"dataItem"`
+	Copybook string `json:"copybook"`
+}
+
+type AnnotationJSON struct {
+	Paragraph   string `json:"paragraph"`
+	Description string `json:"description"`
+	Category    string `json:"category"`
+}
+
+// ParsePass2Response parses Claude's JSON response into a Pass2Result.
+func ParsePass2Response(jsonStr, sourceFile, programID string) (*graph.Pass2Result, error) {
+	cleaned := stripMarkdownFences(jsonStr)
+
+	var raw Pass2JSON
+	if err := json.Unmarshal([]byte(cleaned), &raw); err != nil {
+		return nil, fmt.Errorf("parsing pass2 JSON: %w\nraw response: %.500s", err, cleaned)
+	}
+
+	result := &graph.Pass2Result{
+		SourceFile: sourceFile,
+		ProgramID:  programID,
+	}
+
+	for _, p := range raw.Performs {
+		result.Performs = append(result.Performs, graph.PerformRelation{
+			FromParagraph: p.FromParagraph,
+			ToParagraph:   p.ToParagraph,
+			ThruParagraph: p.ThruParagraph,
+			IsLoop:        p.IsLoop,
+			Condition:     p.Condition,
+		})
+	}
+
+	for _, d := range raw.DataFlows {
+		result.DataFlows = append(result.DataFlows, graph.DataFlowRelation{
+			FromItem: d.FromItem,
+			ToItem:   d.ToItem,
+			Context:  d.Context,
+		})
+	}
+
+	for _, f := range raw.FileOperations {
+		result.FileOps = append(result.FileOps, graph.FileOpRelation{
+			Operation: f.Operation,
+			FileName:  f.FileName,
+			Paragraph: f.Paragraph,
+		})
+	}
+
+	for _, s := range raw.SQLStatements {
+		result.SQLDetails = append(result.SQLDetails, graph.SQLStatement{
+			ID:        newID(),
+			Text:      s.Text,
+			ProgramID: programID,
+			Type:      s.Type,
+		})
+	}
+
+	for _, c := range raw.CICSCommands {
+		result.CICSDetails = append(result.CICSDetails, graph.CICSTransaction{
+			ID:        newID(),
+			Command:   c.Command,
+			ProgramID: programID,
+		})
+	}
+
+	for _, d := range raw.DataHierarchy {
+		result.DataHierarchy = append(result.DataHierarchy, graph.DataHierarchyItem{
+			Name:     d.Name,
+			Level:    d.Level,
+			Parent:   d.Parent,
+			Picture:  d.Picture,
+			Copybook: d.Copybook,
+		})
+	}
+
+	for _, r := range raw.Redefines {
+		result.Redefines = append(result.Redefines, graph.RedefineRelation{
+			Item:      r.Item,
+			Redefines: r.Redefines,
+		})
+	}
+
+	for _, c := range raw.CopybookDefinitions {
+		result.CopybookDefs = append(result.CopybookDefs, graph.CopybookDefRelation{
+			DataItem: c.DataItem,
+			Copybook: c.Copybook,
+		})
+	}
+
+	for _, a := range raw.Annotations {
+		result.Annotations = append(result.Annotations, graph.Annotation{
+			Paragraph:   a.Paragraph,
+			Description: a.Description,
+			Category:    a.Category,
+		})
+	}
+
+	return result, nil
+}
+
 func newID() string {
 	return uuid.New().String()
 }

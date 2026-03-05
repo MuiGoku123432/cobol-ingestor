@@ -143,3 +143,69 @@ type Pass1Result struct {
 	CICSTxns      []CICSTransaction
 	Relationships []Relationship
 }
+
+// Pass2Result aggregates deep semantic analysis from a single file's Pass 2 analysis.
+type Pass2Result struct {
+	SourceFile    string
+	ProgramID     string
+	Performs      []PerformRelation
+	DataFlows     []DataFlowRelation
+	FileOps       []FileOpRelation
+	SQLDetails    []SQLStatement
+	CICSDetails   []CICSTransaction
+	DataHierarchy []DataHierarchyItem
+	Redefines     []RedefineRelation
+	CopybookDefs  []CopybookDefRelation
+	Annotations   []Annotation
+}
+
+// PerformRelation represents a PERFORM control flow.
+type PerformRelation struct {
+	FromParagraph string
+	ToParagraph   string
+	ThruParagraph string
+	IsLoop        bool
+	Condition     string
+}
+
+// DataFlowRelation represents a MOVE or data transfer.
+type DataFlowRelation struct {
+	FromItem string
+	ToItem   string
+	Context  string
+}
+
+// FileOpRelation represents a file I/O operation.
+type FileOpRelation struct {
+	Operation string
+	FileName  string
+	Paragraph string
+}
+
+// DataHierarchyItem represents a data item in the DATA DIVISION hierarchy.
+type DataHierarchyItem struct {
+	Name     string
+	Level    int
+	Parent   string
+	Picture  string
+	Copybook string
+}
+
+// RedefineRelation represents a REDEFINES clause.
+type RedefineRelation struct {
+	Item      string
+	Redefines string
+}
+
+// CopybookDefRelation links a data item to its defining copybook.
+type CopybookDefRelation struct {
+	DataItem string
+	Copybook string
+}
+
+// Annotation describes a paragraph's purpose.
+type Annotation struct {
+	Paragraph   string
+	Description string
+	Category    string
+}
