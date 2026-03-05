@@ -19,15 +19,18 @@ import (
 
 // Client wraps an LLM provider with retry, rate limiting, and prompt templates.
 type Client struct {
-	provider    llm.Provider
-	sonnetModel string
-	opusModel   string
-	maxRetries  int
-	limiter     *rate.Limiter
-	logger      *zap.Logger
-	pass1Tmpl   *template.Template
-	pass2Tmpl   *template.Template
-	pass3Tmpl   *template.Template
+	provider       llm.Provider
+	sonnetModel    string
+	opusModel      string
+	maxRetries     int
+	pass1MaxTokens int
+	pass2MaxTokens int
+	pass3MaxTokens int
+	limiter        *rate.Limiter
+	logger         *zap.Logger
+	pass1Tmpl      *template.Template
+	pass2Tmpl      *template.Template
+	pass3Tmpl      *template.Template
 }
 
 // NewClient creates a Claude API client using an LLM provider.
@@ -51,11 +54,14 @@ func NewClient(provider llm.Provider, cfg config.ClaudeConfig, logger *zap.Logge
 	limiter := rate.NewLimiter(rate.Every(time.Second), 2)
 
 	return &Client{
-		provider:    provider,
-		sonnetModel: cfg.SonnetModel,
-		opusModel:   cfg.OpusModel,
-		maxRetries:  cfg.MaxRetries,
-		limiter:     limiter,
+		provider:       provider,
+		sonnetModel:    cfg.SonnetModel,
+		opusModel:      cfg.OpusModel,
+		maxRetries:     cfg.MaxRetries,
+		pass1MaxTokens: cfg.Pass1MaxTokens,
+		pass2MaxTokens: cfg.Pass2MaxTokens,
+		pass3MaxTokens: cfg.Pass3MaxTokens,
+		limiter:        limiter,
 		logger:      logger,
 		pass1Tmpl:   p1Tmpl,
 		pass2Tmpl:   p2Tmpl,
@@ -75,7 +81,7 @@ func (c *Client) AnalyzeStructural(ctx context.Context, fileName, content string
 
 	return c.completeWithRetry(ctx, llm.CompletionRequest{
 		Model:     c.sonnetModel,
-		MaxTokens: 4096,
+		MaxTokens: c.pass1MaxTokens,
 		Messages: []llm.Message{
 			{Role: llm.RoleSystem, Content: "You are a COBOL code analysis assistant. You extract structural information from COBOL source files and return it as JSON."},
 			{Role: llm.RoleUser, Content: userMsg.String() + "\n\n---\n\n" + content},
@@ -103,7 +109,7 @@ func (c *Client) AnalyzeDeep(ctx context.Context, chunk chunker.Chunk, contextPr
 
 	return c.completeWithRetry(ctx, llm.CompletionRequest{
 		Model:     c.opusModel,
-		MaxTokens: 10000,
+		MaxTokens: c.pass2MaxTokens,
 		Messages: []llm.Message{
 			{Role: llm.RoleSystem, Content: "You are an expert COBOL analyst performing deep semantic analysis. You extract detailed relationships, data flows, and control flows from COBOL source code and return structured JSON."},
 			{Role: llm.RoleUser, Content: userContent},
@@ -122,7 +128,7 @@ func (c *Client) AnalyzeCrossCutting(ctx context.Context, graphSlice string) (st
 
 	return c.completeWithRetry(ctx, llm.CompletionRequest{
 		Model:     c.opusModel,
-		MaxTokens: 16000,
+		MaxTokens: c.pass3MaxTokens,
 		Messages: []llm.Message{
 			{Role: llm.RoleSystem, Content: "You are an expert COBOL systems analyst. You analyze program relationships to identify business domains, dead code, and risk factors. Return structured JSON."},
 			{Role: llm.RoleUser, Content: userContent},

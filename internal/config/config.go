@@ -28,10 +28,13 @@ type LLMConfig struct {
 
 // ClaudeConfig holds model names and concurrency settings (used by both providers).
 type ClaudeConfig struct {
-	OpusModel   string
-	SonnetModel string
-	MaxWorkers  int
-	MaxRetries  int
+	OpusModel        string
+	SonnetModel      string
+	MaxWorkers       int
+	MaxRetries       int
+	Pass1MaxTokens   int
+	Pass2MaxTokens   int
+	Pass3MaxTokens   int
 }
 
 type Neo4jConfig struct {
@@ -74,6 +77,9 @@ func Load() (*Config, error) {
 	viper.SetDefault("CLAUDE_SONNET_MODEL", "claude-sonnet-4-5-20250929")
 	viper.SetDefault("CLAUDE_MAX_WORKERS", 5)
 	viper.SetDefault("CLAUDE_MAX_RETRIES", 3)
+	viper.SetDefault("CLAUDE_PASS1_MAX_TOKENS", 4096)
+	viper.SetDefault("CLAUDE_PASS2_MAX_TOKENS", 10000)
+	viper.SetDefault("CLAUDE_PASS3_MAX_TOKENS", 16000)
 
 	// Neo4j defaults
 	viper.SetDefault("NEO4J_URI", "bolt://localhost:7687")
@@ -113,10 +119,13 @@ func Load() (*Config, error) {
 			ResponseHeaderTimeout: llmResponseHeaderTimeout,
 		},
 		Claude: ClaudeConfig{
-			OpusModel:   viper.GetString("CLAUDE_OPUS_MODEL"),
-			SonnetModel: viper.GetString("CLAUDE_SONNET_MODEL"),
-			MaxWorkers:  viper.GetInt("CLAUDE_MAX_WORKERS"),
-			MaxRetries:  viper.GetInt("CLAUDE_MAX_RETRIES"),
+			OpusModel:      viper.GetString("CLAUDE_OPUS_MODEL"),
+			SonnetModel:    viper.GetString("CLAUDE_SONNET_MODEL"),
+			MaxWorkers:     viper.GetInt("CLAUDE_MAX_WORKERS"),
+			MaxRetries:     viper.GetInt("CLAUDE_MAX_RETRIES"),
+			Pass1MaxTokens: viper.GetInt("CLAUDE_PASS1_MAX_TOKENS"),
+			Pass2MaxTokens: viper.GetInt("CLAUDE_PASS2_MAX_TOKENS"),
+			Pass3MaxTokens: viper.GetInt("CLAUDE_PASS3_MAX_TOKENS"),
 		},
 		Neo4j: Neo4jConfig{
 			URI:      viper.GetString("NEO4J_URI"),
