@@ -100,7 +100,7 @@ func checkAccessToken(ctx context.Context, deviceCode string) (string, error) {
 	}
 
 	if tokenResp.Error != "" {
-		return "", fmt.Errorf(tokenResp.Error)
+		return "", fmt.Errorf("oauth error: %s", tokenResp.Error)
 	}
 
 	if tokenResp.AccessToken == "" {
