@@ -13,19 +13,20 @@ type StoredToken struct {
 	ObtainedAt  time.Time `json:"obtained_at"`
 }
 
-func configDir() string {
+// configDirFn is a variable so tests can override the config directory.
+var configDirFn = func() string {
 	home, _ := os.UserHomeDir()
 	return filepath.Join(home, ".cobol-graph")
 }
 
 // TokenFilePath returns the path to the cached token file.
 func TokenFilePath() string {
-	return filepath.Join(configDir(), "copilot-token.json")
+	return filepath.Join(configDirFn(), "copilot-token.json")
 }
 
 // SaveToken persists a GitHub OAuth token to disk.
 func SaveToken(token string) error {
-	dir := configDir()
+	dir := configDirFn()
 	if err := os.MkdirAll(dir, 0700); err != nil {
 		return err
 	}

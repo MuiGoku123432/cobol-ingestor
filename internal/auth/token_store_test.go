@@ -10,11 +10,10 @@ import (
 )
 
 func TestSaveLoadDeleteToken(t *testing.T) {
-	// Override configDir to use a temp directory
 	tmpDir := t.TempDir()
-	origConfigDir := configDir
+	origFn := configDirFn
 	configDirFn = func() string { return tmpDir }
-	defer func() { configDirFn = origConfigDir }()
+	defer func() { configDirFn = origFn }()
 
 	// Initially no token
 	st, err := LoadToken()
