@@ -6,18 +6,27 @@ import (
 )
 
 type Config struct {
+	LLM     LLMConfig
 	Claude  ClaudeConfig
 	Neo4j   Neo4jConfig
 	Ingest  IngestConfig
 	API     APIConfig
 }
 
+// LLMConfig selects which provider backend to use.
+type LLMConfig struct {
+	Provider           string // "anthropic" or "copilot"
+	APIKey             string // ANTHROPIC_API_KEY or GitHub token depending on provider
+	CopilotGitHubToken string // GitHub personal access token for Copilot auth
+	CopilotAccountType string // "individual", "business", or "enterprise"
+}
+
+// ClaudeConfig holds model names and concurrency settings (used by both providers).
 type ClaudeConfig struct {
-	APIKey     string
-	OpusModel  string
+	OpusModel   string
 	SonnetModel string
-	MaxWorkers int
-	MaxRetries int
+	MaxWorkers  int
+	MaxRetries  int
 }
 
 type Neo4jConfig struct {
@@ -45,7 +54,11 @@ func Load() (*Config, error) {
 
 	viper.AutomaticEnv()
 
-	// Claude defaults
+	// LLM provider defaults
+	viper.SetDefault("LLM_PROVIDER", "anthropic")
+	viper.SetDefault("COPILOT_ACCOUNT_TYPE", "individual")
+
+	// Claude model defaults (used by both providers)
 	viper.SetDefault("CLAUDE_OPUS_MODEL", "claude-opus-4-6")
 	viper.SetDefault("CLAUDE_SONNET_MODEL", "claude-sonnet-4-5-20250929")
 	viper.SetDefault("CLAUDE_MAX_WORKERS", 5)
@@ -67,8 +80,13 @@ func Load() (*Config, error) {
 	viper.SetDefault("API_LOG_LEVEL", "info")
 
 	cfg := &Config{
+		LLM: LLMConfig{
+			Provider:           viper.GetString("LLM_PROVIDER"),
+			APIKey:             viper.GetString("ANTHROPIC_API_KEY"),
+			CopilotGitHubToken: viper.GetString("COPILOT_GITHUB_TOKEN"),
+			CopilotAccountType: viper.GetString("COPILOT_ACCOUNT_TYPE"),
+		},
 		Claude: ClaudeConfig{
-			APIKey:      viper.GetString("ANTHROPIC_API_KEY"),
 			OpusModel:   viper.GetString("CLAUDE_OPUS_MODEL"),
 			SonnetModel: viper.GetString("CLAUDE_SONNET_MODEL"),
 			MaxWorkers:  viper.GetInt("CLAUDE_MAX_WORKERS"),

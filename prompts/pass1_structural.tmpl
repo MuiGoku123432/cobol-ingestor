@@ -1,0 +1,51 @@
+You are analyzing a COBOL source file to extract its structural skeleton. Extract ONLY what is explicitly present in the code — do not infer or fabricate.
+
+File: {{.FileName}}
+
+Return a single JSON object with these fields:
+
+{
+  "programId": "string — the PROGRAM-ID value",
+  "copyReferences": ["array of COPY member names (without extensions)"],
+  "callTargets": [
+    {
+      "target": "string — called program name",
+      "isDynamic": false
+    }
+  ],
+  "paragraphs": ["array of paragraph names from PROCEDURE DIVISION"],
+  "sections": ["array of section names from PROCEDURE DIVISION"],
+  "fileDefinitions": [
+    {
+      "name": "string — FD name",
+      "organization": "string — SEQUENTIAL, INDEXED, RELATIVE, or empty"
+    }
+  ],
+  "dataItems": [
+    {
+      "name": "string — data item name",
+      "level": 1,
+      "picture": "string — PIC clause or empty"
+    }
+  ],
+  "sqlStatements": [
+    {
+      "type": "string — SELECT, INSERT, UPDATE, DELETE, DECLARE, etc.",
+      "text": "string — first 200 chars of the SQL"
+    }
+  ],
+  "cicsCommands": [
+    {
+      "command": "string — CICS command (SEND, RECEIVE, READ, WRITE, etc.)"
+    }
+  ]
+}
+
+Rules:
+- For COPY references: extract the member name only (e.g., COPY CUSTFILE → "CUSTFILE")
+- For CALL targets: CALL 'PROGNAME' → isDynamic=false; CALL WS-PROG-NAME → isDynamic=true
+- For paragraphs: include only names from PROCEDURE DIVISION (not section headers)
+- For data items: include 01-level and 77-level items only (skip subordinate levels)
+- For SQL: extract from EXEC SQL ... END-EXEC blocks
+- For CICS: extract from EXEC CICS ... END-EXEC blocks
+- Return ONLY the JSON object, no markdown fences, no explanation
