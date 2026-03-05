@@ -45,10 +45,13 @@ func registerGetProgram(s *mcp.Server, reader n4j.Reader) {
 }
 
 func registerSearchPrograms(s *mcp.Server, reader n4j.Reader) {
+	type output struct {
+		Results []n4j.SearchResult `json:"results"`
+	}
 	mcp.AddTool(s, &mcp.Tool{
 		Name:        "search_programs",
 		Description: "Full-text search across programs and paragraphs. Returns scored results.",
-	}, func(ctx context.Context, req *mcp.CallToolRequest, input SearchProgramsInput) (*mcp.CallToolResult, []n4j.SearchResult, error) {
+	}, func(ctx context.Context, req *mcp.CallToolRequest, input SearchProgramsInput) (*mcp.CallToolResult, *output, error) {
 		limit := input.Limit
 		if limit <= 0 {
 			limit = 20
@@ -57,7 +60,7 @@ func registerSearchPrograms(s *mcp.Server, reader n4j.Reader) {
 		if err != nil {
 			return nil, nil, err
 		}
-		return nil, results, nil
+		return nil, &output{Results: results}, nil
 	})
 }
 
@@ -83,10 +86,13 @@ func registerListPrograms(s *mcp.Server, reader n4j.Reader) {
 }
 
 func registerGetCallChain(s *mcp.Server, reader n4j.Reader) {
+	type output struct {
+		Nodes []n4j.CallChainNode `json:"nodes"`
+	}
 	mcp.AddTool(s, &mcp.Tool{
 		Name:        "get_call_chain",
 		Description: "Trace the call chain for a program. Use direction=downstream to see what it calls, direction=upstream to see what calls it.",
-	}, func(ctx context.Context, req *mcp.CallToolRequest, input GetCallChainInput) (*mcp.CallToolResult, []n4j.CallChainNode, error) {
+	}, func(ctx context.Context, req *mcp.CallToolRequest, input GetCallChainInput) (*mcp.CallToolResult, *output, error) {
 		direction := input.Direction
 		if direction == "" {
 			direction = "downstream"
@@ -99,7 +105,7 @@ func registerGetCallChain(s *mcp.Server, reader n4j.Reader) {
 		if err != nil {
 			return nil, nil, err
 		}
-		return nil, nodes, nil
+		return nil, &output{Nodes: nodes}, nil
 	})
 }
 
@@ -130,29 +136,35 @@ func registerGetCopybookUsage(s *mcp.Server, reader n4j.Reader) {
 }
 
 func registerGetDataItems(s *mcp.Server, reader n4j.Reader) {
+	type output struct {
+		Items []n4j.DataItemInfo `json:"items"`
+	}
 	mcp.AddTool(s, &mcp.Tool{
 		Name:        "get_data_items",
 		Description: "List all data items (variables) defined in a program with their levels, FQNs, and PIC clauses.",
-	}, func(ctx context.Context, req *mcp.CallToolRequest, input GetDataItemsInput) (*mcp.CallToolResult, []n4j.DataItemInfo, error) {
+	}, func(ctx context.Context, req *mcp.CallToolRequest, input GetDataItemsInput) (*mcp.CallToolResult, *output, error) {
 		items, err := reader.GetDataItems(ctx, input.ProgramID)
 		if err != nil {
 			return nil, nil, err
 		}
-		return nil, items, nil
+		return nil, &output{Items: items}, nil
 	})
 }
 
 func registerListBusinessDomains(s *mcp.Server, reader n4j.Reader) {
 	type emptyInput struct{}
+	type output struct {
+		Domains []n4j.BusinessDomainSummary `json:"domains"`
+	}
 	mcp.AddTool(s, &mcp.Tool{
 		Name:        "list_business_domains",
 		Description: "List all business domains with their program counts.",
-	}, func(ctx context.Context, req *mcp.CallToolRequest, input emptyInput) (*mcp.CallToolResult, []n4j.BusinessDomainSummary, error) {
+	}, func(ctx context.Context, req *mcp.CallToolRequest, input emptyInput) (*mcp.CallToolResult, *output, error) {
 		domains, err := reader.ListBusinessDomains(ctx)
 		if err != nil {
 			return nil, nil, err
 		}
-		return nil, domains, nil
+		return nil, &output{Domains: domains}, nil
 	})
 }
 
