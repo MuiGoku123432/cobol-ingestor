@@ -31,6 +31,7 @@ const (
 	RelChildOf      RelType = "CHILD_OF"
 	RelRedefines    RelType = "REDEFINES"
 	RelConditionOf  RelType = "CONDITION_OF"
+	RelParameterOf  RelType = "PARAMETER_OF"
 	RelDefinedIn    RelType = "DEFINED_IN"
 	RelMovesTo      RelType = "MOVES_TO"
 	RelRuns         RelType = "RUNS"
@@ -84,6 +85,25 @@ type DataItem struct {
 	ProgramID string
 	FQN       string // fully qualified name: PROGRAM.LEVEL.NAME
 	Picture   string
+	Usage     string // COMP, COMP-3, BINARY, POINTER, etc.
+}
+
+// Condition represents an 88-level condition variable.
+type Condition struct {
+	ID        string
+	Name      string
+	Parent    string // parent data item name
+	Value     string // condition value(s)
+	ProgramID string
+}
+
+// Parameter represents a LINKAGE SECTION data item.
+type Parameter struct {
+	ID        string
+	Name      string
+	Level     int
+	Direction string // IN, OUT, INOUT
+	ProgramID string
 }
 
 // FileDefinition represents an FD (file description).
@@ -138,6 +158,8 @@ type Pass1Result struct {
 	Sections      []Section
 	Copybooks     []Copybook
 	DataItems     []DataItem
+	Conditions    []Condition
+	Parameters    []Parameter
 	FileDefs      []FileDefinition
 	SQLStatements []SQLStatement
 	CICSTxns      []CICSTransaction
@@ -146,17 +168,20 @@ type Pass1Result struct {
 
 // Pass2Result aggregates deep semantic analysis from a single file's Pass 2 analysis.
 type Pass2Result struct {
-	SourceFile    string
-	ProgramID     string
-	Performs      []PerformRelation
-	DataFlows     []DataFlowRelation
-	FileOps       []FileOpRelation
-	SQLDetails    []SQLStatement
-	CICSDetails   []CICSTransaction
-	DataHierarchy []DataHierarchyItem
-	Redefines     []RedefineRelation
-	CopybookDefs  []CopybookDefRelation
-	Annotations   []Annotation
+	SourceFile     string
+	ProgramID      string
+	Performs       []PerformRelation
+	DataFlows      []DataFlowRelation
+	FileOps        []FileOpRelation
+	SQLDetails     []SQLStatement
+	CICSDetails    []CICSTransaction
+	DataHierarchy  []DataHierarchyItem
+	Redefines      []RedefineRelation
+	CopybookDefs   []CopybookDefRelation
+	Annotations    []Annotation
+	ConditionalLogic []ConditionalLogicItem
+	DynamicCallResolutions []DynamicCallResolution
+	ErrorHandlers  []ErrorHandler
 }
 
 // PerformRelation represents a PERFORM control flow.
@@ -210,12 +235,60 @@ type Annotation struct {
 	Category    string
 }
 
+// ConditionalLogicItem represents an IF/EVALUATE decision point.
+type ConditionalLogicItem struct {
+	Paragraph string
+	Condition string
+	Variables []string
+	Type      string // IF, EVALUATE
+}
+
+// DynamicCallResolution represents a resolved dynamic CALL target.
+type DynamicCallResolution struct {
+	Variable        string
+	ResolvedTargets []string
+	Paragraph       string
+}
+
+// ErrorHandler represents an error handling pattern in a paragraph.
+type ErrorHandler struct {
+	Paragraph string
+	Pattern   string // STRUCTURED, AD-HOC, FILE-STATUS, SQLCODE, CICS-RESP
+	Details   string
+}
+
+// BridgeProgram identifies a program connecting multiple domains.
+type BridgeProgram struct {
+	ProgramID string
+	Domains   []string
+	Reason    string
+}
+
+// CopybookRisk identifies high-risk shared copybooks.
+type CopybookRisk struct {
+	Copybook     string
+	ProgramCount int
+	RiskLevel    string
+	Reason       string
+}
+
+// ModernizationCandidate identifies a program suitable for extraction.
+type ModernizationCandidate struct {
+	ProgramID  string
+	Score      float64
+	Reason     string
+	Approach   string
+}
+
 // Pass3Result aggregates cross-cutting analysis results.
 type Pass3Result struct {
-	BusinessDomains []BusinessDomain
-	DomainMembers   []DomainMembership
-	DeadCodeFlags   []DeadCodeFlag
-	RiskFlags       []RiskFlag
+	BusinessDomains        []BusinessDomain
+	DomainMembers          []DomainMembership
+	DeadCodeFlags          []DeadCodeFlag
+	RiskFlags              []RiskFlag
+	BridgePrograms         []BridgeProgram
+	CopybookRisks          []CopybookRisk
+	ModernizationCandidates []ModernizationCandidate
 }
 
 // DomainMembership links a program to a business domain.

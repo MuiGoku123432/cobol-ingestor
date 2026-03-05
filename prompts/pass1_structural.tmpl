@@ -25,7 +25,22 @@ Return a single JSON object with these fields:
     {
       "name": "string — data item name",
       "level": 1,
-      "picture": "string — PIC clause or empty"
+      "picture": "string — PIC clause or empty",
+      "usage": "string — COMP, COMP-3, BINARY, POINTER, DISPLAY, or empty"
+    }
+  ],
+  "conditions": [
+    {
+      "name": "string — 88-level condition name",
+      "parent": "string — parent data item name",
+      "value": "string — condition value(s) (e.g., 'Y', 'SPACES', '1 THRU 5')"
+    }
+  ],
+  "parameters": [
+    {
+      "name": "string — LINKAGE SECTION data item name",
+      "level": 1,
+      "direction": "string — IN, OUT, or INOUT (infer from usage if possible, default INOUT)"
     }
   ],
   "sqlStatements": [
@@ -45,7 +60,10 @@ Rules:
 - For COPY references: extract the member name only (e.g., COPY CUSTFILE → "CUSTFILE")
 - For CALL targets: CALL 'PROGNAME' → isDynamic=false; CALL WS-PROG-NAME → isDynamic=true
 - For paragraphs: include only names from PROCEDURE DIVISION (not section headers)
-- For data items: include 01-level and 77-level items only (skip subordinate levels)
+- For data items: include 01-level and 77-level items only (skip subordinate levels except 88)
+- For usage: extract the USAGE clause (COMP, COMP-3, BINARY, POINTER, DISPLAY); leave empty if not specified
+- For conditions: extract ALL 88-level items with their parent data item and value(s)
+- For parameters: extract data items from the LINKAGE SECTION; infer direction from how they are used (read-only = IN, written = OUT, both = INOUT)
 - For SQL: extract from EXEC SQL ... END-EXEC blocks
 - For CICS: extract from EXEC CICS ... END-EXEC blocks
 - Return ONLY the JSON object, no markdown fences, no explanation

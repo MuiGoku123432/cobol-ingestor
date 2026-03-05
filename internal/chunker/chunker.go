@@ -80,12 +80,36 @@ func BuildCopybookIndex(files []graph.FileInfo) CopybookIndex {
 	return idx
 }
 
-var copyRegex = regexp.MustCompile(`(?im)^\s{6}\s+COPY\s+([A-Za-z0-9-]+)`)
+// copyRegex matches COPY statements including optional REPLACING clauses, up to the terminating period.
+var copyRegex = regexp.MustCompile(`(?im)^\s+COPY\s+([A-Za-z0-9-]+)\s*([^.]*?)\.`)
+
+// replacingRegex parses REPLACING pairs: ==old== BY ==new==
+var replacingRegex = regexp.MustCompile(`==\s*([^=]+?)\s*==\s+BY\s+==\s*([^=]+?)\s*==`)
 
 // InlineCopybooks replaces COPY statements with copybook content.
 // Tracks visited set to prevent circular references. maxDepth prevents runaway recursion.
 func InlineCopybooks(content string, index CopybookIndex, maxDepth int) (string, error) {
 	return inlineCopybooksRecurse(content, index, maxDepth, make(map[string]bool))
+}
+
+// parseReplacingClause extracts replacement pairs from a REPLACING clause.
+func parseReplacingClause(clause string) [][2]string {
+	matches := replacingRegex.FindAllStringSubmatch(clause, -1)
+	pairs := make([][2]string, 0, len(matches))
+	for _, m := range matches {
+		if len(m) >= 3 {
+			pairs = append(pairs, [2]string{m[1], m[2]})
+		}
+	}
+	return pairs
+}
+
+// applyReplacements applies REPLACING substitutions to copybook content.
+func applyReplacements(content string, pairs [][2]string) string {
+	for _, pair := range pairs {
+		content = strings.ReplaceAll(content, pair[0], pair[1])
+	}
+	return content
 }
 
 func inlineCopybooksRecurse(content string, index CopybookIndex, depth int, visited map[string]bool) (string, error) {
@@ -114,8 +138,16 @@ func inlineCopybooksRecurse(content string, index CopybookIndex, depth int, visi
 			return match
 		}
 
+		copybookContent := string(data)
+
+		// Apply REPLACING substitutions if present
+		if len(subs) >= 3 && strings.Contains(strings.ToUpper(subs[2]), "REPLACING") {
+			pairs := parseReplacingClause(subs[2])
+			copybookContent = applyReplacements(copybookContent, pairs)
+		}
+
 		visited[name] = true
-		inlined, _ := inlineCopybooksRecurse(string(data), index, depth-1, visited)
+		inlined, _ := inlineCopybooksRecurse(copybookContent, index, depth-1, visited)
 		delete(visited, name) // allow same copybook in different branches
 
 		return fmt.Sprintf("      *>> COPY %s INLINED BEGIN\n%s\n      *>> COPY %s INLINED END", name, inlined, name)
@@ -258,7 +290,7 @@ func ChunkFilePass2(fi graph.FileInfo, opts Pass2ChunkOptions, logger *zap.Logge
 	return chunks, nil
 }
 
-var divisionRegex = regexp.MustCompile(`(?im)^\s{6}\s+(IDENTIFICATION|ENVIRONMENT|DATA|PROCEDURE)\s+DIVISION`)
+var divisionRegex = regexp.MustCompile(`(?im)^\s*(IDENTIFICATION|ENVIRONMENT|DATA|PROCEDURE)\s+DIVISION`)
 
 // splitDivisions splits COBOL content into its four divisions.
 func splitDivisions(content string) map[string]string {
@@ -290,8 +322,8 @@ type paragraphUnit struct {
 	content string
 }
 
-var paragraphRegex = regexp.MustCompile(`(?m)^.{6} ([A-Za-z0-9][A-Za-z0-9-]+)\.\s*$`)
-var sectionRegex = regexp.MustCompile(`(?im)^.{6} ([A-Z][A-Z0-9-]+)\s+SECTION\.\s*$`)
+var paragraphRegex = regexp.MustCompile(`(?m)^\s+([A-Za-z0-9][A-Za-z0-9-]+)\.\s*$`)
+var sectionRegex = regexp.MustCompile(`(?im)^\s+([A-Z][A-Z0-9-]+)\s+SECTION\.\s*$`)
 
 // splitParagraphs splits the PROCEDURE DIVISION into paragraph/section units.
 func splitParagraphs(procedure string) []paragraphUnit {

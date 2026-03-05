@@ -47,6 +47,60 @@ func TestInlineCopybooks(t *testing.T) {
 	assert.NotContains(t, result, "COPY CUSTREC.")
 }
 
+func TestInlineCopybooks_Replacing(t *testing.T) {
+	dir := t.TempDir()
+
+	// Write a copybook with placeholder tags
+	cpyPath := filepath.Join(dir, "CUSTREC.CPY")
+	require.NoError(t, os.WriteFile(cpyPath, []byte("       01  :TAG:-RECORD.\n           05  :TAG:-ID PIC X(10)."), 0644))
+
+	index := CopybookIndex{"CUSTREC": cpyPath}
+
+	content := "       COPY CUSTREC REPLACING ==:TAG:== BY ==CUSTOMER==."
+	result, err := InlineCopybooks(content, index, 10)
+	require.NoError(t, err)
+
+	assert.Contains(t, result, "CUSTOMER-RECORD")
+	assert.Contains(t, result, "CUSTOMER-ID")
+	assert.NotContains(t, result, ":TAG:")
+}
+
+func TestInlineCopybooks_MultipleReplacingPairs(t *testing.T) {
+	dir := t.TempDir()
+
+	cpyPath := filepath.Join(dir, "GENERIC.CPY")
+	require.NoError(t, os.WriteFile(cpyPath, []byte("       01  :PFX:-:SFX:."), 0644))
+
+	index := CopybookIndex{"GENERIC": cpyPath}
+
+	content := "       COPY GENERIC REPLACING ==:PFX:== BY ==CUST== ==:SFX:== BY ==REC==."
+	result, err := InlineCopybooks(content, index, 10)
+	require.NoError(t, err)
+
+	assert.Contains(t, result, "CUST-REC")
+	assert.NotContains(t, result, ":PFX:")
+	assert.NotContains(t, result, ":SFX:")
+}
+
+func TestSplitDivisions_FreeFormat(t *testing.T) {
+	content := `IDENTIFICATION DIVISION.
+PROGRAM-ID. TESTPROG.
+DATA DIVISION.
+WORKING-STORAGE SECTION.
+01 WS-VAR PIC X(10).
+PROCEDURE DIVISION.
+0000-MAIN.
+    DISPLAY "HELLO".
+    STOP RUN.`
+
+	divs := splitDivisions(content)
+
+	assert.Contains(t, divs, "IDENTIFICATION")
+	assert.Contains(t, divs, "DATA")
+	assert.Contains(t, divs, "PROCEDURE")
+	assert.Contains(t, divs["PROCEDURE"], "0000-MAIN")
+}
+
 func TestInlineCopybooks_CircularReference(t *testing.T) {
 	dir := t.TempDir()
 

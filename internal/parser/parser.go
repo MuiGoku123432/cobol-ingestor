@@ -19,6 +19,8 @@ type Pass1JSON struct {
 	Sections        []string         `json:"sections"`
 	FileDefinitions []FileDefJSON    `json:"fileDefinitions"`
 	DataItems       []DataItemJSON   `json:"dataItems"`
+	Conditions      []ConditionJSON  `json:"conditions"`
+	Parameters      []ParameterJSON  `json:"parameters"`
 	SQLStatements   []SQLJSON        `json:"sqlStatements"`
 	CICSCommands    []CICSJSON       `json:"cicsCommands"`
 }
@@ -37,6 +39,19 @@ type DataItemJSON struct {
 	Name    string `json:"name"`
 	Level   int    `json:"level"`
 	Picture string `json:"picture"`
+	Usage   string `json:"usage"`
+}
+
+type ConditionJSON struct {
+	Name   string `json:"name"`
+	Parent string `json:"parent"`
+	Value  string `json:"value"`
+}
+
+type ParameterJSON struct {
+	Name      string `json:"name"`
+	Level     int    `json:"level"`
+	Direction string `json:"direction"`
 }
 
 type SQLJSON struct {
@@ -147,8 +162,47 @@ func ParsePass1Response(jsonStr, sourceFile string) (*graph.Pass1Result, error) 
 			ProgramID: programID,
 			FQN:       fqn,
 			Picture:   di.Picture,
+			Usage:     di.Usage,
 		}
 		result.DataItems = append(result.DataItems, item)
+	}
+
+	// Conditions (88-level)
+	for _, c := range raw.Conditions {
+		cond := graph.Condition{
+			ID:        newID(),
+			Name:      c.Name,
+			Parent:    c.Parent,
+			Value:     c.Value,
+			ProgramID: programID,
+		}
+		result.Conditions = append(result.Conditions, cond)
+		result.Relationships = append(result.Relationships, graph.Relationship{
+			Type:      graph.RelConditionOf,
+			FromLabel: "Condition",
+			FromKey:   c.Name,
+			ToLabel:   "DataItem",
+			ToKey:     c.Parent,
+		})
+	}
+
+	// Parameters (LINKAGE SECTION items)
+	for _, p := range raw.Parameters {
+		param := graph.Parameter{
+			ID:        newID(),
+			Name:      p.Name,
+			Level:     p.Level,
+			Direction: p.Direction,
+			ProgramID: programID,
+		}
+		result.Parameters = append(result.Parameters, param)
+		result.Relationships = append(result.Relationships, graph.Relationship{
+			Type:      graph.RelParameterOf,
+			FromLabel: "Parameter",
+			FromKey:   p.Name,
+			ToLabel:   "Program",
+			ToKey:     programID,
+		})
 	}
 
 	// SQL statements
@@ -208,15 +262,18 @@ func stripMarkdownFences(s string) string {
 
 // Pass2JSON matches the JSON schema returned by Claude for Pass 2.
 type Pass2JSON struct {
-	Performs            []PerformJSON       `json:"performs"`
-	DataFlows           []DataFlowJSON      `json:"dataFlows"`
-	FileOperations      []FileOpJSON        `json:"fileOperations"`
-	SQLStatements       []SQLJSON           `json:"sqlStatements"`
-	CICSCommands        []CICSJSON          `json:"cicsCommands"`
-	DataHierarchy       []DataHierarchyJSON `json:"dataHierarchy"`
-	Redefines           []RedefineJSON      `json:"redefines"`
-	CopybookDefinitions []CopybookDefJSON   `json:"copybookDefinitions"`
-	Annotations         []AnnotationJSON    `json:"annotations"`
+	Performs               []PerformJSON              `json:"performs"`
+	DataFlows              []DataFlowJSON             `json:"dataFlows"`
+	FileOperations         []FileOpJSON               `json:"fileOperations"`
+	SQLStatements          []SQLJSON                  `json:"sqlStatements"`
+	CICSCommands           []CICSJSON                 `json:"cicsCommands"`
+	DataHierarchy          []DataHierarchyJSON        `json:"dataHierarchy"`
+	Redefines              []RedefineJSON             `json:"redefines"`
+	CopybookDefinitions    []CopybookDefJSON          `json:"copybookDefinitions"`
+	Annotations            []AnnotationJSON           `json:"annotations"`
+	ConditionalLogic       []ConditionalLogicJSON     `json:"conditionalLogic"`
+	DynamicCallResolution  []DynamicCallResolutionJSON `json:"dynamicCallResolution"`
+	ErrorHandling          []ErrorHandlingJSON        `json:"errorHandling"`
 }
 
 type PerformJSON struct {
@@ -261,6 +318,25 @@ type AnnotationJSON struct {
 	Paragraph   string `json:"paragraph"`
 	Description string `json:"description"`
 	Category    string `json:"category"`
+}
+
+type ConditionalLogicJSON struct {
+	Paragraph string   `json:"paragraph"`
+	Condition string   `json:"condition"`
+	Variables []string `json:"variables"`
+	Type      string   `json:"type"`
+}
+
+type DynamicCallResolutionJSON struct {
+	Variable        string   `json:"variable"`
+	ResolvedTargets []string `json:"resolvedTargets"`
+	Paragraph       string   `json:"paragraph"`
+}
+
+type ErrorHandlingJSON struct {
+	Paragraph string `json:"paragraph"`
+	Pattern   string `json:"pattern"`
+	Details   string `json:"details"`
 }
 
 // ParsePass2Response parses Claude's JSON response into a Pass2Result.
@@ -349,6 +425,31 @@ func ParsePass2Response(jsonStr, sourceFile, programID string) (*graph.Pass2Resu
 			Paragraph:   a.Paragraph,
 			Description: a.Description,
 			Category:    a.Category,
+		})
+	}
+
+	for _, cl := range raw.ConditionalLogic {
+		result.ConditionalLogic = append(result.ConditionalLogic, graph.ConditionalLogicItem{
+			Paragraph: cl.Paragraph,
+			Condition: cl.Condition,
+			Variables: cl.Variables,
+			Type:      cl.Type,
+		})
+	}
+
+	for _, dc := range raw.DynamicCallResolution {
+		result.DynamicCallResolutions = append(result.DynamicCallResolutions, graph.DynamicCallResolution{
+			Variable:        dc.Variable,
+			ResolvedTargets: dc.ResolvedTargets,
+			Paragraph:       dc.Paragraph,
+		})
+	}
+
+	for _, eh := range raw.ErrorHandling {
+		result.ErrorHandlers = append(result.ErrorHandlers, graph.ErrorHandler{
+			Paragraph: eh.Paragraph,
+			Pattern:   eh.Pattern,
+			Details:   eh.Details,
 		})
 	}
 

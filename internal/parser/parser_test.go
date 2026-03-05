@@ -22,8 +22,16 @@ const sampleJSON = `{
     {"name": "CUSTOMER-FILE", "organization": "INDEXED"}
   ],
   "dataItems": [
-    {"name": "WS-CUSTOMER-REC", "level": 1, "picture": ""},
-    {"name": "WS-RETURN-CODE", "level": 77, "picture": "S9(4) COMP"}
+    {"name": "WS-CUSTOMER-REC", "level": 1, "picture": "", "usage": ""},
+    {"name": "WS-RETURN-CODE", "level": 77, "picture": "S9(4) COMP", "usage": "COMP"}
+  ],
+  "conditions": [
+    {"name": "VALID-STATUS", "parent": "WS-STATUS-CODE", "value": "'Y'"},
+    {"name": "EOF-REACHED", "parent": "WS-EOF-FLAG", "value": "'Y'"}
+  ],
+  "parameters": [
+    {"name": "LK-CUST-ID", "level": 1, "direction": "IN"},
+    {"name": "LK-RESULT", "level": 1, "direction": "OUT"}
   ],
   "sqlStatements": [
     {"type": "SELECT", "text": "SELECT CUST_NAME, CUST_ADDR FROM CUSTOMER WHERE CUST_ID = :WS-CUST-ID"}
@@ -65,6 +73,20 @@ func TestParsePass1Response(t *testing.T) {
 	require.Len(t, result.DataItems, 2)
 	assert.Equal(t, "WS-CUSTOMER-REC", result.DataItems[0].Name)
 	assert.Equal(t, "CUSTMAINT.01.WS-CUSTOMER-REC", result.DataItems[0].FQN)
+	assert.Equal(t, "COMP", result.DataItems[1].Usage)
+
+	// Conditions
+	require.Len(t, result.Conditions, 2)
+	assert.Equal(t, "VALID-STATUS", result.Conditions[0].Name)
+	assert.Equal(t, "WS-STATUS-CODE", result.Conditions[0].Parent)
+	assert.Equal(t, "'Y'", result.Conditions[0].Value)
+
+	// Parameters
+	require.Len(t, result.Parameters, 2)
+	assert.Equal(t, "LK-CUST-ID", result.Parameters[0].Name)
+	assert.Equal(t, "IN", result.Parameters[0].Direction)
+	assert.Equal(t, "LK-RESULT", result.Parameters[1].Name)
+	assert.Equal(t, "OUT", result.Parameters[1].Direction)
 
 	// SQL
 	require.Len(t, result.SQLStatements, 1)
@@ -84,6 +106,8 @@ func TestParsePass1Response(t *testing.T) {
 	assert.Contains(t, relTypes, graph.RelBelongsTo)
 	assert.Contains(t, relTypes, graph.RelExecutesSQL)
 	assert.Contains(t, relTypes, graph.RelExecutesCICS)
+	assert.Contains(t, relTypes, graph.RelConditionOf)
+	assert.Contains(t, relTypes, graph.RelParameterOf)
 }
 
 func TestParsePass1Response_MarkdownFences(t *testing.T) {

@@ -121,6 +121,10 @@ func mergeKeyForLabel(label string) string {
 		return "id"
 	case "BusinessDomain":
 		return "name"
+	case "Condition":
+		return "name"
+	case "Parameter":
+		return "name"
 	default:
 		return "id"
 	}
@@ -199,9 +203,44 @@ func (w *BatchWriter) WritePass1Result(ctx context.Context, result *graph.Pass1R
 				"programId": d.ProgramID,
 				"fqn":       d.FQN,
 				"picture":   d.Picture,
+				"usage":     d.Usage,
 			}
 		}
 		if err := w.WriteNodes(ctx, "DataItem", "fqn", nodes); err != nil {
+			return err
+		}
+	}
+
+	// Write Conditions (88-level)
+	if len(result.Conditions) > 0 {
+		nodes := make([]map[string]any, len(result.Conditions))
+		for i, c := range result.Conditions {
+			nodes[i] = map[string]any{
+				"id":        c.ID,
+				"name":      c.Name,
+				"parent":    c.Parent,
+				"value":     c.Value,
+				"programId": c.ProgramID,
+			}
+		}
+		if err := w.WriteNodes(ctx, "Condition", "name", nodes); err != nil {
+			return err
+		}
+	}
+
+	// Write Parameters (LINKAGE SECTION)
+	if len(result.Parameters) > 0 {
+		nodes := make([]map[string]any, len(result.Parameters))
+		for i, p := range result.Parameters {
+			nodes[i] = map[string]any{
+				"id":        p.ID,
+				"name":      p.Name,
+				"level":     p.Level,
+				"direction": p.Direction,
+				"programId": p.ProgramID,
+			}
+		}
+		if err := w.WriteNodes(ctx, "Parameter", "name", nodes); err != nil {
 			return err
 		}
 	}
@@ -413,6 +452,72 @@ func (w *BatchWriter) WritePass2Result(ctx context.Context, result *graph.Pass2R
 		}
 	}
 
+	// Update Paragraph nodes with conditional logic
+	for _, cl := range result.ConditionalLogic {
+		if cl.Paragraph == "" {
+			continue
+		}
+		session := w.client.NewSession(ctx)
+		_, err := session.ExecuteWrite(ctx, func(tx neo4j.ManagedTransaction) (any, error) {
+			_, err := tx.Run(ctx,
+				"MATCH (p:Paragraph {name: $name}) "+
+					"SET p.conditionalLogic = coalesce(p.conditionalLogic, []) + [$entry]",
+				map[string]any{
+					"name":  cl.Paragraph,
+					"entry": fmt.Sprintf("[%s] %s", cl.Type, cl.Condition),
+				},
+			)
+			return nil, err
+		})
+		session.Close(ctx)
+		if err != nil {
+			w.logger.Warn("failed to update conditional logic",
+				zap.String("paragraph", cl.Paragraph), zap.Error(err))
+		}
+	}
+
+	// Write dynamic call resolutions as CALLS relationships with resolved targets
+	for _, dc := range result.DynamicCallResolutions {
+		for _, target := range dc.ResolvedTargets {
+			rels = append(rels, graph.Relationship{
+				Type:      graph.RelCalls,
+				FromLabel: "Program",
+				FromKey:   programID,
+				ToLabel:   "Program",
+				ToKey:     target,
+				Properties: map[string]any{
+					"isDynamic":     true,
+					"resolvedFrom":  dc.Variable,
+					"fromParagraph": dc.Paragraph,
+				},
+			})
+		}
+	}
+
+	// Update Paragraph nodes with error handling patterns
+	for _, eh := range result.ErrorHandlers {
+		if eh.Paragraph == "" {
+			continue
+		}
+		session := w.client.NewSession(ctx)
+		_, err := session.ExecuteWrite(ctx, func(tx neo4j.ManagedTransaction) (any, error) {
+			_, err := tx.Run(ctx,
+				"MATCH (p:Paragraph {name: $name}) SET p.errorPattern = $pattern, p.errorDetails = $details",
+				map[string]any{
+					"name":    eh.Paragraph,
+					"pattern": eh.Pattern,
+					"details": eh.Details,
+				},
+			)
+			return nil, err
+		})
+		session.Close(ctx)
+		if err != nil {
+			w.logger.Warn("failed to update error handling",
+				zap.String("paragraph", eh.Paragraph), zap.Error(err))
+		}
+	}
+
 	// Update Paragraph nodes with annotations (description + category)
 	if len(result.Annotations) > 0 {
 		for _, a := range result.Annotations {
@@ -513,11 +618,76 @@ func (w *BatchWriter) WritePass3Result(ctx context.Context, result *graph.Pass3R
 		}
 	}
 
+	// Set bridge program flags
+	for _, bp := range result.BridgePrograms {
+		session := w.client.NewSession(ctx)
+		_, err := session.ExecuteWrite(ctx, func(tx neo4j.ManagedTransaction) (any, error) {
+			_, err := tx.Run(ctx,
+				"MATCH (p:Program {programId: $pid}) SET p.isBridge = true, p.bridgeDomains = $domains, p.bridgeReason = $reason",
+				map[string]any{
+					"pid":     bp.ProgramID,
+					"domains": bp.Domains,
+					"reason":  bp.Reason,
+				})
+			return nil, err
+		})
+		session.Close(ctx)
+		if err != nil {
+			w.logger.Warn("failed to set bridge program flag",
+				zap.String("program", bp.ProgramID), zap.Error(err))
+		}
+	}
+
+	// Set copybook risk flags
+	for _, cr := range result.CopybookRisks {
+		session := w.client.NewSession(ctx)
+		_, err := session.ExecuteWrite(ctx, func(tx neo4j.ManagedTransaction) (any, error) {
+			_, err := tx.Run(ctx,
+				"MATCH (c:Copybook {name: $name}) SET c.riskLevel = $risk, c.programCount = $count, c.riskReason = $reason",
+				map[string]any{
+					"name":   cr.Copybook,
+					"risk":   cr.RiskLevel,
+					"count":  cr.ProgramCount,
+					"reason": cr.Reason,
+				})
+			return nil, err
+		})
+		session.Close(ctx)
+		if err != nil {
+			w.logger.Warn("failed to set copybook risk",
+				zap.String("copybook", cr.Copybook), zap.Error(err))
+		}
+	}
+
+	// Set modernization candidate flags
+	for _, mc := range result.ModernizationCandidates {
+		session := w.client.NewSession(ctx)
+		_, err := session.ExecuteWrite(ctx, func(tx neo4j.ManagedTransaction) (any, error) {
+			_, err := tx.Run(ctx,
+				"MATCH (p:Program {programId: $pid}) SET p.modernizationScore = $score, p.modernizationReason = $reason, p.modernizationApproach = $approach",
+				map[string]any{
+					"pid":      mc.ProgramID,
+					"score":    mc.Score,
+					"reason":   mc.Reason,
+					"approach": mc.Approach,
+				})
+			return nil, err
+		})
+		session.Close(ctx)
+		if err != nil {
+			w.logger.Warn("failed to set modernization candidate",
+				zap.String("program", mc.ProgramID), zap.Error(err))
+		}
+	}
+
 	w.logger.Info("wrote pass 3 results",
 		zap.Int("domains", len(result.BusinessDomains)),
 		zap.Int("members", len(result.DomainMembers)),
 		zap.Int("deadCode", len(result.DeadCodeFlags)),
 		zap.Int("riskFlags", len(result.RiskFlags)),
+		zap.Int("bridgePrograms", len(result.BridgePrograms)),
+		zap.Int("copybookRisks", len(result.CopybookRisks)),
+		zap.Int("modernizationCandidates", len(result.ModernizationCandidates)),
 	)
 
 	return nil
