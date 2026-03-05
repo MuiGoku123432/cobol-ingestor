@@ -19,14 +19,15 @@ import (
 
 // Client wraps an LLM provider with retry, rate limiting, and prompt templates.
 type Client struct {
-	provider   llm.Provider
+	provider    llm.Provider
 	sonnetModel string
 	opusModel   string
-	maxRetries int
-	limiter    *rate.Limiter
-	logger     *zap.Logger
-	pass1Tmpl  *template.Template
-	pass2Tmpl  *template.Template
+	maxRetries  int
+	limiter     *rate.Limiter
+	logger      *zap.Logger
+	pass1Tmpl   *template.Template
+	pass2Tmpl   *template.Template
+	pass3Tmpl   *template.Template
 }
 
 // NewClient creates a Claude API client using an LLM provider.
@@ -41,6 +42,11 @@ func NewClient(provider llm.Provider, cfg config.ClaudeConfig, logger *zap.Logge
 		return nil, fmt.Errorf("parsing pass2 template: %w", err)
 	}
 
+	p3Tmpl, err := template.New("pass3").Parse(prompts.Pass3CrossCutting)
+	if err != nil {
+		return nil, fmt.Errorf("parsing pass3 template: %w", err)
+	}
+
 	// Rate limit: ~50 requests per minute to stay within API limits
 	limiter := rate.NewLimiter(rate.Every(time.Second), 2)
 
@@ -53,6 +59,7 @@ func NewClient(provider llm.Provider, cfg config.ClaudeConfig, logger *zap.Logge
 		logger:      logger,
 		pass1Tmpl:   p1Tmpl,
 		pass2Tmpl:   p2Tmpl,
+		pass3Tmpl:   p3Tmpl,
 	}, nil
 }
 
@@ -99,6 +106,25 @@ func (c *Client) AnalyzeDeep(ctx context.Context, chunk chunker.Chunk, contextPr
 		MaxTokens: 10000,
 		Messages: []llm.Message{
 			{Role: llm.RoleSystem, Content: "You are an expert COBOL analyst performing deep semantic analysis. You extract detailed relationships, data flows, and control flows from COBOL source code and return structured JSON."},
+			{Role: llm.RoleUser, Content: userContent},
+		},
+	})
+}
+
+// AnalyzeCrossCutting sends a graph data slice to Claude Opus for Pass 3 cross-cutting analysis.
+func (c *Client) AnalyzeCrossCutting(ctx context.Context, graphSlice string) (string, error) {
+	var userMsg bytes.Buffer
+	if err := c.pass3Tmpl.Execute(&userMsg, nil); err != nil {
+		return "", fmt.Errorf("rendering pass3 template: %w", err)
+	}
+
+	userContent := userMsg.String() + "\n\n" + graphSlice
+
+	return c.completeWithRetry(ctx, llm.CompletionRequest{
+		Model:     c.opusModel,
+		MaxTokens: 16000,
+		Messages: []llm.Message{
+			{Role: llm.RoleSystem, Content: "You are an expert COBOL systems analyst. You analyze program relationships to identify business domains, dead code, and risk factors. Return structured JSON."},
 			{Role: llm.RoleUser, Content: userContent},
 		},
 	})

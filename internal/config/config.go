@@ -1,6 +1,8 @@
 package config
 
 import (
+	"fmt"
+
 	"github.com/joho/godotenv"
 	"github.com/spf13/viper"
 )
@@ -44,6 +46,7 @@ type IngestConfig struct {
 	Pass2Workers    int
 	Pass2TokenLimit int
 	OverlapLines    int
+	Pass3BatchSize  int
 }
 
 type APIConfig struct {
@@ -80,6 +83,7 @@ func Load() (*Config, error) {
 	viper.SetDefault("PASS2_MAX_WORKERS", 3)
 	viper.SetDefault("PASS2_TOKEN_LIMIT", 100000)
 	viper.SetDefault("PASS2_OVERLAP_LINES", 20)
+	viper.SetDefault("PASS3_BATCH_SIZE", 50)
 
 	// API defaults
 	viper.SetDefault("API_PORT", "8080")
@@ -112,6 +116,7 @@ func Load() (*Config, error) {
 			Pass2Workers:    viper.GetInt("PASS2_MAX_WORKERS"),
 			Pass2TokenLimit: viper.GetInt("PASS2_TOKEN_LIMIT"),
 			OverlapLines:    viper.GetInt("PASS2_OVERLAP_LINES"),
+			Pass3BatchSize:  viper.GetInt("PASS3_BATCH_SIZE"),
 		},
 		API: APIConfig{
 			Port:     viper.GetString("API_PORT"),
@@ -120,4 +125,18 @@ func Load() (*Config, error) {
 	}
 
 	return cfg, nil
+}
+
+// Validate checks that required configuration fields are set.
+func (c *Config) Validate() error {
+	if c.LLM.Provider == "anthropic" && c.LLM.APIKey == "" {
+		return fmt.Errorf("ANTHROPIC_API_KEY is required when LLM_PROVIDER=anthropic")
+	}
+	if c.LLM.Provider == "copilot" && c.LLM.CopilotGitHubToken == "" {
+		return fmt.Errorf("COPILOT_GITHUB_TOKEN is required when LLM_PROVIDER=copilot")
+	}
+	if c.Neo4j.URI == "" {
+		return fmt.Errorf("NEO4J_URI is required")
+	}
+	return nil
 }

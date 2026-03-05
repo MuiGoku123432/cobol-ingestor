@@ -209,3 +209,32 @@ type Annotation struct {
 	Description string
 	Category    string
 }
+
+// Pass3Result aggregates cross-cutting analysis results.
+type Pass3Result struct {
+	BusinessDomains []BusinessDomain
+	DomainMembers   []DomainMembership
+	DeadCodeFlags   []DeadCodeFlag
+	RiskFlags       []RiskFlag
+}
+
+// DomainMembership links a program to a business domain.
+type DomainMembership struct {
+	ProgramID  string
+	DomainName string
+	Confidence float64
+}
+
+// DeadCodeFlag marks a program as potentially dead code.
+type DeadCodeFlag struct {
+	ProgramID string
+	Reason    string
+}
+
+// RiskFlag marks a program as high-risk.
+type RiskFlag struct {
+	ProgramID string
+	RiskType  string
+	Details   string
+	Score     float64
+}

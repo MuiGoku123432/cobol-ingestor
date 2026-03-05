@@ -443,3 +443,82 @@ func (w *BatchWriter) WritePass2Result(ctx context.Context, result *graph.Pass2R
 
 	return nil
 }
+
+// WritePass3Result writes Pass 3 cross-cutting analysis results to Neo4j.
+func (w *BatchWriter) WritePass3Result(ctx context.Context, result *graph.Pass3Result) error {
+	// MERGE BusinessDomain nodes
+	if len(result.BusinessDomains) > 0 {
+		nodes := make([]map[string]any, len(result.BusinessDomains))
+		for i, d := range result.BusinessDomains {
+			nodes[i] = map[string]any{
+				"id":          d.ID,
+				"name":        d.Name,
+				"description": d.Description,
+			}
+		}
+		if err := w.WriteNodes(ctx, "BusinessDomain", "name", nodes); err != nil {
+			return fmt.Errorf("writing BusinessDomain nodes: %w", err)
+		}
+	}
+
+	// Write BELONGS_TO relationships (Program → BusinessDomain)
+	if len(result.DomainMembers) > 0 {
+		rows := make([]map[string]any, len(result.DomainMembers))
+		for i, m := range result.DomainMembers {
+			rows[i] = map[string]any{
+				"fromKey": m.ProgramID,
+				"toKey":   m.DomainName,
+				"props":   map[string]any{"confidence": m.Confidence},
+			}
+		}
+		if err := w.WriteRelationships(ctx, "BELONGS_TO", "Program", "programId", "BusinessDomain", "name", rows); err != nil {
+			return fmt.Errorf("writing BELONGS_TO relationships: %w", err)
+		}
+	}
+
+	// Set deadCode flags on programs
+	for _, dc := range result.DeadCodeFlags {
+		session := w.client.NewSession(ctx)
+		_, err := session.ExecuteWrite(ctx, func(tx neo4j.ManagedTransaction) (any, error) {
+			_, err := tx.Run(ctx,
+				"MATCH (p:Program {programId: $pid}) SET p.deadCode = true, p.deadCodeReason = $reason",
+				map[string]any{"pid": dc.ProgramID, "reason": dc.Reason})
+			return nil, err
+		})
+		session.Close(ctx)
+		if err != nil {
+			w.logger.Warn("failed to set dead code flag",
+				zap.String("program", dc.ProgramID), zap.Error(err))
+		}
+	}
+
+	// Set risk flags on programs
+	for _, rf := range result.RiskFlags {
+		session := w.client.NewSession(ctx)
+		_, err := session.ExecuteWrite(ctx, func(tx neo4j.ManagedTransaction) (any, error) {
+			_, err := tx.Run(ctx,
+				"MATCH (p:Program {programId: $pid}) SET p.riskScore = $score, p.riskType = $riskType, p.riskDetails = $details",
+				map[string]any{
+					"pid":      rf.ProgramID,
+					"score":    rf.Score,
+					"riskType": rf.RiskType,
+					"details":  rf.Details,
+				})
+			return nil, err
+		})
+		session.Close(ctx)
+		if err != nil {
+			w.logger.Warn("failed to set risk flag",
+				zap.String("program", rf.ProgramID), zap.Error(err))
+		}
+	}
+
+	w.logger.Info("wrote pass 3 results",
+		zap.Int("domains", len(result.BusinessDomains)),
+		zap.Int("members", len(result.DomainMembers)),
+		zap.Int("deadCode", len(result.DeadCodeFlags)),
+		zap.Int("riskFlags", len(result.RiskFlags)),
+	)
+
+	return nil
+}

@@ -1,0 +1,41 @@
+You are analyzing a batch of COBOL programs from their graph relationships. Based on the program names, their call relationships, shared copybooks, file operations, and paragraph names, perform the following analysis:
+
+1. **Business Domain Classification**: Group programs into business domains (e.g., "Customer Management", "Account Processing", "Report Generation", "Batch Processing", "Error Handling"). Each program should belong to exactly one domain.
+
+2. **Dead Code Detection**: From the orphan programs list (programs with no callers), determine which are likely dead code vs. entry points (batch jobs, CICS transactions, main programs). Entry points are NOT dead code.
+
+3. **Risk Assessment**: Flag high-risk programs based on:
+   - Hub programs (called by many others) — changes have wide blast radius
+   - Programs with many external dependencies (files, SQL, CICS)
+   - Programs with complex control flow (many paragraphs)
+
+Return your analysis as JSON with this exact structure:
+
+```json
+{
+  "domains": [
+    {
+      "name": "Domain Name",
+      "description": "Brief description of the domain",
+      "programs": [
+        {"programId": "PROG1", "confidence": 0.95}
+      ]
+    }
+  ],
+  "deadCode": [
+    {"programId": "PROG2", "reason": "No callers and name suggests utility, not an entry point"}
+  ],
+  "riskFlags": [
+    {"programId": "PROG3", "riskType": "hub", "details": "Called by 15 programs", "score": 0.8}
+  ]
+}
+```
+
+Rules:
+- Every program in the input MUST appear in exactly one domain
+- Only flag orphan programs as dead code if they are clearly NOT entry points
+- Risk scores range from 0.0 (low) to 1.0 (critical)
+- Use descriptive, business-meaningful domain names
+- Confidence ranges from 0.0 to 1.0
+
+Analyze the following programs:
