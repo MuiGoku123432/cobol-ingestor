@@ -89,6 +89,8 @@ func (p *AnthropicProvider) Complete(ctx context.Context, req CompletionRequest)
 		Model:        string(resp.Model),
 		PromptTokens: int(resp.Usage.InputTokens),
 		OutputTokens: int(resp.Usage.OutputTokens),
+		StopReason:   string(resp.StopReason),
+		Truncated:    resp.StopReason == "max_tokens",
 	}, nil
 }
 

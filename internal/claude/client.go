@@ -3,6 +3,7 @@ package claude
 import (
 	"bytes"
 	"context"
+	"errors"
 	"fmt"
 	"math"
 	"text/template"
@@ -16,6 +17,13 @@ import (
 	"go.uber.org/zap"
 	"golang.org/x/time/rate"
 )
+
+// ErrResponseTruncated is returned when the LLM response was truncated
+// due to max_tokens limits even after retry with increased limits.
+var ErrResponseTruncated = errors.New("LLM response truncated by max_tokens limit")
+
+// maxTokensCap is the upper limit for max_tokens when auto-retrying truncated responses.
+const maxTokensCap = 32000
 
 // Client wraps an LLM provider with retry, rate limiting, and prompt templates.
 type Client struct {
@@ -137,6 +145,7 @@ func (c *Client) AnalyzeCrossCutting(ctx context.Context, graphSlice string) (st
 }
 
 // completeWithRetry calls the LLM provider with exponential backoff retries.
+// On truncation (StopReason == "max_tokens"), it auto-retries once with doubled max_tokens.
 func (c *Client) completeWithRetry(ctx context.Context, req llm.CompletionRequest) (string, error) {
 	var lastErr error
 	for attempt := range c.maxRetries {
@@ -163,6 +172,56 @@ func (c *Client) completeWithRetry(ctx context.Context, req llm.CompletionReques
 
 		if resp.Content == "" {
 			return "", fmt.Errorf("no text content in LLM response")
+		}
+
+		// Handle truncated responses
+		if resp.Truncated {
+			doubled := req.MaxTokens * 2
+			if doubled > maxTokensCap {
+				doubled = maxTokensCap
+			}
+			if doubled <= req.MaxTokens {
+				// Already at or above cap, can't increase further
+				c.logger.Error("LLM response truncated at max_tokens cap",
+					zap.String("model", req.Model),
+					zap.Int("max_tokens", req.MaxTokens),
+					zap.Int("output_tokens", resp.OutputTokens),
+				)
+				return "", fmt.Errorf("%w: model=%s max_tokens=%d output_tokens=%d",
+					ErrResponseTruncated, req.Model, req.MaxTokens, resp.OutputTokens)
+			}
+
+			c.logger.Warn("LLM response truncated, retrying with increased max_tokens",
+				zap.String("model", req.Model),
+				zap.Int("original_max_tokens", req.MaxTokens),
+				zap.Int("new_max_tokens", doubled),
+				zap.Int("output_tokens", resp.OutputTokens),
+			)
+
+			// Retry with doubled max_tokens
+			retryReq := req
+			retryReq.MaxTokens = doubled
+
+			if err := c.limiter.Wait(ctx); err != nil {
+				return "", fmt.Errorf("rate limiter: %w", err)
+			}
+			retryResp, retryErr := c.provider.Complete(ctx, retryReq)
+			if retryErr != nil {
+				return "", fmt.Errorf("truncation retry failed: %w", retryErr)
+			}
+			if retryResp.Content == "" {
+				return "", fmt.Errorf("no text content in truncation retry response")
+			}
+			if retryResp.Truncated {
+				c.logger.Error("LLM response still truncated after retry",
+					zap.String("model", retryReq.Model),
+					zap.Int("max_tokens", retryReq.MaxTokens),
+					zap.Int("output_tokens", retryResp.OutputTokens),
+				)
+				return "", fmt.Errorf("%w: model=%s max_tokens=%d output_tokens=%d",
+					ErrResponseTruncated, retryReq.Model, retryReq.MaxTokens, retryResp.OutputTokens)
+			}
+			return retryResp.Content, nil
 		}
 
 		return resp.Content, nil

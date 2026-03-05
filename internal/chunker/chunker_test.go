@@ -189,6 +189,96 @@ func TestChunkFilePass2_SingleChunk(t *testing.T) {
 	assert.Equal(t, 2, chunks[0].Pass)
 }
 
+func TestInlineCopybooks_UnderscoredName(t *testing.T) {
+	dir := t.TempDir()
+
+	cpyPath := filepath.Join(dir, "CUST_REC.CPY")
+	require.NoError(t, os.WriteFile(cpyPath, []byte("       01  CUSTOMER-RECORD."), 0644))
+
+	index := CopybookIndex{"CUST_REC": cpyPath}
+
+	content := "       COPY CUST_REC."
+	result, err := InlineCopybooks(content, index, 10)
+	require.NoError(t, err)
+
+	assert.Contains(t, result, "CUSTOMER-RECORD")
+	assert.Contains(t, result, "*>> COPY CUST_REC INLINED BEGIN")
+}
+
+func TestSplitParagraphs_UnderscoredName(t *testing.T) {
+	procedure := `       PROCEDURE DIVISION.
+       PROCESS_CUSTOMER.
+           DISPLAY "PROCESSING".
+       VALIDATE_INPUT.
+           DISPLAY "VALIDATING".`
+
+	paragraphs := splitParagraphs(procedure)
+
+	names := make([]string, len(paragraphs))
+	for i, p := range paragraphs {
+		names[i] = p.name
+	}
+	assert.Contains(t, names, "PROCESS_CUSTOMER")
+	assert.Contains(t, names, "VALIDATE_INPUT")
+}
+
+func TestNormalizeContinuations(t *testing.T) {
+	// Column:  1234567890123456...
+	// Line 1 has content, line 2 is a continuation (col 7 = '-')
+	content := "      COPY CUST\n      -    REC."
+	result := normalizeContinuations(content)
+	assert.Contains(t, result, "CUSTREC.")
+	assert.NotContains(t, result, "\n      -")
+}
+
+func TestChunkFile_MultiChunk(t *testing.T) {
+	dir := t.TempDir()
+	filePath := filepath.Join(dir, "BIG.CBL")
+
+	// Generate a file that will exceed a small token limit
+	content := "       IDENTIFICATION DIVISION.\n       PROGRAM-ID. BIG.\n       DATA DIVISION.\n       WORKING-STORAGE SECTION.\n       01 WS-VAR PIC X.\n"
+	content += "       PROCEDURE DIVISION.\n"
+	for i := 0; i < 20; i++ {
+		content += fmt.Sprintf("       PARA-%04d.\n", i)
+		for j := 0; j < 10; j++ {
+			content += fmt.Sprintf("           DISPLAY \"LINE %d-%d\".\n", i, j)
+		}
+	}
+
+	require.NoError(t, os.WriteFile(filePath, []byte(content), 0644))
+
+	fi := graph.FileInfo{Path: filePath, Type: graph.FileTypeCOBOL}
+	// Set a very low token limit to force splitting
+	chunks, err := ChunkFile(fi, 500, zap.NewNop())
+	require.NoError(t, err)
+
+	assert.Greater(t, len(chunks), 1, "should produce multiple chunks for large file")
+	for i, c := range chunks {
+		assert.Equal(t, i, c.Index)
+		assert.Equal(t, len(chunks), c.Total)
+		assert.Equal(t, 1, c.Pass)
+		assert.Contains(t, c.Content, "IDENTIFICATION DIVISION") // preamble in each chunk
+	}
+}
+
+func TestChunkFile_SingleChunk(t *testing.T) {
+	dir := t.TempDir()
+	filePath := filepath.Join(dir, "SMALL.CBL")
+
+	content := "       IDENTIFICATION DIVISION.\n       PROGRAM-ID. SMALL.\n       PROCEDURE DIVISION.\n       0000-MAIN.\n           DISPLAY \"HELLO\".\n           STOP RUN."
+
+	require.NoError(t, os.WriteFile(filePath, []byte(content), 0644))
+
+	fi := graph.FileInfo{Path: filePath, Type: graph.FileTypeCOBOL}
+	chunks, err := ChunkFile(fi, 100000, zap.NewNop())
+	require.NoError(t, err)
+
+	require.Len(t, chunks, 1)
+	assert.Equal(t, 0, chunks[0].Index)
+	assert.Equal(t, 1, chunks[0].Total)
+	assert.Equal(t, 1, chunks[0].Pass)
+}
+
 func TestChunkFilePass2_MultiChunk(t *testing.T) {
 	dir := t.TempDir()
 	filePath := filepath.Join(dir, "BIG.CBL")

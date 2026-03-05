@@ -23,7 +23,9 @@ type Chunk struct {
 }
 
 // ChunkFile reads a file and returns chunks suitable for Pass 1 analysis.
-// For Pass 1, files are sent as a single chunk (no splitting needed).
+// If the file exceeds the token limit, it is split at division boundaries,
+// with each chunk receiving the IDENTIFICATION and ENVIRONMENT divisions as preamble.
+// If a single division still exceeds the limit, PROCEDURE DIVISION is split at paragraph boundaries.
 func ChunkFile(fi graph.FileInfo, tokenLimit int, logger *zap.Logger) ([]Chunk, error) {
 	data, err := os.ReadFile(fi.Path)
 	if err != nil {
@@ -33,29 +35,145 @@ func ChunkFile(fi graph.FileInfo, tokenLimit int, logger *zap.Logger) ([]Chunk, 
 	content := string(data)
 	tokens := EstimateTokens(content)
 
-	if tokens > tokenLimit {
-		logger.Warn("file exceeds token limit, truncating",
-			zap.String("file", fi.Path),
-			zap.Int("estimated_tokens", tokens),
-			zap.Int("limit", tokenLimit),
-		)
-		// Truncate to fit within limit (rough: 4 chars per token)
-		maxChars := tokenLimit * 4
-		if maxChars < len(content) {
-			content = content[:maxChars]
+	// If it fits, return single chunk
+	if tokens <= tokenLimit {
+		return []Chunk{
+			{
+				FileName: fi.Path,
+				Content:  content,
+				FileInfo: fi,
+				Index:    0,
+				Total:    1,
+				Pass:     1,
+			},
+		}, nil
+	}
+
+	logger.Info("file exceeds token limit, splitting into multiple chunks",
+		zap.String("file", fi.Path),
+		zap.Int("estimated_tokens", tokens),
+		zap.Int("limit", tokenLimit),
+	)
+
+	// Split at division boundaries
+	divs := splitDivisions(content)
+
+	// Build preamble from IDENTIFICATION + ENVIRONMENT (always included in each chunk)
+	preamble := ""
+	for _, name := range []string{"IDENTIFICATION", "ENVIRONMENT"} {
+		if div, ok := divs[name]; ok {
+			preamble += div + "\n"
 		}
 	}
 
-	return []Chunk{
-		{
+	var chunks []Chunk
+
+	// Try to group DATA + PROCEDURE if they fit together
+	dataPart := divs["DATA"]
+	procPart := divs["PROCEDURE"]
+
+	// If the whole file minus preamble fits, send as one (shouldn't happen since we checked above)
+	remaining := ""
+	if dataPart != "" {
+		remaining += dataPart + "\n"
+	}
+	if procPart != "" {
+		remaining += procPart
+	}
+
+	if EstimateTokens(preamble+remaining) <= tokenLimit {
+		return []Chunk{
+			{
+				FileName: fi.Path,
+				Content:  preamble + remaining,
+				FileInfo: fi,
+				Index:    0,
+				Total:    1,
+				Pass:     1,
+			},
+		}, nil
+	}
+
+	// DATA division as its own chunk if it exists and is non-trivial
+	if dataPart != "" && EstimateTokens(dataPart) > 0 {
+		chunks = append(chunks, Chunk{
 			FileName: fi.Path,
-			Content:  content,
+			Content:  preamble + dataPart,
 			FileInfo: fi,
-			Index:    0,
-			Total:    1,
 			Pass:     1,
-		},
-	}, nil
+		})
+	}
+
+	// Handle PROCEDURE division — split at paragraph boundaries if needed
+	if procPart != "" {
+		preambleTokens := EstimateTokens(preamble)
+		procTokens := EstimateTokens(procPart)
+		budget := tokenLimit - preambleTokens
+
+		if budget <= 0 {
+			budget = tokenLimit / 2
+		}
+
+		if procTokens <= budget {
+			chunks = append(chunks, Chunk{
+				FileName: fi.Path,
+				Content:  preamble + procPart,
+				FileInfo: fi,
+				Pass:     1,
+			})
+		} else {
+			// Split PROCEDURE at paragraph boundaries
+			paragraphs := splitParagraphs(procPart)
+			var currentLines []string
+			currentTokens := 0
+
+			for _, para := range paragraphs {
+				paraTokens := EstimateTokens(para.content)
+				if currentTokens+paraTokens > budget && len(currentLines) > 0 {
+					chunks = append(chunks, Chunk{
+						FileName: fi.Path,
+						Content:  preamble + strings.Join(currentLines, "\n"),
+						FileInfo: fi,
+						Pass:     1,
+					})
+					currentLines = nil
+					currentTokens = 0
+				}
+				currentLines = append(currentLines, strings.Split(para.content, "\n")...)
+				currentTokens += paraTokens
+			}
+			if len(currentLines) > 0 {
+				chunks = append(chunks, Chunk{
+					FileName: fi.Path,
+					Content:  preamble + strings.Join(currentLines, "\n"),
+					FileInfo: fi,
+					Pass:     1,
+				})
+			}
+		}
+	}
+
+	// If no chunks were created (edge case), return the full content as one chunk
+	if len(chunks) == 0 {
+		return []Chunk{
+			{
+				FileName: fi.Path,
+				Content:  content,
+				FileInfo: fi,
+				Index:    0,
+				Total:    1,
+				Pass:     1,
+			},
+		}, nil
+	}
+
+	// Set Index/Total on all chunks
+	for i := range chunks {
+		chunks[i].Index = i
+		chunks[i].Total = len(chunks)
+	}
+
+	return chunks, nil
 }
 
 // EstimateTokens provides a rough token count (chars / 4).
@@ -80,15 +198,41 @@ func BuildCopybookIndex(files []graph.FileInfo) CopybookIndex {
 	return idx
 }
 
+// normalizeContinuations joins COBOL fixed-format continuation lines (column 7 = '-').
+// A continuation line has '-' in column 7 (0-indexed column 6) and continues the previous line.
+func normalizeContinuations(content string) string {
+	lines := strings.Split(content, "\n")
+	var result []string
+	for _, line := range lines {
+		if len(line) >= 7 && line[6] == '-' {
+			// This is a continuation line — append its content (from column 12 onward) to the previous line
+			if len(result) > 0 {
+				continuation := ""
+				if len(line) > 11 {
+					continuation = line[11:]
+				} else if len(line) > 7 {
+					continuation = strings.TrimLeft(line[7:], " ")
+				}
+				result[len(result)-1] = strings.TrimRight(result[len(result)-1], " ") + continuation
+				continue
+			}
+		}
+		result = append(result, line)
+	}
+	return strings.Join(result, "\n")
+}
+
 // copyRegex matches COPY statements including optional REPLACING clauses, up to the terminating period.
-var copyRegex = regexp.MustCompile(`(?im)^\s+COPY\s+([A-Za-z0-9-]+)\s*([^.]*?)\.`)
+var copyRegex = regexp.MustCompile(`(?im)^\s+COPY\s+([A-Za-z0-9_-]+)\s*([^.]*?)\.`)
 
 // replacingRegex parses REPLACING pairs: ==old== BY ==new==
 var replacingRegex = regexp.MustCompile(`==\s*([^=]+?)\s*==\s+BY\s+==\s*([^=]+?)\s*==`)
 
 // InlineCopybooks replaces COPY statements with copybook content.
 // Tracks visited set to prevent circular references. maxDepth prevents runaway recursion.
+// Normalizes continuation lines before regex matching to handle multi-line COPY statements.
 func InlineCopybooks(content string, index CopybookIndex, maxDepth int) (string, error) {
+	content = normalizeContinuations(content)
 	return inlineCopybooksRecurse(content, index, maxDepth, make(map[string]bool))
 }
 
@@ -293,7 +437,9 @@ func ChunkFilePass2(fi graph.FileInfo, opts Pass2ChunkOptions, logger *zap.Logge
 var divisionRegex = regexp.MustCompile(`(?im)^\s*(IDENTIFICATION|ENVIRONMENT|DATA|PROCEDURE)\s+DIVISION`)
 
 // splitDivisions splits COBOL content into its four divisions.
+// Normalizes continuation lines before matching division headers.
 func splitDivisions(content string) map[string]string {
+	content = normalizeContinuations(content)
 	divs := make(map[string]string)
 	locs := divisionRegex.FindAllStringSubmatchIndex(content, -1)
 
@@ -322,8 +468,8 @@ type paragraphUnit struct {
 	content string
 }
 
-var paragraphRegex = regexp.MustCompile(`(?m)^\s+([A-Za-z0-9][A-Za-z0-9-]+)\.\s*$`)
-var sectionRegex = regexp.MustCompile(`(?im)^\s+([A-Z][A-Z0-9-]+)\s+SECTION\.\s*$`)
+var paragraphRegex = regexp.MustCompile(`(?im)^\s+([A-Za-z0-9][A-Za-z0-9_-]+)\.\s*$`)
+var sectionRegex = regexp.MustCompile(`(?im)^\s+([A-Za-z][A-Za-z0-9_-]+)\s+SECTION\.\s*$`)
 
 // splitParagraphs splits the PROCEDURE DIVISION into paragraph/section units.
 func splitParagraphs(procedure string) []paragraphUnit {

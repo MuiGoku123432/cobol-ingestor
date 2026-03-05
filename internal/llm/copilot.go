@@ -82,6 +82,7 @@ func (p *CopilotProvider) Complete(ctx context.Context, req CompletionRequest) (
 
 	var content string
 	var usage types.Usage
+	var finishReason string
 
 	for {
 		chunk, err := stream.Next()
@@ -93,6 +94,12 @@ func (p *CopilotProvider) Complete(ctx context.Context, req CompletionRequest) (
 		}
 		content += chunk.Content
 		usage = chunk.Usage
+		// Track finish reason from choices (set on the final chunk)
+		for _, choice := range chunk.Choices {
+			if choice.FinishReason != "" {
+				finishReason = choice.FinishReason
+			}
+		}
 	}
 
 	return &CompletionResponse{
@@ -100,6 +107,8 @@ func (p *CopilotProvider) Complete(ctx context.Context, req CompletionRequest) (
 		Model:        model,
 		PromptTokens: usage.PromptTokens,
 		OutputTokens: usage.CompletionTokens,
+		StopReason:   finishReason,
+		Truncated:    finishReason == "length",
 	}, nil
 }
 

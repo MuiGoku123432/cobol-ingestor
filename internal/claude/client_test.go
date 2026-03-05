@@ -129,3 +129,81 @@ func (m *failNTimesMock) Complete(ctx context.Context, req llm.CompletionRequest
 func (m *failNTimesMock) Name() string                        { return "fail-mock" }
 func (m *failNTimesMock) HealthCheck(_ context.Context) error { return nil }
 func (m *failNTimesMock) Close() error                        { return nil }
+
+func TestTruncation_RetriesWithDoubledMaxTokens(t *testing.T) {
+	// First call returns truncated response, second call succeeds
+	callCount := 0
+	truncateMock := &truncateMock{
+		truncateFirst: true,
+		response:      `{"programId": "TRUNCTEST"}`,
+		callCount:     &callCount,
+	}
+
+	cfg := config.ClaudeConfig{
+		OpusModel:      "claude-opus-4-6",
+		SonnetModel:    "claude-sonnet-4-5-20250929",
+		MaxRetries:     3,
+		Pass1MaxTokens: 4096,
+	}
+	logger := zap.NewNop()
+	client, err := claude.NewClient(truncateMock, cfg, logger)
+	require.NoError(t, err)
+
+	resp, err := client.AnalyzeStructural(context.Background(), "TEST.CBL", "content")
+	require.NoError(t, err)
+	assert.Contains(t, resp, "TRUNCTEST")
+	assert.Equal(t, 2, callCount) // 1 truncated + 1 success with doubled tokens
+}
+
+func TestTruncation_ReturnsErrorAfterRetryExhaustion(t *testing.T) {
+	// Both calls return truncated
+	callCount := 0
+	alwaysTruncateMock := &truncateMock{
+		truncateAlways: true,
+		response:       `{"partial":`,
+		callCount:      &callCount,
+	}
+
+	cfg := config.ClaudeConfig{
+		OpusModel:      "claude-opus-4-6",
+		SonnetModel:    "claude-sonnet-4-5-20250929",
+		MaxRetries:     3,
+		Pass1MaxTokens: 4096,
+	}
+	logger := zap.NewNop()
+	client, err := claude.NewClient(alwaysTruncateMock, cfg, logger)
+	require.NoError(t, err)
+
+	_, err = client.AnalyzeStructural(context.Background(), "TEST.CBL", "content")
+	require.Error(t, err)
+	assert.ErrorIs(t, err, claude.ErrResponseTruncated)
+}
+
+// truncateMock simulates truncated responses.
+type truncateMock struct {
+	truncateFirst  bool // only first call is truncated
+	truncateAlways bool // all calls are truncated
+	response       string
+	callCount      *int
+}
+
+func (m *truncateMock) Complete(_ context.Context, req llm.CompletionRequest) (*llm.CompletionResponse, error) {
+	*m.callCount++
+	truncated := m.truncateAlways || (m.truncateFirst && *m.callCount == 1)
+	stopReason := "end_turn"
+	if truncated {
+		stopReason = "max_tokens"
+	}
+	return &llm.CompletionResponse{
+		Content:      m.response,
+		Model:        req.Model,
+		PromptTokens: 100,
+		OutputTokens: 50,
+		StopReason:   stopReason,
+		Truncated:    truncated,
+	}, nil
+}
+
+func (m *truncateMock) Name() string                        { return "truncate-mock" }
+func (m *truncateMock) HealthCheck(_ context.Context) error { return nil }
+func (m *truncateMock) Close() error                        { return nil }

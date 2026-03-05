@@ -89,20 +89,34 @@ func (p *Pipeline) RunPass1(ctx context.Context, scanResult *scanner.ScanResult)
 
 	results := pool.RunPass1(ctx, chunks, processFn, p.Config.Claude.MaxWorkers, p.Logger)
 
-	successCount := 0
-	errorCount := 0
+	// Group results by file for multi-chunk merging
+	fileResults := make(map[string][]*graph.Pass1Result)
+	fileErrors := make(map[string]bool)
 	for _, r := range results {
 		if r.Err != nil {
+			fileErrors[r.FilePath] = true
+			continue
+		}
+		fileResults[r.FilePath] = append(fileResults[r.FilePath], r.Result)
+	}
+
+	successCount := 0
+	errorCount := len(fileErrors)
+	for filePath, resultGroup := range fileResults {
+		if fileErrors[filePath] {
+			// Skip files that had any chunk errors
 			errorCount++
 			continue
 		}
-		if err := p.Writer.WritePass1Result(ctx, r.Result); err != nil {
-			p.Logger.Error("failed to write to neo4j", zap.String("file", r.FilePath), zap.Error(err))
+
+		merged := graph.MergePass1Results(resultGroup)
+		if err := p.Writer.WritePass1Result(ctx, merged); err != nil {
+			p.Logger.Error("failed to write to neo4j", zap.String("file", filePath), zap.Error(err))
 			errorCount++
 			continue
 		}
 		for _, f := range changed {
-			if f.Path == r.FilePath {
+			if f.Path == filePath {
 				if err := p.Cache.MarkProcessed(f.Path, f.Hash); err != nil {
 					p.Logger.Error("failed to update cache", zap.String("file", f.Path), zap.Error(err))
 				}
@@ -164,16 +178,26 @@ func (p *Pipeline) RunPass2(ctx context.Context, scanResult *scanner.ScanResult)
 		allChunks = append(allChunks, fileChunks...)
 	}
 
-	for _, f := range changed {
+	// Batch lookup: resolve file paths to program IDs in a single query
+	{
+		paths := make([]any, len(changed))
+		for i, f := range changed {
+			paths[i] = f.Path
+		}
 		session := p.Neo4jClient.NewSession(ctx)
 		result, err := session.Run(ctx,
-			"MATCH (prog:Program {filePath: $path}) RETURN prog.programId AS pid LIMIT 1",
-			map[string]any{"path": f.Path},
+			"UNWIND $paths AS path MATCH (prog:Program {filePath: path}) RETURN path, prog.programId AS pid",
+			map[string]any{"paths": paths},
 		)
-		if err == nil && result.Next(ctx) {
-			if val, ok := result.Record().Get("pid"); ok {
-				if pid, ok := val.(string); ok {
-					fileProgramIDs[f.Path] = pid
+		if err == nil {
+			for result.Next(ctx) {
+				record := result.Record()
+				pathVal, _ := record.Get("path")
+				pidVal, _ := record.Get("pid")
+				if path, ok := pathVal.(string); ok {
+					if pid, ok := pidVal.(string); ok {
+						fileProgramIDs[path] = pid
+					}
 				}
 			}
 		}

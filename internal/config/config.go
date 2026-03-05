@@ -92,8 +92,8 @@ func Load() (*Config, error) {
 	viper.SetDefault("CLAUDE_SONNET_MODEL", "claude-sonnet-4-5-20250929")
 	viper.SetDefault("CLAUDE_MAX_WORKERS", 5)
 	viper.SetDefault("CLAUDE_MAX_RETRIES", 3)
-	viper.SetDefault("CLAUDE_PASS1_MAX_TOKENS", 4096)
-	viper.SetDefault("CLAUDE_PASS2_MAX_TOKENS", 10000)
+	viper.SetDefault("CLAUDE_PASS1_MAX_TOKENS", 8192)
+	viper.SetDefault("CLAUDE_PASS2_MAX_TOKENS", 16000)
 	viper.SetDefault("CLAUDE_PASS3_MAX_TOKENS", 16000)
 
 	// Neo4j defaults

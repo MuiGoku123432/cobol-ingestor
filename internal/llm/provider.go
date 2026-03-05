@@ -34,6 +34,8 @@ type CompletionResponse struct {
 	Model        string
 	PromptTokens int
 	OutputTokens int
+	StopReason   string // "end_turn", "max_tokens", "stop_sequence"
+	Truncated    bool   // true when StopReason == "max_tokens"
 }
 
 // Provider is the interface that both the Anthropic and Copilot backends implement.

@@ -96,6 +96,33 @@ func (w *BatchWriter) WriteRelationships(ctx context.Context, relType, fromLabel
 	return nil
 }
 
+// batchUpdate runs a Cypher statement with UNWIND against batches of rows.
+// This replaces N+1 individual session.ExecuteWrite calls with batched UNWIND queries.
+func (w *BatchWriter) batchUpdate(ctx context.Context, cypher string, rows []map[string]any) error {
+	if len(rows) == 0 {
+		return nil
+	}
+
+	for i := 0; i < len(rows); i += w.batchSize {
+		end := i + w.batchSize
+		if end > len(rows) {
+			end = len(rows)
+		}
+		batch := rows[i:end]
+
+		session := w.client.NewSession(ctx)
+		_, err := session.ExecuteWrite(ctx, func(tx neo4j.ManagedTransaction) (any, error) {
+			_, err := tx.Run(ctx, cypher, map[string]any{"rows": batch})
+			return nil, err
+		})
+		session.Close(ctx)
+		if err != nil {
+			return fmt.Errorf("batch update: %w", err)
+		}
+	}
+	return nil
+}
+
 // mergeKeyForLabel returns the MERGE property key for a given node label.
 func mergeKeyForLabel(label string) string {
 	switch label {
@@ -478,27 +505,23 @@ func (w *BatchWriter) WritePass2Result(ctx context.Context, result *graph.Pass2R
 		}
 	}
 
-	// Update Paragraph nodes with conditional logic
-	for _, cl := range result.ConditionalLogic {
-		if cl.Paragraph == "" {
-			continue
+	// Update Paragraph nodes with conditional logic (batched)
+	if len(result.ConditionalLogic) > 0 {
+		var clRows []map[string]any
+		for _, cl := range result.ConditionalLogic {
+			if cl.Paragraph == "" {
+				continue
+			}
+			clRows = append(clRows, map[string]any{
+				"name":  cl.Paragraph,
+				"entry": fmt.Sprintf("[%s] %s", cl.Type, cl.Condition),
+			})
 		}
-		session := w.client.NewSession(ctx)
-		_, err := session.ExecuteWrite(ctx, func(tx neo4j.ManagedTransaction) (any, error) {
-			_, err := tx.Run(ctx,
-				"MATCH (p:Paragraph {name: $name}) "+
-					"SET p.conditionalLogic = coalesce(p.conditionalLogic, []) + [$entry]",
-				map[string]any{
-					"name":  cl.Paragraph,
-					"entry": fmt.Sprintf("[%s] %s", cl.Type, cl.Condition),
-				},
-			)
-			return nil, err
-		})
-		session.Close(ctx)
-		if err != nil {
-			w.logger.Warn("failed to update conditional logic",
-				zap.String("paragraph", cl.Paragraph), zap.Error(err))
+		if err := w.batchUpdate(ctx,
+			"UNWIND $rows AS row MATCH (p:Paragraph {name: row.name}) "+
+				"SET p.conditionalLogic = coalesce(p.conditionalLogic, []) + [row.entry]",
+			clRows); err != nil {
+			w.logger.Warn("failed to update conditional logic", zap.Error(err))
 		}
 	}
 
@@ -520,55 +543,45 @@ func (w *BatchWriter) WritePass2Result(ctx context.Context, result *graph.Pass2R
 		}
 	}
 
-	// Update Paragraph nodes with error handling patterns
-	for _, eh := range result.ErrorHandlers {
-		if eh.Paragraph == "" {
-			continue
+	// Update Paragraph nodes with error handling patterns (batched)
+	if len(result.ErrorHandlers) > 0 {
+		var ehRows []map[string]any
+		for _, eh := range result.ErrorHandlers {
+			if eh.Paragraph == "" {
+				continue
+			}
+			ehRows = append(ehRows, map[string]any{
+				"name":    eh.Paragraph,
+				"pattern": eh.Pattern,
+				"details": eh.Details,
+			})
 		}
-		session := w.client.NewSession(ctx)
-		_, err := session.ExecuteWrite(ctx, func(tx neo4j.ManagedTransaction) (any, error) {
-			_, err := tx.Run(ctx,
-				"MATCH (p:Paragraph {name: $name}) SET p.errorPattern = $pattern, p.errorDetails = $details",
-				map[string]any{
-					"name":    eh.Paragraph,
-					"pattern": eh.Pattern,
-					"details": eh.Details,
-				},
-			)
-			return nil, err
-		})
-		session.Close(ctx)
-		if err != nil {
-			w.logger.Warn("failed to update error handling",
-				zap.String("paragraph", eh.Paragraph), zap.Error(err))
+		if err := w.batchUpdate(ctx,
+			"UNWIND $rows AS row MATCH (p:Paragraph {name: row.name}) "+
+				"SET p.errorPattern = row.pattern, p.errorDetails = row.details",
+			ehRows); err != nil {
+			w.logger.Warn("failed to update error handling", zap.Error(err))
 		}
 	}
 
-	// Update Paragraph nodes with annotations (description + category)
+	// Update Paragraph nodes with annotations (batched)
 	if len(result.Annotations) > 0 {
+		var annRows []map[string]any
 		for _, a := range result.Annotations {
 			if a.Paragraph == "" {
 				continue
 			}
-			session := w.client.NewSession(ctx)
-			_, err := session.ExecuteWrite(ctx, func(tx neo4j.ManagedTransaction) (any, error) {
-				_, err := tx.Run(ctx,
-					"MATCH (p:Paragraph {name: $name}) SET p.description = $desc, p.category = $cat",
-					map[string]any{
-						"name": a.Paragraph,
-						"desc": a.Description,
-						"cat":  a.Category,
-					},
-				)
-				return nil, err
+			annRows = append(annRows, map[string]any{
+				"name": a.Paragraph,
+				"desc": a.Description,
+				"cat":  a.Category,
 			})
-			session.Close(ctx)
-			if err != nil {
-				w.logger.Warn("failed to update paragraph annotation",
-					zap.String("paragraph", a.Paragraph),
-					zap.Error(err),
-				)
-			}
+		}
+		if err := w.batchUpdate(ctx,
+			"UNWIND $rows AS row MATCH (p:Paragraph {name: row.name}) "+
+				"SET p.description = row.desc, p.category = row.cat",
+			annRows); err != nil {
+			w.logger.Warn("failed to update paragraph annotations", zap.Error(err))
 		}
 	}
 
@@ -607,122 +620,110 @@ func (w *BatchWriter) WritePass3Result(ctx context.Context, result *graph.Pass3R
 		}
 	}
 
-	// Set deadCode flags on programs
-	for _, dc := range result.DeadCodeFlags {
-		session := w.client.NewSession(ctx)
-		_, err := session.ExecuteWrite(ctx, func(tx neo4j.ManagedTransaction) (any, error) {
-			_, err := tx.Run(ctx,
-				"MATCH (p:Program {programId: $pid}) SET p.deadCode = true, p.deadCodeReason = $reason",
-				map[string]any{"pid": dc.ProgramID, "reason": dc.Reason})
-			return nil, err
-		})
-		session.Close(ctx)
-		if err != nil {
-			w.logger.Warn("failed to set dead code flag",
-				zap.String("program", dc.ProgramID), zap.Error(err))
+	// Set deadCode flags on programs (batched)
+	if len(result.DeadCodeFlags) > 0 {
+		rows := make([]map[string]any, len(result.DeadCodeFlags))
+		for i, dc := range result.DeadCodeFlags {
+			rows[i] = map[string]any{"pid": dc.ProgramID, "reason": dc.Reason}
+		}
+		if err := w.batchUpdate(ctx,
+			"UNWIND $rows AS row MATCH (p:Program {programId: row.pid}) "+
+				"SET p.deadCode = true, p.deadCodeReason = row.reason",
+			rows); err != nil {
+			w.logger.Warn("failed to set dead code flags", zap.Error(err))
 		}
 	}
 
-	// Set risk flags on programs
-	for _, rf := range result.RiskFlags {
-		session := w.client.NewSession(ctx)
-		_, err := session.ExecuteWrite(ctx, func(tx neo4j.ManagedTransaction) (any, error) {
-			_, err := tx.Run(ctx,
-				"MATCH (p:Program {programId: $pid}) SET p.riskScore = $score, p.riskType = $riskType, p.riskDetails = $details",
-				map[string]any{
-					"pid":      rf.ProgramID,
-					"score":    rf.Score,
-					"riskType": rf.RiskType,
-					"details":  rf.Details,
-				})
-			return nil, err
-		})
-		session.Close(ctx)
-		if err != nil {
-			w.logger.Warn("failed to set risk flag",
-				zap.String("program", rf.ProgramID), zap.Error(err))
+	// Set risk flags on programs (batched)
+	if len(result.RiskFlags) > 0 {
+		rows := make([]map[string]any, len(result.RiskFlags))
+		for i, rf := range result.RiskFlags {
+			rows[i] = map[string]any{
+				"pid":      rf.ProgramID,
+				"score":    rf.Score,
+				"riskType": rf.RiskType,
+				"details":  rf.Details,
+			}
+		}
+		if err := w.batchUpdate(ctx,
+			"UNWIND $rows AS row MATCH (p:Program {programId: row.pid}) "+
+				"SET p.riskScore = row.score, p.riskType = row.riskType, p.riskDetails = row.details",
+			rows); err != nil {
+			w.logger.Warn("failed to set risk flags", zap.Error(err))
 		}
 	}
 
-	// Set bridge program flags
-	for _, bp := range result.BridgePrograms {
-		session := w.client.NewSession(ctx)
-		_, err := session.ExecuteWrite(ctx, func(tx neo4j.ManagedTransaction) (any, error) {
-			_, err := tx.Run(ctx,
-				"MATCH (p:Program {programId: $pid}) SET p.isBridge = true, p.bridgeDomains = $domains, p.bridgeReason = $reason",
-				map[string]any{
-					"pid":     bp.ProgramID,
-					"domains": bp.Domains,
-					"reason":  bp.Reason,
-				})
-			return nil, err
-		})
-		session.Close(ctx)
-		if err != nil {
-			w.logger.Warn("failed to set bridge program flag",
-				zap.String("program", bp.ProgramID), zap.Error(err))
+	// Set bridge program flags (batched)
+	if len(result.BridgePrograms) > 0 {
+		rows := make([]map[string]any, len(result.BridgePrograms))
+		for i, bp := range result.BridgePrograms {
+			rows[i] = map[string]any{
+				"pid":     bp.ProgramID,
+				"domains": bp.Domains,
+				"reason":  bp.Reason,
+			}
+		}
+		if err := w.batchUpdate(ctx,
+			"UNWIND $rows AS row MATCH (p:Program {programId: row.pid}) "+
+				"SET p.isBridge = true, p.bridgeDomains = row.domains, p.bridgeReason = row.reason",
+			rows); err != nil {
+			w.logger.Warn("failed to set bridge program flags", zap.Error(err))
 		}
 	}
 
-	// Set copybook risk flags
-	for _, cr := range result.CopybookRisks {
-		session := w.client.NewSession(ctx)
-		_, err := session.ExecuteWrite(ctx, func(tx neo4j.ManagedTransaction) (any, error) {
-			_, err := tx.Run(ctx,
-				"MATCH (c:Copybook {name: $name}) SET c.riskLevel = $risk, c.programCount = $count, c.riskReason = $reason",
-				map[string]any{
-					"name":   cr.Copybook,
-					"risk":   cr.RiskLevel,
-					"count":  cr.ProgramCount,
-					"reason": cr.Reason,
-				})
-			return nil, err
-		})
-		session.Close(ctx)
-		if err != nil {
-			w.logger.Warn("failed to set copybook risk",
-				zap.String("copybook", cr.Copybook), zap.Error(err))
+	// Set copybook risk flags (batched)
+	if len(result.CopybookRisks) > 0 {
+		rows := make([]map[string]any, len(result.CopybookRisks))
+		for i, cr := range result.CopybookRisks {
+			rows[i] = map[string]any{
+				"name":   cr.Copybook,
+				"risk":   cr.RiskLevel,
+				"count":  cr.ProgramCount,
+				"reason": cr.Reason,
+			}
+		}
+		if err := w.batchUpdate(ctx,
+			"UNWIND $rows AS row MATCH (c:Copybook {name: row.name}) "+
+				"SET c.riskLevel = row.risk, c.programCount = row.count, c.riskReason = row.reason",
+			rows); err != nil {
+			w.logger.Warn("failed to set copybook risks", zap.Error(err))
 		}
 	}
 
-	// Set modernization candidate flags
-	for _, mc := range result.ModernizationCandidates {
-		session := w.client.NewSession(ctx)
-		_, err := session.ExecuteWrite(ctx, func(tx neo4j.ManagedTransaction) (any, error) {
-			_, err := tx.Run(ctx,
-				"MATCH (p:Program {programId: $pid}) SET p.modernizationScore = $score, p.modernizationReason = $reason, p.modernizationApproach = $approach",
-				map[string]any{
-					"pid":      mc.ProgramID,
-					"score":    mc.Score,
-					"reason":   mc.Reason,
-					"approach": mc.Approach,
-				})
-			return nil, err
-		})
-		session.Close(ctx)
-		if err != nil {
-			w.logger.Warn("failed to set modernization candidate",
-				zap.String("program", mc.ProgramID), zap.Error(err))
+	// Set modernization candidate flags (batched)
+	if len(result.ModernizationCandidates) > 0 {
+		rows := make([]map[string]any, len(result.ModernizationCandidates))
+		for i, mc := range result.ModernizationCandidates {
+			rows[i] = map[string]any{
+				"pid":      mc.ProgramID,
+				"score":    mc.Score,
+				"reason":   mc.Reason,
+				"approach": mc.Approach,
+			}
+		}
+		if err := w.batchUpdate(ctx,
+			"UNWIND $rows AS row MATCH (p:Program {programId: row.pid}) "+
+				"SET p.modernizationScore = row.score, p.modernizationReason = row.reason, p.modernizationApproach = row.approach",
+			rows); err != nil {
+			w.logger.Warn("failed to set modernization candidates", zap.Error(err))
 		}
 	}
 
-	// Set volume estimates on programs
-	for _, ve := range result.VolumeEstimates {
-		session := w.client.NewSession(ctx)
-		_, err := session.ExecuteWrite(ctx, func(tx neo4j.ManagedTransaction) (any, error) {
-			_, err := tx.Run(ctx,
-				"MATCH (p:Program {programId: $pid}) SET p.volumeEstimate = $estimate, p.volumeReason = $reason",
-				map[string]any{
-					"pid":      ve.ProgramID,
-					"estimate": ve.Estimate,
-					"reason":   ve.Reason,
-				})
-			return nil, err
-		})
-		session.Close(ctx)
-		if err != nil {
-			w.logger.Warn("failed to set volume estimate",
-				zap.String("program", ve.ProgramID), zap.Error(err))
+	// Set volume estimates on programs (batched)
+	if len(result.VolumeEstimates) > 0 {
+		rows := make([]map[string]any, len(result.VolumeEstimates))
+		for i, ve := range result.VolumeEstimates {
+			rows[i] = map[string]any{
+				"pid":      ve.ProgramID,
+				"estimate": ve.Estimate,
+				"reason":   ve.Reason,
+			}
+		}
+		if err := w.batchUpdate(ctx,
+			"UNWIND $rows AS row MATCH (p:Program {programId: row.pid}) "+
+				"SET p.volumeEstimate = row.estimate, p.volumeReason = row.reason",
+			rows); err != nil {
+			w.logger.Warn("failed to set volume estimates", zap.Error(err))
 		}
 	}
 
