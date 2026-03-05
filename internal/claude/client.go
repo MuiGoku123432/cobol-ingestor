@@ -34,6 +34,7 @@ type Client struct {
 	pass1MaxTokens int
 	pass2MaxTokens int
 	pass3MaxTokens int
+	requestTimeout time.Duration
 	limiter        *rate.Limiter
 	logger         *zap.Logger
 	pass1Tmpl      *template.Template
@@ -61,6 +62,11 @@ func NewClient(provider llm.Provider, cfg config.ClaudeConfig, logger *zap.Logge
 	// Rate limit: ~50 requests per minute to stay within API limits
 	limiter := rate.NewLimiter(rate.Every(time.Second), 2)
 
+	requestTimeout := cfg.RequestTimeout
+	if requestTimeout == 0 {
+		requestTimeout = 10 * time.Minute
+	}
+
 	return &Client{
 		provider:       provider,
 		sonnetModel:    cfg.SonnetModel,
@@ -69,6 +75,7 @@ func NewClient(provider llm.Provider, cfg config.ClaudeConfig, logger *zap.Logge
 		pass1MaxTokens: cfg.Pass1MaxTokens,
 		pass2MaxTokens: cfg.Pass2MaxTokens,
 		pass3MaxTokens: cfg.Pass3MaxTokens,
+		requestTimeout: requestTimeout,
 		limiter:        limiter,
 		logger:      logger,
 		pass1Tmpl:   p1Tmpl,
@@ -153,7 +160,9 @@ func (c *Client) completeWithRetry(ctx context.Context, req llm.CompletionReques
 			return "", fmt.Errorf("rate limiter: %w", err)
 		}
 
-		resp, err := c.provider.Complete(ctx, req)
+		reqCtx, reqCancel := context.WithTimeout(ctx, c.requestTimeout)
+		resp, err := c.provider.Complete(reqCtx, req)
+		reqCancel()
 		if err != nil {
 			lastErr = err
 			c.logger.Warn("LLM API call failed, retrying",
@@ -205,7 +214,9 @@ func (c *Client) completeWithRetry(ctx context.Context, req llm.CompletionReques
 			if err := c.limiter.Wait(ctx); err != nil {
 				return "", fmt.Errorf("rate limiter: %w", err)
 			}
-			retryResp, retryErr := c.provider.Complete(ctx, retryReq)
+			retryCtx, retryCancel := context.WithTimeout(ctx, c.requestTimeout)
+		retryResp, retryErr := c.provider.Complete(retryCtx, retryReq)
+		retryCancel()
 			if retryErr != nil {
 				return "", fmt.Errorf("truncation retry failed: %w", retryErr)
 			}

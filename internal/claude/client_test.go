@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"testing"
+	"time"
 
 	"cobol-ingestor/internal/chunker"
 	"cobol-ingestor/internal/claude"
@@ -19,9 +20,10 @@ import (
 func newTestClient(t *testing.T, mock *llm.MockProvider) *claude.Client {
 	t.Helper()
 	cfg := config.ClaudeConfig{
-		OpusModel:   "claude-opus-4-6",
-		SonnetModel: "claude-sonnet-4-5-20250929",
-		MaxRetries:  3,
+		OpusModel:      "claude-opus-4-6",
+		SonnetModel:    "claude-sonnet-4-5-20250929",
+		MaxRetries:     3,
+		RequestTimeout: 10 * time.Minute,
 	}
 	logger := zap.NewNop()
 	client, err := claude.NewClient(mock, cfg, logger)
@@ -95,9 +97,10 @@ func TestRetryOnError(t *testing.T) {
 	}
 
 	cfg := config.ClaudeConfig{
-		OpusModel:   "claude-opus-4-6",
-		SonnetModel: "claude-sonnet-4-5-20250929",
-		MaxRetries:  3,
+		OpusModel:      "claude-opus-4-6",
+		SonnetModel:    "claude-sonnet-4-5-20250929",
+		MaxRetries:     3,
+		RequestTimeout: 10 * time.Minute,
 	}
 	logger := zap.NewNop()
 	client, err := claude.NewClient(failingMock, cfg, logger)

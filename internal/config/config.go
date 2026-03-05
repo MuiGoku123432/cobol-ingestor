@@ -50,6 +50,7 @@ type ClaudeConfig struct {
 	Pass1MaxTokens   int
 	Pass2MaxTokens   int
 	Pass3MaxTokens   int
+	RequestTimeout   time.Duration
 }
 
 type Neo4jConfig struct {
@@ -84,8 +85,8 @@ func Load() (*Config, error) {
 	// LLM provider defaults
 	viper.SetDefault("LLM_PROVIDER", "anthropic")
 	viper.SetDefault("COPILOT_ACCOUNT_TYPE", "individual")
-	viper.SetDefault("LLM_TIMEOUT", "180s")
-	viper.SetDefault("LLM_RESPONSE_HEADER_TIMEOUT", "120s")
+	viper.SetDefault("LLM_TIMEOUT", "600s")
+	viper.SetDefault("LLM_RESPONSE_HEADER_TIMEOUT", "300s")
 
 	// Claude model defaults (used by both providers)
 	viper.SetDefault("CLAUDE_OPUS_MODEL", "claude-opus-4-6")
@@ -128,11 +129,11 @@ func Load() (*Config, error) {
 
 	llmTimeout, err := time.ParseDuration(viper.GetString("LLM_TIMEOUT"))
 	if err != nil {
-		llmTimeout = 180 * time.Second
+		llmTimeout = 600 * time.Second
 	}
 	llmResponseHeaderTimeout, err := time.ParseDuration(viper.GetString("LLM_RESPONSE_HEADER_TIMEOUT"))
 	if err != nil {
-		llmResponseHeaderTimeout = 120 * time.Second
+		llmResponseHeaderTimeout = 300 * time.Second
 	}
 
 	cfg := &Config{
@@ -152,6 +153,7 @@ func Load() (*Config, error) {
 			Pass1MaxTokens: viper.GetInt("CLAUDE_PASS1_MAX_TOKENS"),
 			Pass2MaxTokens: viper.GetInt("CLAUDE_PASS2_MAX_TOKENS"),
 			Pass3MaxTokens: viper.GetInt("CLAUDE_PASS3_MAX_TOKENS"),
+			RequestTimeout: llmTimeout,
 		},
 		Neo4j: Neo4jConfig{
 			URI:      viper.GetString("NEO4J_URI"),
