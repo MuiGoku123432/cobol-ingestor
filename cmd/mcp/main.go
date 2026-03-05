@@ -49,9 +49,11 @@ func main() {
 		handler := gomcp.NewStreamableHTTPHandler(func(r *http.Request) *gomcp.Server {
 			return server
 		}, nil)
+		mux := http.NewServeMux()
+		mux.Handle("/mcp", handler)
 		addr := fmt.Sprintf(":%s", httpPort)
-		logger.Info("starting MCP HTTP server", zap.String("addr", addr))
-		if err := http.ListenAndServe(addr, handler); err != nil {
+		logger.Info("starting MCP HTTP server", zap.String("addr", addr), zap.String("endpoint", "/mcp"))
+		if err := http.ListenAndServe(addr, mux); err != nil {
 			logger.Fatal("http server", zap.Error(err))
 		}
 	} else {
