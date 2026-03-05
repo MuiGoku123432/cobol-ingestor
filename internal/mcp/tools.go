@@ -20,6 +20,16 @@ func registerAllTools(s *mcp.Server, reader n4j.Reader) {
 	registerListBusinessDomains(s, reader)
 	registerGetBusinessDomain(s, reader)
 	registerGetDashboardStats(s, reader)
+	registerGetProgramConditions(s, reader)
+	registerGetProgramParameters(s, reader)
+	registerGetProgramConditionalLogic(s, reader)
+	registerGetProgramErrorHandlers(s, reader)
+	registerGetProgramExternalInterfaces(s, reader)
+	registerListBridgePrograms(s, reader)
+	registerListCopybookRisks(s, reader)
+	registerListModernizationCandidates(s, reader)
+	registerListRiskPrograms(s, reader)
+	registerListVolumeEstimates(s, reader)
 }
 
 func toolError(msg string) *mcp.CallToolResult {
@@ -205,5 +215,173 @@ func registerGetDashboardStats(s *mcp.Server, reader n4j.Reader) {
 			return nil, nil, err
 		}
 		return nil, stats, nil
+	})
+}
+
+func registerGetProgramConditions(s *mcp.Server, reader n4j.Reader) {
+	type output struct {
+		Conditions []n4j.ConditionInfo `json:"conditions"`
+	}
+	mcp.AddTool(s, &mcp.Tool{
+		Name:        "get_program_conditions",
+		Description: "List 88-level condition variables defined in a program.",
+	}, func(ctx context.Context, req *mcp.CallToolRequest, input GetProgramInput) (*mcp.CallToolResult, *output, error) {
+		items, err := reader.GetProgramConditions(ctx, input.ProgramID)
+		if err != nil {
+			return nil, nil, err
+		}
+		return nil, &output{Conditions: items}, nil
+	})
+}
+
+func registerGetProgramParameters(s *mcp.Server, reader n4j.Reader) {
+	type output struct {
+		Parameters []n4j.ParameterInfo `json:"parameters"`
+	}
+	mcp.AddTool(s, &mcp.Tool{
+		Name:        "get_program_parameters",
+		Description: "List LINKAGE SECTION parameters for a program with direction (IN/OUT/INOUT).",
+	}, func(ctx context.Context, req *mcp.CallToolRequest, input GetProgramInput) (*mcp.CallToolResult, *output, error) {
+		items, err := reader.GetProgramParameters(ctx, input.ProgramID)
+		if err != nil {
+			return nil, nil, err
+		}
+		return nil, &output{Parameters: items}, nil
+	})
+}
+
+func registerGetProgramConditionalLogic(s *mcp.Server, reader n4j.Reader) {
+	type output struct {
+		Logic []n4j.ConditionalLogicInfo `json:"conditionalLogic"`
+	}
+	mcp.AddTool(s, &mcp.Tool{
+		Name:        "get_program_conditional_logic",
+		Description: "List IF/EVALUATE decision points in a program's paragraphs.",
+	}, func(ctx context.Context, req *mcp.CallToolRequest, input GetProgramInput) (*mcp.CallToolResult, *output, error) {
+		items, err := reader.GetProgramConditionalLogic(ctx, input.ProgramID)
+		if err != nil {
+			return nil, nil, err
+		}
+		return nil, &output{Logic: items}, nil
+	})
+}
+
+func registerGetProgramErrorHandlers(s *mcp.Server, reader n4j.Reader) {
+	type output struct {
+		Handlers []n4j.ErrorHandlerInfo `json:"errorHandlers"`
+	}
+	mcp.AddTool(s, &mcp.Tool{
+		Name:        "get_program_error_handlers",
+		Description: "List error handling patterns found in a program's paragraphs.",
+	}, func(ctx context.Context, req *mcp.CallToolRequest, input GetProgramInput) (*mcp.CallToolResult, *output, error) {
+		items, err := reader.GetProgramErrorHandlers(ctx, input.ProgramID)
+		if err != nil {
+			return nil, nil, err
+		}
+		return nil, &output{Handlers: items}, nil
+	})
+}
+
+func registerGetProgramExternalInterfaces(s *mcp.Server, reader n4j.Reader) {
+	type output struct {
+		Interfaces []n4j.ExternalInterfaceInfo `json:"externalInterfaces"`
+	}
+	mcp.AddTool(s, &mcp.Tool{
+		Name:        "get_program_external_interfaces",
+		Description: "List external integration points (MQ, CICS LINK/XCTL, TCP, file transfers) for a program.",
+	}, func(ctx context.Context, req *mcp.CallToolRequest, input GetProgramInput) (*mcp.CallToolResult, *output, error) {
+		items, err := reader.GetProgramExternalInterfaces(ctx, input.ProgramID)
+		if err != nil {
+			return nil, nil, err
+		}
+		return nil, &output{Interfaces: items}, nil
+	})
+}
+
+func registerListBridgePrograms(s *mcp.Server, reader n4j.Reader) {
+	type emptyInput struct{}
+	type output struct {
+		Programs []n4j.BridgeProgramInfo `json:"programs"`
+	}
+	mcp.AddTool(s, &mcp.Tool{
+		Name:        "list_bridge_programs",
+		Description: "List programs that connect multiple business domains.",
+	}, func(ctx context.Context, req *mcp.CallToolRequest, input emptyInput) (*mcp.CallToolResult, *output, error) {
+		items, err := reader.ListBridgePrograms(ctx)
+		if err != nil {
+			return nil, nil, err
+		}
+		return nil, &output{Programs: items}, nil
+	})
+}
+
+func registerListCopybookRisks(s *mcp.Server, reader n4j.Reader) {
+	type emptyInput struct{}
+	type output struct {
+		Risks []n4j.CopybookRiskInfo `json:"risks"`
+	}
+	mcp.AddTool(s, &mcp.Tool{
+		Name:        "list_copybook_risks",
+		Description: "List copybooks with risk assessments based on usage count and cross-domain spread.",
+	}, func(ctx context.Context, req *mcp.CallToolRequest, input emptyInput) (*mcp.CallToolResult, *output, error) {
+		items, err := reader.ListCopybookRisks(ctx)
+		if err != nil {
+			return nil, nil, err
+		}
+		return nil, &output{Risks: items}, nil
+	})
+}
+
+func registerListModernizationCandidates(s *mcp.Server, reader n4j.Reader) {
+	type emptyInput struct{}
+	type output struct {
+		Candidates []n4j.ModernizationCandidateInfo `json:"candidates"`
+	}
+	mcp.AddTool(s, &mcp.Tool{
+		Name:        "list_modernization_candidates",
+		Description: "List programs scored as modernization candidates with recommended approach.",
+	}, func(ctx context.Context, req *mcp.CallToolRequest, input emptyInput) (*mcp.CallToolResult, *output, error) {
+		items, err := reader.ListModernizationCandidates(ctx)
+		if err != nil {
+			return nil, nil, err
+		}
+		return nil, &output{Candidates: items}, nil
+	})
+}
+
+func registerListRiskPrograms(s *mcp.Server, reader n4j.Reader) {
+	type output struct {
+		Programs []n4j.RiskProgramInfo `json:"programs"`
+	}
+	mcp.AddTool(s, &mcp.Tool{
+		Name:        "list_risk_programs",
+		Description: "List programs with risk scores at or above a minimum threshold.",
+	}, func(ctx context.Context, req *mcp.CallToolRequest, input ListRiskProgramsInput) (*mcp.CallToolResult, *output, error) {
+		minScore := input.MinScore
+		if minScore <= 0 {
+			minScore = 0.5
+		}
+		items, err := reader.ListRiskPrograms(ctx, minScore)
+		if err != nil {
+			return nil, nil, err
+		}
+		return nil, &output{Programs: items}, nil
+	})
+}
+
+func registerListVolumeEstimates(s *mcp.Server, reader n4j.Reader) {
+	type emptyInput struct{}
+	type output struct {
+		Estimates []n4j.VolumeEstimateInfo `json:"estimates"`
+	}
+	mcp.AddTool(s, &mcp.Tool{
+		Name:        "list_volume_estimates",
+		Description: "List transaction volume estimates (HIGH/MEDIUM/LOW) for all analyzed programs.",
+	}, func(ctx context.Context, req *mcp.CallToolRequest, input emptyInput) (*mcp.CallToolResult, *output, error) {
+		items, err := reader.ListVolumeEstimates(ctx)
+		if err != nil {
+			return nil, nil, err
+		}
+		return nil, &output{Estimates: items}, nil
 	})
 }

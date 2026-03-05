@@ -122,9 +122,11 @@ func mergeKeyForLabel(label string) string {
 	case "BusinessDomain":
 		return "name"
 	case "Condition":
-		return "name"
+		return "fqn"
 	case "Parameter":
-		return "name"
+		return "fqn"
+	case "ExternalInterface":
+		return "id"
 	default:
 		return "id"
 	}
@@ -137,10 +139,12 @@ func (w *BatchWriter) WritePass1Result(ctx context.Context, result *graph.Pass1R
 		nodes := make([]map[string]any, len(result.Programs))
 		for i, p := range result.Programs {
 			nodes[i] = map[string]any{
-				"id":        p.ID,
-				"programId": p.ProgramID,
-				"filePath":  p.FilePath,
-				"language":  p.Language,
+				"id":            p.ID,
+				"programId":     p.ProgramID,
+				"filePath":      p.FilePath,
+				"language":      p.Language,
+				"lineCount":     p.LineCount,
+				"executionMode": p.ExecutionMode,
 			}
 		}
 		if err := w.WriteNodes(ctx, "Program", "programId", nodes); err != nil {
@@ -221,9 +225,10 @@ func (w *BatchWriter) WritePass1Result(ctx context.Context, result *graph.Pass1R
 				"parent":    c.Parent,
 				"value":     c.Value,
 				"programId": c.ProgramID,
+				"fqn":       c.FQN,
 			}
 		}
-		if err := w.WriteNodes(ctx, "Condition", "name", nodes); err != nil {
+		if err := w.WriteNodes(ctx, "Condition", "fqn", nodes); err != nil {
 			return err
 		}
 	}
@@ -238,9 +243,10 @@ func (w *BatchWriter) WritePass1Result(ctx context.Context, result *graph.Pass1R
 				"level":     p.Level,
 				"direction": p.Direction,
 				"programId": p.ProgramID,
+				"fqn":       p.FQN,
 			}
 		}
-		if err := w.WriteNodes(ctx, "Parameter", "name", nodes); err != nil {
+		if err := w.WriteNodes(ctx, "Parameter", "fqn", nodes); err != nil {
 			return err
 		}
 	}
@@ -250,10 +256,12 @@ func (w *BatchWriter) WritePass1Result(ctx context.Context, result *graph.Pass1R
 		nodes := make([]map[string]any, len(result.FileDefs))
 		for i, f := range result.FileDefs {
 			nodes[i] = map[string]any{
-				"id":           f.ID,
-				"name":         f.Name,
-				"programId":    f.ProgramID,
-				"organization": f.Organization,
+				"id":            f.ID,
+				"name":          f.Name,
+				"programId":     f.ProgramID,
+				"organization":  f.Organization,
+				"vsamType":      f.VSAMType,
+				"dataStoreType": f.DataStoreType,
 			}
 		}
 		if err := w.WriteNodes(ctx, "File", "name", nodes); err != nil {
@@ -266,10 +274,11 @@ func (w *BatchWriter) WritePass1Result(ctx context.Context, result *graph.Pass1R
 		nodes := make([]map[string]any, len(result.SQLStatements))
 		for i, s := range result.SQLStatements {
 			nodes[i] = map[string]any{
-				"id":        s.ID,
-				"text":      s.Text,
-				"programId": s.ProgramID,
-				"type":      s.Type,
+				"id":          s.ID,
+				"text":        s.Text,
+				"programId":   s.ProgramID,
+				"type":        s.Type,
+				"targetTable": s.TargetTable,
 			}
 		}
 		if err := w.WriteNodes(ctx, "SQLStatement", "id", nodes); err != nil {
@@ -288,6 +297,23 @@ func (w *BatchWriter) WritePass1Result(ctx context.Context, result *graph.Pass1R
 			}
 		}
 		if err := w.WriteNodes(ctx, "CICSTransaction", "id", nodes); err != nil {
+			return err
+		}
+	}
+
+	// Write ExternalInterfaces
+	if len(result.ExternalInterfaces) > 0 {
+		nodes := make([]map[string]any, len(result.ExternalInterfaces))
+		for i, e := range result.ExternalInterfaces {
+			nodes[i] = map[string]any{
+				"id":        e.ID,
+				"type":      e.Type,
+				"details":   e.Details,
+				"paragraph": e.Paragraph,
+				"programId": e.ProgramID,
+			}
+		}
+		if err := w.WriteNodes(ctx, "ExternalInterface", "id", nodes); err != nil {
 			return err
 		}
 	}
@@ -680,6 +706,26 @@ func (w *BatchWriter) WritePass3Result(ctx context.Context, result *graph.Pass3R
 		}
 	}
 
+	// Set volume estimates on programs
+	for _, ve := range result.VolumeEstimates {
+		session := w.client.NewSession(ctx)
+		_, err := session.ExecuteWrite(ctx, func(tx neo4j.ManagedTransaction) (any, error) {
+			_, err := tx.Run(ctx,
+				"MATCH (p:Program {programId: $pid}) SET p.volumeEstimate = $estimate, p.volumeReason = $reason",
+				map[string]any{
+					"pid":      ve.ProgramID,
+					"estimate": ve.Estimate,
+					"reason":   ve.Reason,
+				})
+			return nil, err
+		})
+		session.Close(ctx)
+		if err != nil {
+			w.logger.Warn("failed to set volume estimate",
+				zap.String("program", ve.ProgramID), zap.Error(err))
+		}
+	}
+
 	w.logger.Info("wrote pass 3 results",
 		zap.Int("domains", len(result.BusinessDomains)),
 		zap.Int("members", len(result.DomainMembers)),
@@ -688,6 +734,7 @@ func (w *BatchWriter) WritePass3Result(ctx context.Context, result *graph.Pass3R
 		zap.Int("bridgePrograms", len(result.BridgePrograms)),
 		zap.Int("copybookRisks", len(result.CopybookRisks)),
 		zap.Int("modernizationCandidates", len(result.ModernizationCandidates)),
+		zap.Int("volumeEstimates", len(result.VolumeEstimates)),
 	)
 
 	return nil

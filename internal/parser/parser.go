@@ -12,17 +12,19 @@ import (
 
 // Pass1JSON matches the JSON schema returned by Claude for Pass 1.
 type Pass1JSON struct {
-	ProgramID       string           `json:"programId"`
-	CopyReferences  []string         `json:"copyReferences"`
-	CallTargets     []CallTargetJSON `json:"callTargets"`
-	Paragraphs      []string         `json:"paragraphs"`
-	Sections        []string         `json:"sections"`
-	FileDefinitions []FileDefJSON    `json:"fileDefinitions"`
-	DataItems       []DataItemJSON   `json:"dataItems"`
-	Conditions      []ConditionJSON  `json:"conditions"`
-	Parameters      []ParameterJSON  `json:"parameters"`
-	SQLStatements   []SQLJSON        `json:"sqlStatements"`
-	CICSCommands    []CICSJSON       `json:"cicsCommands"`
+	ProgramID          string                  `json:"programId"`
+	ExecutionMode      string                  `json:"executionMode"`
+	CopyReferences     []string                `json:"copyReferences"`
+	CallTargets        []CallTargetJSON        `json:"callTargets"`
+	Paragraphs         []string                `json:"paragraphs"`
+	Sections           []string                `json:"sections"`
+	FileDefinitions    []FileDefJSON           `json:"fileDefinitions"`
+	DataItems          []DataItemJSON          `json:"dataItems"`
+	Conditions         []ConditionJSON         `json:"conditions"`
+	Parameters         []ParameterJSON         `json:"parameters"`
+	SQLStatements      []SQLJSON               `json:"sqlStatements"`
+	CICSCommands       []CICSJSON              `json:"cicsCommands"`
+	ExternalInterfaces []ExternalInterfaceJSON `json:"externalInterfaces"`
 }
 
 type CallTargetJSON struct {
@@ -31,8 +33,10 @@ type CallTargetJSON struct {
 }
 
 type FileDefJSON struct {
-	Name         string `json:"name"`
-	Organization string `json:"organization"`
+	Name          string `json:"name"`
+	Organization  string `json:"organization"`
+	VSAMType      string `json:"vsamType"`
+	DataStoreType string `json:"dataStoreType"`
 }
 
 type DataItemJSON struct {
@@ -55,12 +59,19 @@ type ParameterJSON struct {
 }
 
 type SQLJSON struct {
-	Type string `json:"type"`
-	Text string `json:"text"`
+	Type        string `json:"type"`
+	Text        string `json:"text"`
+	TargetTable string `json:"targetTable"`
 }
 
 type CICSJSON struct {
 	Command string `json:"command"`
+}
+
+type ExternalInterfaceJSON struct {
+	Type      string `json:"type"`
+	Details   string `json:"details"`
+	Paragraph string `json:"paragraph"`
 }
 
 // ParsePass1Response parses Claude's JSON response into a Pass1Result.
@@ -79,12 +90,18 @@ func ParsePass1Response(jsonStr, sourceFile string) (*graph.Pass1Result, error) 
 		programID = "UNKNOWN"
 	}
 
+	executionMode := raw.ExecutionMode
+	if executionMode == "" {
+		executionMode = "UNKNOWN"
+	}
+
 	// Program node
 	prog := graph.Program{
-		ID:        newID(),
-		ProgramID: programID,
-		FilePath:  sourceFile,
-		Language:  "COBOL",
+		ID:            newID(),
+		ProgramID:     programID,
+		FilePath:      sourceFile,
+		Language:      "COBOL",
+		ExecutionMode: executionMode,
 	}
 	result.Programs = append(result.Programs, prog)
 
@@ -144,10 +161,12 @@ func ParsePass1Response(jsonStr, sourceFile string) (*graph.Pass1Result, error) 
 	// File definitions
 	for _, fd := range raw.FileDefinitions {
 		fileDef := graph.FileDefinition{
-			ID:           newID(),
-			Name:         fd.Name,
-			ProgramID:    programID,
-			Organization: fd.Organization,
+			ID:            newID(),
+			Name:          fd.Name,
+			ProgramID:     programID,
+			Organization:  fd.Organization,
+			VSAMType:      fd.VSAMType,
+			DataStoreType: fd.DataStoreType,
 		}
 		result.FileDefs = append(result.FileDefs, fileDef)
 	}
@@ -169,18 +188,20 @@ func ParsePass1Response(jsonStr, sourceFile string) (*graph.Pass1Result, error) 
 
 	// Conditions (88-level)
 	for _, c := range raw.Conditions {
+		fqn := programID + "." + c.Name
 		cond := graph.Condition{
 			ID:        newID(),
 			Name:      c.Name,
 			Parent:    c.Parent,
 			Value:     c.Value,
 			ProgramID: programID,
+			FQN:       fqn,
 		}
 		result.Conditions = append(result.Conditions, cond)
 		result.Relationships = append(result.Relationships, graph.Relationship{
 			Type:      graph.RelConditionOf,
 			FromLabel: "Condition",
-			FromKey:   c.Name,
+			FromKey:   fqn,
 			ToLabel:   "DataItem",
 			ToKey:     c.Parent,
 		})
@@ -188,18 +209,20 @@ func ParsePass1Response(jsonStr, sourceFile string) (*graph.Pass1Result, error) 
 
 	// Parameters (LINKAGE SECTION items)
 	for _, p := range raw.Parameters {
+		fqn := programID + "." + p.Name
 		param := graph.Parameter{
 			ID:        newID(),
 			Name:      p.Name,
 			Level:     p.Level,
 			Direction: p.Direction,
 			ProgramID: programID,
+			FQN:       fqn,
 		}
 		result.Parameters = append(result.Parameters, param)
 		result.Relationships = append(result.Relationships, graph.Relationship{
 			Type:      graph.RelParameterOf,
 			FromLabel: "Parameter",
-			FromKey:   p.Name,
+			FromKey:   fqn,
 			ToLabel:   "Program",
 			ToKey:     programID,
 		})
@@ -208,10 +231,11 @@ func ParsePass1Response(jsonStr, sourceFile string) (*graph.Pass1Result, error) 
 	// SQL statements
 	for _, sql := range raw.SQLStatements {
 		stmt := graph.SQLStatement{
-			ID:        newID(),
-			Text:      sql.Text,
-			ProgramID: programID,
-			Type:      sql.Type,
+			ID:          newID(),
+			Text:        sql.Text,
+			ProgramID:   programID,
+			Type:        sql.Type,
+			TargetTable: sql.TargetTable,
 		}
 		result.SQLStatements = append(result.SQLStatements, stmt)
 		result.Relationships = append(result.Relationships, graph.Relationship{
@@ -237,6 +261,25 @@ func ParsePass1Response(jsonStr, sourceFile string) (*graph.Pass1Result, error) 
 			FromKey:   programID,
 			ToLabel:   "CICSTransaction",
 			ToKey:     txn.ID,
+		})
+	}
+
+	// External interfaces
+	for _, ei := range raw.ExternalInterfaces {
+		iface := graph.ExternalInterface{
+			ID:        newID(),
+			Type:      ei.Type,
+			Details:   ei.Details,
+			Paragraph: ei.Paragraph,
+			ProgramID: programID,
+		}
+		result.ExternalInterfaces = append(result.ExternalInterfaces, iface)
+		result.Relationships = append(result.Relationships, graph.Relationship{
+			Type:      graph.RelExternalInterface,
+			FromLabel: "Program",
+			FromKey:   programID,
+			ToLabel:   "ExternalInterface",
+			ToKey:     iface.ID,
 		})
 	}
 
@@ -381,10 +424,11 @@ func ParsePass2Response(jsonStr, sourceFile, programID string) (*graph.Pass2Resu
 
 	for _, s := range raw.SQLStatements {
 		result.SQLDetails = append(result.SQLDetails, graph.SQLStatement{
-			ID:        newID(),
-			Text:      s.Text,
-			ProgramID: programID,
-			Type:      s.Type,
+			ID:          newID(),
+			Text:        s.Text,
+			ProgramID:   programID,
+			Type:        s.Type,
+			TargetTable: s.TargetTable,
 		})
 	}
 

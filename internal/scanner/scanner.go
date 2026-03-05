@@ -2,6 +2,7 @@ package scanner
 
 import (
 	"context"
+	"bufio"
 	"crypto/sha256"
 	"encoding/hex"
 	"fmt"
@@ -58,17 +59,18 @@ func Scan(ctx context.Context, rootDir string, logger *zap.Logger) (*ScanResult,
 			return nil
 		}
 
-		hash, err := hashFile(path)
+		hash, lineCount, err := hashAndCountLines(path)
 		if err != nil {
 			result.Errors = append(result.Errors, fmt.Errorf("hash %s: %w", path, err))
 			return nil
 		}
 
 		result.Files = append(result.Files, graph.FileInfo{
-			Path: path,
-			Type: ft,
-			Hash: hash,
-			Size: info.Size(),
+			Path:      path,
+			Type:      ft,
+			Hash:      hash,
+			Size:      info.Size(),
+			LineCount: lineCount,
 		})
 
 		return nil
@@ -102,16 +104,23 @@ func classifyFile(name string) (graph.FileType, bool) {
 	}
 }
 
-func hashFile(path string) (string, error) {
+// hashAndCountLines computes SHA-256 and counts newlines in a single pass.
+func hashAndCountLines(path string) (string, int, error) {
 	f, err := os.Open(path)
 	if err != nil {
-		return "", err
+		return "", 0, err
 	}
 	defer f.Close()
 
 	h := sha256.New()
-	if _, err := io.Copy(h, f); err != nil {
-		return "", err
+	reader := io.TeeReader(f, h)
+	scanner := bufio.NewScanner(reader)
+	lines := 0
+	for scanner.Scan() {
+		lines++
 	}
-	return hex.EncodeToString(h.Sum(nil)), nil
+	if err := scanner.Err(); err != nil {
+		return "", 0, err
+	}
+	return hex.EncodeToString(h.Sum(nil)), lines, nil
 }

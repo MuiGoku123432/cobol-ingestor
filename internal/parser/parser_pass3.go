@@ -9,12 +9,13 @@ import (
 
 // Pass3JSON matches the JSON schema returned by Claude for Pass 3.
 type Pass3JSON struct {
-	Domains                 []Pass3DomainJSON                `json:"domains"`
-	DeadCode                []Pass3DeadCodeJSON              `json:"deadCode"`
-	RiskFlags               []Pass3RiskJSON                  `json:"riskFlags"`
-	BridgePrograms          []Pass3BridgeProgramJSON         `json:"bridgePrograms"`
-	CopybookRisk            []Pass3CopybookRiskJSON          `json:"copybookRisk"`
+	Domains                 []Pass3DomainJSON                 `json:"domains"`
+	DeadCode                []Pass3DeadCodeJSON               `json:"deadCode"`
+	RiskFlags               []Pass3RiskJSON                   `json:"riskFlags"`
+	BridgePrograms          []Pass3BridgeProgramJSON          `json:"bridgePrograms"`
+	CopybookRisk            []Pass3CopybookRiskJSON           `json:"copybookRisk"`
 	ModernizationCandidates []Pass3ModernizationCandidateJSON `json:"modernizationCandidates"`
+	VolumeEstimates         []Pass3VolumeEstimateJSON         `json:"volumeEstimates"`
 }
 
 type Pass3DomainJSON struct {
@@ -58,6 +59,12 @@ type Pass3ModernizationCandidateJSON struct {
 	Score     float64 `json:"score"`
 	Reason    string  `json:"reason"`
 	Approach  string  `json:"approach"`
+}
+
+type Pass3VolumeEstimateJSON struct {
+	ProgramID string `json:"programId"`
+	Estimate  string `json:"estimate"`
+	Reason    string `json:"reason"`
 }
 
 // ParsePass3Response parses Claude's JSON response into a Pass3Result.
@@ -127,6 +134,14 @@ func ParsePass3Response(jsonStr string) (*graph.Pass3Result, error) {
 			Score:     mc.Score,
 			Reason:    mc.Reason,
 			Approach:  mc.Approach,
+		})
+	}
+
+	for _, ve := range raw.VolumeEstimates {
+		result.VolumeEstimates = append(result.VolumeEstimates, graph.VolumeEstimate{
+			ProgramID: ve.ProgramID,
+			Estimate:  ve.Estimate,
+			Reason:    ve.Reason,
 		})
 	}
 

@@ -21,6 +21,9 @@ func MergePass2Results(results []*Pass2Result) *Pass2Result {
 	copybookDefSeen := make(map[string]bool)
 	hierarchySeen := make(map[string]bool)
 	annotationMap := make(map[string]Annotation) // paragraph → longest description
+	condLogicSeen := make(map[string]bool)
+	dynCallSeen := make(map[string]bool)
+	errorHandlerSeen := make(map[string]bool)
 
 	for _, r := range results {
 		for _, p := range r.Performs {
@@ -81,6 +84,28 @@ func MergePass2Results(results []*Pass2Result) *Pass2Result {
 				}
 			} else {
 				annotationMap[a.Paragraph] = a
+			}
+		}
+
+		for _, cl := range r.ConditionalLogic {
+			key := cl.Paragraph + "|" + cl.Condition
+			if !condLogicSeen[key] {
+				condLogicSeen[key] = true
+				merged.ConditionalLogic = append(merged.ConditionalLogic, cl)
+			}
+		}
+
+		for _, dc := range r.DynamicCallResolutions {
+			if !dynCallSeen[dc.Variable] {
+				dynCallSeen[dc.Variable] = true
+				merged.DynamicCallResolutions = append(merged.DynamicCallResolutions, dc)
+			}
+		}
+
+		for _, eh := range r.ErrorHandlers {
+			if !errorHandlerSeen[eh.Paragraph] {
+				errorHandlerSeen[eh.Paragraph] = true
+				merged.ErrorHandlers = append(merged.ErrorHandlers, eh)
 			}
 		}
 	}

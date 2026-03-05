@@ -71,3 +71,43 @@ func (m *MockReader) ListBusinessDomains(_ context.Context) ([]n4j.BusinessDomai
 func (m *MockReader) GetBusinessDomain(_ context.Context, _ string) (*n4j.BusinessDomainDetail, error) {
 	return m.DomainDetail, m.Err
 }
+
+func (m *MockReader) GetProgramConditions(_ context.Context, _ string) ([]n4j.ConditionInfo, error) {
+	return nil, m.Err
+}
+
+func (m *MockReader) GetProgramParameters(_ context.Context, _ string) ([]n4j.ParameterInfo, error) {
+	return nil, m.Err
+}
+
+func (m *MockReader) GetProgramConditionalLogic(_ context.Context, _ string) ([]n4j.ConditionalLogicInfo, error) {
+	return nil, m.Err
+}
+
+func (m *MockReader) GetProgramErrorHandlers(_ context.Context, _ string) ([]n4j.ErrorHandlerInfo, error) {
+	return nil, m.Err
+}
+
+func (m *MockReader) GetProgramExternalInterfaces(_ context.Context, _ string) ([]n4j.ExternalInterfaceInfo, error) {
+	return nil, m.Err
+}
+
+func (m *MockReader) ListBridgePrograms(_ context.Context) ([]n4j.BridgeProgramInfo, error) {
+	return nil, m.Err
+}
+
+func (m *MockReader) ListCopybookRisks(_ context.Context) ([]n4j.CopybookRiskInfo, error) {
+	return nil, m.Err
+}
+
+func (m *MockReader) ListModernizationCandidates(_ context.Context) ([]n4j.ModernizationCandidateInfo, error) {
+	return nil, m.Err
+}
+
+func (m *MockReader) ListRiskPrograms(_ context.Context, _ float64) ([]n4j.RiskProgramInfo, error) {
+	return nil, m.Err
+}
+
+func (m *MockReader) ListVolumeEstimates(_ context.Context) ([]n4j.VolumeEstimateInfo, error) {
+	return nil, m.Err
+}

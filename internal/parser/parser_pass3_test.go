@@ -33,6 +33,9 @@ func TestParsePass3Response_Valid(t *testing.T) {
 		],
 		"modernizationCandidates": [
 			{"programId": "CUSTINQ", "score": 0.85, "reason": "Self-contained customer lookup", "approach": "API_EXTRACTION"}
+		],
+		"volumeEstimates": [
+			{"programId": "CUSTMAINT", "estimate": "HIGH", "reason": "Core customer maintenance with heavy DB2 access"}
 		]
 	}`
 
@@ -72,6 +75,12 @@ func TestParsePass3Response_Valid(t *testing.T) {
 	assert.Equal(t, "CUSTINQ", result.ModernizationCandidates[0].ProgramID)
 	assert.Equal(t, 0.85, result.ModernizationCandidates[0].Score)
 	assert.Equal(t, "API_EXTRACTION", result.ModernizationCandidates[0].Approach)
+
+	// Volume estimates
+	require.Len(t, result.VolumeEstimates, 1)
+	assert.Equal(t, "CUSTMAINT", result.VolumeEstimates[0].ProgramID)
+	assert.Equal(t, "HIGH", result.VolumeEstimates[0].Estimate)
+	assert.Equal(t, "Core customer maintenance with heavy DB2 access", result.VolumeEstimates[0].Reason)
 }
 
 func TestParsePass3Response_WithMarkdownFences(t *testing.T) {

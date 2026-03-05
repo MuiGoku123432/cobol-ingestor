@@ -11,10 +11,11 @@ const (
 
 // FileInfo represents a discovered source file.
 type FileInfo struct {
-	Path string
-	Type FileType
-	Hash string // SHA-256
-	Size int64
+	Path      string
+	Type      FileType
+	Hash      string // SHA-256
+	Size      int64
+	LineCount int
 }
 
 // RelType enumerates Neo4j relationship types.
@@ -36,7 +37,8 @@ const (
 	RelMovesTo      RelType = "MOVES_TO"
 	RelRuns         RelType = "RUNS"
 	RelExecutesSQL  RelType = "EXECUTES_SQL"
-	RelExecutesCICS RelType = "EXECUTES_CICS"
+	RelExecutesCICS        RelType = "EXECUTES_CICS"
+	RelExternalInterface   RelType = "HAS_INTERFACE"
 )
 
 // Relationship is a generic edge in the graph.
@@ -51,10 +53,12 @@ type Relationship struct {
 
 // Program represents a COBOL program node.
 type Program struct {
-	ID        string
-	ProgramID string
-	FilePath  string
-	Language  string
+	ID            string
+	ProgramID     string
+	FilePath      string
+	Language      string
+	LineCount     int
+	ExecutionMode string // BATCH, CICS, BATCH_AND_CICS, UNKNOWN
 }
 
 // Paragraph represents a PROCEDURE DIVISION paragraph.
@@ -95,6 +99,7 @@ type Condition struct {
 	Parent    string // parent data item name
 	Value     string // condition value(s)
 	ProgramID string
+	FQN       string // fully qualified name: programId.name
 }
 
 // Parameter represents a LINKAGE SECTION data item.
@@ -104,22 +109,26 @@ type Parameter struct {
 	Level     int
 	Direction string // IN, OUT, INOUT
 	ProgramID string
+	FQN       string // fully qualified name: programId.name
 }
 
 // FileDefinition represents an FD (file description).
 type FileDefinition struct {
-	ID           string
-	Name         string
-	ProgramID    string
-	Organization string
+	ID            string
+	Name          string
+	ProgramID     string
+	Organization  string
+	VSAMType      string // KSDS, ESDS, RRDS, or empty
+	DataStoreType string // VSAM, DB2, IMS, FLAT_FILE
 }
 
 // SQLStatement represents an EXEC SQL block.
 type SQLStatement struct {
-	ID        string
-	Text      string
-	ProgramID string
-	Type      string // SELECT, INSERT, UPDATE, DELETE, etc.
+	ID          string
+	Text        string
+	ProgramID   string
+	Type        string // SELECT, INSERT, UPDATE, DELETE, etc.
+	TargetTable string
 }
 
 // CICSTransaction represents an EXEC CICS command.
@@ -150,20 +159,37 @@ type BusinessDomain struct {
 	Description string
 }
 
+// ExternalInterface represents an external integration point.
+type ExternalInterface struct {
+	ID        string
+	Type      string // MQ, CICS_LINK, CICS_XCTL, CICS_TS, CICS_TD, CICS_START, IMS, TCP, FILE_TRANSFER
+	Details   string
+	Paragraph string
+	ProgramID string
+}
+
+// VolumeEstimate is a heuristic transaction volume estimate.
+type VolumeEstimate struct {
+	ProgramID string
+	Estimate  string // HIGH, MEDIUM, LOW
+	Reason    string
+}
+
 // Pass1Result aggregates all extracted data from a single file's Pass 1 analysis.
 type Pass1Result struct {
-	SourceFile    string
-	Programs      []Program
-	Paragraphs    []Paragraph
-	Sections      []Section
-	Copybooks     []Copybook
-	DataItems     []DataItem
-	Conditions    []Condition
-	Parameters    []Parameter
-	FileDefs      []FileDefinition
-	SQLStatements []SQLStatement
-	CICSTxns      []CICSTransaction
-	Relationships []Relationship
+	SourceFile         string
+	Programs           []Program
+	Paragraphs         []Paragraph
+	Sections           []Section
+	Copybooks          []Copybook
+	DataItems          []DataItem
+	Conditions         []Condition
+	Parameters         []Parameter
+	FileDefs           []FileDefinition
+	SQLStatements      []SQLStatement
+	CICSTxns           []CICSTransaction
+	ExternalInterfaces []ExternalInterface
+	Relationships      []Relationship
 }
 
 // Pass2Result aggregates deep semantic analysis from a single file's Pass 2 analysis.
@@ -282,13 +308,14 @@ type ModernizationCandidate struct {
 
 // Pass3Result aggregates cross-cutting analysis results.
 type Pass3Result struct {
-	BusinessDomains        []BusinessDomain
-	DomainMembers          []DomainMembership
-	DeadCodeFlags          []DeadCodeFlag
-	RiskFlags              []RiskFlag
-	BridgePrograms         []BridgeProgram
-	CopybookRisks          []CopybookRisk
+	BusinessDomains         []BusinessDomain
+	DomainMembers           []DomainMembership
+	DeadCodeFlags           []DeadCodeFlag
+	RiskFlags               []RiskFlag
+	BridgePrograms          []BridgeProgram
+	CopybookRisks           []CopybookRisk
 	ModernizationCandidates []ModernizationCandidate
+	VolumeEstimates         []VolumeEstimate
 }
 
 // DomainMembership links a program to a business domain.

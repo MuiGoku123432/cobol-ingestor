@@ -27,6 +27,11 @@ func RegisterRoutes(r *gin.Engine, reader n4j.Reader, pipe *pipeline.Pipeline, l
 		v1.GET("/programs/:id", programH.Get)
 		v1.GET("/programs/:id/call-chain", programH.CallChain)
 		v1.GET("/programs/:id/data-items", programH.DataItems)
+		v1.GET("/programs/:id/conditions", programH.Conditions)
+		v1.GET("/programs/:id/parameters", programH.Parameters)
+		v1.GET("/programs/:id/conditional-logic", programH.ConditionalLogic)
+		v1.GET("/programs/:id/error-handlers", programH.ErrorHandlers)
+		v1.GET("/programs/:id/external-interfaces", programH.ExternalInterfaces)
 		v1.GET("/programs/:id/impact", analysisH.ImpactAnalysis)
 
 		v1.GET("/copybooks", copybookH.List)
@@ -34,6 +39,12 @@ func RegisterRoutes(r *gin.Engine, reader n4j.Reader, pipe *pipeline.Pipeline, l
 
 		v1.GET("/domains", analysisH.ListDomains)
 		v1.GET("/domains/:name", analysisH.GetDomain)
+
+		v1.GET("/analysis/bridge-programs", analysisH.BridgePrograms)
+		v1.GET("/analysis/copybook-risks", analysisH.CopybookRisks)
+		v1.GET("/analysis/modernization-candidates", analysisH.ModernizationCandidates)
+		v1.GET("/analysis/risk-programs", analysisH.RiskPrograms)
+		v1.GET("/analysis/volume-estimates", analysisH.VolumeEstimates)
 
 		v1.GET("/search", searchH.Search)
 

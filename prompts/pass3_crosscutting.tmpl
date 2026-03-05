@@ -19,6 +19,11 @@ You are analyzing a batch of COBOL programs from their graph relationships. Base
    - Business value (not dead code, actively used)
    Suggest an approach: API_EXTRACTION, STRANGLER_FIG, EVENT_DRIVEN, or REWRITE.
 
+7. **Volume Estimates**: For each program, estimate transaction volume based on code structure:
+   - HIGH = batch with many file I/O loops, large PERFORM UNTIL constructs, or high CICS SEND MAP count
+   - MEDIUM = moderate processing, standard CRUD operations
+   - LOW = utility/lookup programs, simple parameter validation
+
 Return your analysis as JSON with this exact structure:
 
 ```json
@@ -46,6 +51,9 @@ Return your analysis as JSON with this exact structure:
   ],
   "modernizationCandidates": [
     {"programId": "PROG5", "score": 0.85, "reason": "Self-contained customer lookup with clear API boundary", "approach": "API_EXTRACTION"}
+  ],
+  "volumeEstimates": [
+    {"programId": "PROG1", "estimate": "HIGH", "reason": "Multiple PERFORM UNTIL loops processing large files, batch window indicator"}
   ]
 }
 ```
@@ -59,5 +67,7 @@ Rules:
 - Bridge programs should connect at least 2 different domains
 - Copybook risk should consider both program count and cross-domain usage
 - Modernization scores range from 0.0 (poor candidate) to 1.0 (ideal candidate)
+- Volume estimates should cover all programs in the input
+- Volume estimate values must be exactly HIGH, MEDIUM, or LOW
 
 Analyze the following programs:

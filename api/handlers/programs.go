@@ -104,6 +104,66 @@ func (h *ProgramHandler) DataItems(c *gin.Context) {
 	c.JSON(http.StatusOK, gin.H{"data": items})
 }
 
+// Conditions returns 88-level conditions for a program.
+func (h *ProgramHandler) Conditions(c *gin.Context) {
+	programID := c.Param("id")
+	items, err := h.Reader.GetProgramConditions(c.Request.Context(), programID)
+	if err != nil {
+		h.Logger.Error("getting conditions", zap.Error(err))
+		middleware.InternalError(c, "failed to get conditions")
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{"data": items})
+}
+
+// Parameters returns LINKAGE SECTION parameters for a program.
+func (h *ProgramHandler) Parameters(c *gin.Context) {
+	programID := c.Param("id")
+	items, err := h.Reader.GetProgramParameters(c.Request.Context(), programID)
+	if err != nil {
+		h.Logger.Error("getting parameters", zap.Error(err))
+		middleware.InternalError(c, "failed to get parameters")
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{"data": items})
+}
+
+// ConditionalLogic returns conditional logic from paragraph nodes.
+func (h *ProgramHandler) ConditionalLogic(c *gin.Context) {
+	programID := c.Param("id")
+	items, err := h.Reader.GetProgramConditionalLogic(c.Request.Context(), programID)
+	if err != nil {
+		h.Logger.Error("getting conditional logic", zap.Error(err))
+		middleware.InternalError(c, "failed to get conditional logic")
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{"data": items})
+}
+
+// ErrorHandlers returns error handling patterns from paragraph nodes.
+func (h *ProgramHandler) ErrorHandlers(c *gin.Context) {
+	programID := c.Param("id")
+	items, err := h.Reader.GetProgramErrorHandlers(c.Request.Context(), programID)
+	if err != nil {
+		h.Logger.Error("getting error handlers", zap.Error(err))
+		middleware.InternalError(c, "failed to get error handlers")
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{"data": items})
+}
+
+// ExternalInterfaces returns external interface points for a program.
+func (h *ProgramHandler) ExternalInterfaces(c *gin.Context) {
+	programID := c.Param("id")
+	items, err := h.Reader.GetProgramExternalInterfaces(c.Request.Context(), programID)
+	if err != nil {
+		h.Logger.Error("getting external interfaces", zap.Error(err))
+		middleware.InternalError(c, "failed to get external interfaces")
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{"data": items})
+}
+
 func parsePagination(c *gin.Context) (page, pageSize int) {
 	page, _ = strconv.Atoi(c.DefaultQuery("page", "1"))
 	pageSize, _ = strconv.Atoi(c.DefaultQuery("pageSize", "20"))

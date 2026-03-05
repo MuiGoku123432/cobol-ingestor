@@ -6,6 +6,7 @@ Return a single JSON object with these fields:
 
 {
   "programId": "string — the PROGRAM-ID value",
+  "executionMode": "string — BATCH, CICS, BATCH_AND_CICS, or UNKNOWN",
   "copyReferences": ["array of COPY member names (without extensions)"],
   "callTargets": [
     {
@@ -18,7 +19,9 @@ Return a single JSON object with these fields:
   "fileDefinitions": [
     {
       "name": "string — FD name",
-      "organization": "string — SEQUENTIAL, INDEXED, RELATIVE, or empty"
+      "organization": "string — SEQUENTIAL, INDEXED, RELATIVE, or empty",
+      "vsamType": "string — KSDS, ESDS, RRDS, or empty",
+      "dataStoreType": "string — VSAM, DB2, IMS, or FLAT_FILE"
     }
   ],
   "dataItems": [
@@ -46,12 +49,20 @@ Return a single JSON object with these fields:
   "sqlStatements": [
     {
       "type": "string — SELECT, INSERT, UPDATE, DELETE, DECLARE, etc.",
-      "text": "string — first 200 chars of the SQL"
+      "text": "string — first 200 chars of the SQL",
+      "targetTable": "string — primary table name referenced in the statement, or empty"
     }
   ],
   "cicsCommands": [
     {
       "command": "string — CICS command (SEND, RECEIVE, READ, WRITE, etc.)"
+    }
+  ],
+  "externalInterfaces": [
+    {
+      "type": "string — MQ, CICS_LINK, CICS_XCTL, CICS_TS, CICS_TD, CICS_START, IMS, TCP, or FILE_TRANSFER",
+      "details": "string — brief description (queue name, linked program, function code, PCB name, etc.)",
+      "paragraph": "string — paragraph name where this interface is invoked, or empty"
     }
   ]
 }
@@ -64,6 +75,18 @@ Rules:
 - For usage: extract the USAGE clause (COMP, COMP-3, BINARY, POINTER, DISPLAY); leave empty if not specified
 - For conditions: extract ALL 88-level items with their parent data item and value(s)
 - For parameters: extract data items from the LINKAGE SECTION; infer direction from how they are used (read-only = IN, written = OUT, both = INOUT)
-- For SQL: extract from EXEC SQL ... END-EXEC blocks
+- For SQL: extract from EXEC SQL ... END-EXEC blocks; targetTable is the primary table (FROM, INTO, UPDATE, DELETE FROM)
 - For CICS: extract from EXEC CICS ... END-EXEC blocks
+- For executionMode: CICS if program contains EXEC CICS commands; BATCH if invoked only from JCL with no CICS; BATCH_AND_CICS if both patterns present; UNKNOWN if unclear
+- For fileDefinitions: infer data store type from SELECT/ASSIGN clauses and file organization. INDEXED → VSAM KSDS, SEQUENTIAL with VSAM in ASSIGN → ESDS, RELATIVE → RRDS. If no VSAM indicators, classify as FLAT_FILE
+- For externalInterfaces:
+  - EXEC CICS LINK → CICS_LINK
+  - EXEC CICS XCTL → CICS_XCTL
+  - EXEC CICS WRITEQ TS / READQ TS / DELETEQ TS → CICS_TS (NOT MQ)
+  - EXEC CICS WRITEQ TD / READQ TD → CICS_TD (NOT MQ)
+  - EXEC CICS START TRANSID → CICS_START
+  - CALL 'MQPUT' / 'MQGET' / 'MQOPEN' / 'MQCLOSE' / 'MQCONN' / 'MQDISC' / 'MQINQ' / 'MQSET' → MQ
+  - CALL 'CBLTDLI' or 'AIBTDLI' → IMS. Details should include function code (GU, GN, GHU, GNP, ISRT, DLET, REPL) and PCB/PSB name if identifiable
+  - CALL to socket libraries → TCP
+  - Always populate the paragraph field with the paragraph name where the interface is invoked
 - Return ONLY the JSON object, no markdown fences, no explanation

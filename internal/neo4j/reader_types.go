@@ -121,6 +121,84 @@ type PagedResponse struct {
 	PageSize int        `json:"pageSize"`
 }
 
+// ConditionInfo holds condition details for API responses.
+type ConditionInfo struct {
+	Name      string `json:"name"`
+	Parent    string `json:"parent"`
+	Value     string `json:"value"`
+	FQN       string `json:"fqn"`
+	ProgramID string `json:"programId"`
+}
+
+// ParameterInfo holds parameter details for API responses.
+type ParameterInfo struct {
+	Name      string `json:"name"`
+	Level     int    `json:"level"`
+	Direction string `json:"direction"`
+	FQN       string `json:"fqn"`
+	ProgramID string `json:"programId"`
+}
+
+// ConditionalLogicInfo holds conditional logic from paragraph nodes.
+type ConditionalLogicInfo struct {
+	Paragraph        string   `json:"paragraph"`
+	ConditionalLogic []string `json:"conditionalLogic"`
+}
+
+// ErrorHandlerInfo holds error handling details from paragraph nodes.
+type ErrorHandlerInfo struct {
+	Paragraph    string `json:"paragraph"`
+	ErrorPattern string `json:"errorPattern"`
+	ErrorDetails string `json:"errorDetails"`
+}
+
+// ExternalInterfaceInfo holds external interface details.
+type ExternalInterfaceInfo struct {
+	ID        string `json:"id"`
+	Type      string `json:"type"`
+	Details   string `json:"details"`
+	Paragraph string `json:"paragraph,omitempty"`
+	ProgramID string `json:"programId"`
+}
+
+// BridgeProgramInfo holds bridge program details.
+type BridgeProgramInfo struct {
+	ProgramID    string   `json:"programId"`
+	Domains      []string `json:"domains"`
+	BridgeReason string   `json:"bridgeReason"`
+}
+
+// CopybookRiskInfo holds copybook risk details.
+type CopybookRiskInfo struct {
+	Name         string `json:"name"`
+	RiskLevel    string `json:"riskLevel"`
+	ProgramCount int    `json:"programCount"`
+	RiskReason   string `json:"riskReason"`
+}
+
+// ModernizationCandidateInfo holds modernization candidate details.
+type ModernizationCandidateInfo struct {
+	ProgramID string  `json:"programId"`
+	Score     float64 `json:"score"`
+	Reason    string  `json:"reason"`
+	Approach  string  `json:"approach"`
+}
+
+// RiskProgramInfo holds risk program details.
+type RiskProgramInfo struct {
+	ProgramID   string  `json:"programId"`
+	RiskScore   float64 `json:"riskScore"`
+	RiskType    string  `json:"riskType"`
+	RiskDetails string  `json:"riskDetails"`
+}
+
+// VolumeEstimateInfo holds volume estimate details.
+type VolumeEstimateInfo struct {
+	ProgramID    string `json:"programId"`
+	Estimate     string `json:"volumeEstimate"`
+	VolumeReason string `json:"volumeReason"`
+}
+
 // Filter holds common query filters.
 type Filter struct {
 	Search string

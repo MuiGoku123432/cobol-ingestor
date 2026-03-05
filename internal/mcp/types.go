@@ -40,3 +40,7 @@ type GetDataItemsInput struct {
 type GetBusinessDomainInput struct {
 	Name string `json:"name" jsonschema:"The business domain name"`
 }
+
+type ListRiskProgramsInput struct {
+	MinScore float64 `json:"minScore,omitempty" jsonschema:"Minimum risk score threshold (default 0.5)"`
+}
