@@ -257,7 +257,11 @@ func TestChunkFile_MultiChunk(t *testing.T) {
 		assert.Equal(t, i, c.Index)
 		assert.Equal(t, len(chunks), c.Total)
 		assert.Equal(t, 1, c.Pass)
-		assert.Contains(t, c.Content, "IDENTIFICATION DIVISION") // preamble in each chunk
+		if i == 0 {
+			assert.Contains(t, c.Content, "IDENTIFICATION DIVISION") // full preamble in first chunk
+		} else {
+			assert.Contains(t, c.Content, "PREAMBLE SUMMARY") // summarized preamble in subsequent chunks
+		}
 	}
 }
 
@@ -277,6 +281,89 @@ func TestChunkFile_SingleChunk(t *testing.T) {
 	assert.Equal(t, 0, chunks[0].Index)
 	assert.Equal(t, 1, chunks[0].Total)
 	assert.Equal(t, 1, chunks[0].Pass)
+}
+
+func TestSplitDataDivision(t *testing.T) {
+	data := `       DATA DIVISION.
+       WORKING-STORAGE SECTION.
+       01  WS-COUNTER PIC 9(4).
+       01  WS-FLAG PIC X.
+       FILE SECTION.
+       FD  CUSTOMER-FILE.
+       01  CUSTOMER-RECORD.
+           05  CUST-ID PIC X(10).
+       LINKAGE SECTION.
+       01  LK-PARAM PIC X(100).`
+
+	units := splitDataDivision(data)
+
+	names := make([]string, len(units))
+	for i, u := range units {
+		names[i] = u.name
+	}
+
+	assert.Contains(t, names, "WORKING-STORAGE SECTION")
+	assert.Contains(t, names, "FILE SECTION")
+	assert.Contains(t, names, "LINKAGE SECTION")
+}
+
+func TestSummarizePreamble(t *testing.T) {
+	divs := map[string]string{
+		"IDENTIFICATION": "       IDENTIFICATION DIVISION.\n       PROGRAM-ID. TESTPROG.",
+		"ENVIRONMENT":    "       ENVIRONMENT DIVISION.\n       INPUT-OUTPUT SECTION.\n       FILE-CONTROL.\n           SELECT CUSTOMER-FILE ASSIGN TO 'CUST.DAT'.\n           SELECT REPORT-FILE ASSIGN TO 'RPT.DAT'.",
+		"DATA": `       DATA DIVISION.
+       WORKING-STORAGE SECTION.
+       01  WS-COUNTER PIC 9(4).
+       01  WS-FLAG PIC X.
+       FILE SECTION.
+       FD  CUSTOMER-FILE.
+       01  CUSTOMER-RECORD.
+           05  CUST-ID PIC X(10).`,
+	}
+
+	summary := summarizePreamble(divs)
+
+	assert.Contains(t, summary, "PROGRAM-ID. TESTPROG")
+	assert.Contains(t, summary, "CUSTOMER-FILE")
+	assert.Contains(t, summary, "REPORT-FILE")
+	assert.Contains(t, summary, "WORKING-STORAGE SECTION")
+	assert.Contains(t, summary, "WS-COUNTER")
+	assert.Contains(t, summary, "CUSTOMER-RECORD")
+	assert.Contains(t, summary, "PREAMBLE SUMMARY")
+
+	// Summary should not contain full COBOL source lines
+	assert.NotContains(t, summary, "PIC 9(4)")
+	assert.NotContains(t, summary, "PIC X.")
+}
+
+func TestChunkFile_DataDivisionSplitting(t *testing.T) {
+	dir := t.TempDir()
+	filePath := filepath.Join(dir, "BIGDATA.CBL")
+
+	// Generate a file with a huge DATA DIVISION
+	content := "       IDENTIFICATION DIVISION.\n       PROGRAM-ID. BIGDATA.\n       DATA DIVISION.\n       WORKING-STORAGE SECTION.\n"
+	for i := 0; i < 50; i++ {
+		content += fmt.Sprintf("       01  WS-REC-%04d.\n", i)
+		for j := 0; j < 10; j++ {
+			content += fmt.Sprintf("           05  FIELD-%04d-%02d PIC X(100).\n", i, j)
+		}
+	}
+	content += "       PROCEDURE DIVISION.\n       0000-MAIN.\n           DISPLAY 'DONE'.\n           STOP RUN.\n"
+
+	require.NoError(t, os.WriteFile(filePath, []byte(content), 0644))
+
+	fi := graph.FileInfo{Path: filePath, Type: graph.FileTypeCOBOL}
+	// Use a limit that forces DATA to be split
+	chunks, err := ChunkFile(fi, 2000, zap.NewNop())
+	require.NoError(t, err)
+
+	assert.Greater(t, len(chunks), 2, "should split DATA DIVISION into multiple chunks")
+	// First chunk should have full preamble
+	assert.Contains(t, chunks[0].Content, "IDENTIFICATION DIVISION")
+	// Later chunks should have summary preamble
+	if len(chunks) > 2 {
+		assert.Contains(t, chunks[len(chunks)-1].Content, "PREAMBLE SUMMARY")
+	}
 }
 
 func TestChunkFilePass2_MultiChunk(t *testing.T) {
@@ -307,7 +394,8 @@ func TestChunkFilePass2_MultiChunk(t *testing.T) {
 		assert.Equal(t, i, c.Index)
 		assert.Equal(t, len(chunks), c.Total)
 		assert.Equal(t, 2, c.Pass)
-		assert.Contains(t, c.Content, "IDENTIFICATION DIVISION") // preamble in each chunk
+		// All Pass 2 multi-chunks use summarized preamble
+		assert.Contains(t, c.Content, "PREAMBLE SUMMARY")
 	}
 }
 

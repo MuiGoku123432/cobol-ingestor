@@ -106,9 +106,9 @@ func Load() (*Config, error) {
 	// Ingest defaults
 	viper.SetDefault("INGEST_BATCH_SIZE", 500)
 	viper.SetDefault("INGEST_CACHE_DB", "./cache.sqlite")
-	viper.SetDefault("INGEST_TOKEN_LIMIT", 150000)
+	viper.SetDefault("INGEST_TOKEN_LIMIT", 30000)
 	viper.SetDefault("PASS2_MAX_WORKERS", 3)
-	viper.SetDefault("PASS2_TOKEN_LIMIT", 100000)
+	viper.SetDefault("PASS2_TOKEN_LIMIT", 20000)
 	viper.SetDefault("PASS2_OVERLAP_LINES", 20)
 	viper.SetDefault("PASS3_BATCH_SIZE", 50)
 
