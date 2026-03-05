@@ -6,6 +6,7 @@ import (
 	"os"
 	"path/filepath"
 
+	"cobol-ingestor/internal/auth"
 	"cobol-ingestor/internal/cache"
 	"cobol-ingestor/internal/claude"
 	"cobol-ingestor/internal/config"
@@ -35,11 +36,65 @@ var (
 	passFlag int
 )
 
+var authCmd = &cobra.Command{
+	Use:   "auth",
+	Short: "Manage GitHub Copilot authentication",
+}
+
+var authLoginCmd = &cobra.Command{
+	Use:   "login",
+	Short: "Authenticate with GitHub Copilot via device flow",
+	RunE: func(cmd *cobra.Command, args []string) error {
+		token, err := auth.RunDeviceFlow(cmd.Context())
+		if err != nil {
+			return fmt.Errorf("device flow: %w", err)
+		}
+		if err := auth.SaveToken(token); err != nil {
+			return fmt.Errorf("saving token: %w", err)
+		}
+		fmt.Println("Authentication successful! Token saved to", auth.TokenFilePath())
+		return nil
+	},
+}
+
+var authLogoutCmd = &cobra.Command{
+	Use:   "logout",
+	Short: "Remove cached Copilot token",
+	RunE: func(cmd *cobra.Command, args []string) error {
+		if err := auth.DeleteToken(); err != nil {
+			return fmt.Errorf("deleting token: %w", err)
+		}
+		fmt.Println("Cached token removed.")
+		return nil
+	},
+}
+
+var authStatusCmd = &cobra.Command{
+	Use:   "status",
+	Short: "Show whether a cached Copilot token exists",
+	RunE: func(cmd *cobra.Command, args []string) error {
+		st, err := auth.LoadToken()
+		if err != nil {
+			return fmt.Errorf("reading token: %w", err)
+		}
+		if st == nil {
+			fmt.Println("No cached token found. Run 'cobol-graph auth login' to authenticate.")
+			return nil
+		}
+		fmt.Printf("Cached token found (obtained %s)\n", st.ObtainedAt.Format("2006-01-02 15:04:05"))
+		fmt.Println("File:", auth.TokenFilePath())
+		return nil
+	},
+}
+
 func init() {
 	ingestCmd.Flags().StringVar(&dir, "dir", "", "Root directory of COBOL source files")
 	ingestCmd.Flags().IntVar(&passFlag, "pass", 0, "Which pass to run: 0=all, 1=Pass 1, 2=Pass 2, 3=Pass 3")
 	_ = ingestCmd.MarkFlagRequired("dir")
 	rootCmd.AddCommand(ingestCmd)
+
+	authCmd.AddCommand(authLoginCmd, authLogoutCmd, authStatusCmd)
+	rootCmd.AddCommand(authCmd)
 }
 
 func runIngest(cmd *cobra.Command, args []string) error {
@@ -103,6 +158,28 @@ func runIngest(cmd *cobra.Command, args []string) error {
 	migrationsDir := filepath.Join("migrations", "neo4j")
 	if err := neo4jClient.RunMigrations(ctx, migrationsDir); err != nil {
 		return fmt.Errorf("running migrations: %w", err)
+	}
+
+	// Resolve Copilot token: env var → cached file → interactive device flow
+	if cfg.LLM.Provider == "copilot" && cfg.LLM.CopilotGitHubToken == "" {
+		if st, err := auth.LoadToken(); err != nil {
+			logger.Warn("failed to load cached copilot token", zap.Error(err))
+		} else if st != nil {
+			cfg.LLM.CopilotGitHubToken = st.GitHubToken
+			logger.Info("using cached copilot token", zap.Time("obtained_at", st.ObtainedAt))
+		}
+
+		if cfg.LLM.CopilotGitHubToken == "" {
+			logger.Info("no copilot token found, starting device flow")
+			token, err := auth.RunDeviceFlow(ctx)
+			if err != nil {
+				return fmt.Errorf("copilot device flow: %w", err)
+			}
+			if err := auth.SaveToken(token); err != nil {
+				logger.Warn("failed to save copilot token", zap.Error(err))
+			}
+			cfg.LLM.CopilotGitHubToken = token
+		}
 	}
 
 	// Create LLM provider + Claude client

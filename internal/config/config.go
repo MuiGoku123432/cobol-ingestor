@@ -132,9 +132,8 @@ func (c *Config) Validate() error {
 	if c.LLM.Provider == "anthropic" && c.LLM.APIKey == "" {
 		return fmt.Errorf("ANTHROPIC_API_KEY is required when LLM_PROVIDER=anthropic")
 	}
-	if c.LLM.Provider == "copilot" && c.LLM.CopilotGitHubToken == "" {
-		return fmt.Errorf("COPILOT_GITHUB_TOKEN is required when LLM_PROVIDER=copilot")
-	}
+	// Copilot token is resolved at runtime (env var → cached file → device flow),
+	// so we don't require it at config validation time.
 	if c.Neo4j.URI == "" {
 		return fmt.Errorf("NEO4J_URI is required")
 	}
