@@ -4,9 +4,10 @@ INSTALL_DIR ?= /usr/local/bin
 BINARIES := \
 	$(BINARY_DIR)/cobol-graph \
 	$(BINARY_DIR)/cobol-graph-api \
-	$(BINARY_DIR)/cobol-graph-mcp
+	$(BINARY_DIR)/cobol-graph-mcp \
+	$(BINARY_DIR)/cobol-graph-modernize
 
-.PHONY: build clean install uninstall run-ingest run-api run-mcp test test-integration vet lint swagger docker docker-build
+.PHONY: build clean install uninstall run-ingest run-api run-mcp run-modernize test test-integration vet lint swagger docker docker-build
 
 build: $(BINARIES)
 
@@ -18,6 +19,9 @@ $(BINARY_DIR)/cobol-graph-api: $(shell find cmd/server internal api -type f)
 
 $(BINARY_DIR)/cobol-graph-mcp: $(shell find cmd/mcp internal -type f)
 	go build -o $@ ./cmd/mcp
+
+$(BINARY_DIR)/cobol-graph-modernize: $(shell find cmd/modernize internal web -type f)
+	go build -o $@ ./cmd/modernize
 
 clean:
 	rm -rf $(BINARY_DIR)
@@ -37,6 +41,9 @@ run-api: $(BINARY_DIR)/cobol-graph-api
 
 run-mcp: $(BINARY_DIR)/cobol-graph-mcp
 	./bin/cobol-graph-mcp
+
+run-modernize: $(BINARY_DIR)/cobol-graph-modernize
+	./bin/cobol-graph-modernize
 
 test:
 	go test ./... -v -race
