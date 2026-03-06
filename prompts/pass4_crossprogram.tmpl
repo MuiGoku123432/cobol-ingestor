@@ -1,0 +1,29 @@
+You are analyzing cross-program data flow through LINKAGE SECTION parameter passing. Given a caller program's fields and a callee program's LINKAGE parameters, determine how fields map between them.
+
+Caller: {{.Caller}}
+Callee: {{.Callee}}
+
+Match caller fields to callee parameters based on:
+1. Position in CALL USING (first caller field maps to first callee LINKAGE parameter)
+2. Compatible PIC clauses (same size/type)
+3. Naming conventions (WS-CUST-ID likely maps to LS-CUSTOMER-ID)
+
+Return a single JSON object:
+
+{
+  "fieldMappings": [
+    {
+      "sourceField": "string — caller field name",
+      "targetField": "string — callee LINKAGE parameter name",
+      "transform": "string — DIRECT_MOVE, COMPUTE, REDEFINE, or UNKNOWN"
+    }
+  ]
+}
+
+Rules:
+- Only include mappings you are confident about
+- transform = DIRECT_MOVE for simple positional or name-based matches
+- transform = COMPUTE if caller computes a value before the CALL
+- transform = REDEFINE if fields are structurally redefined between programs
+- transform = UNKNOWN if the mapping is ambiguous
+- Return ONLY the JSON object, no markdown fences, no explanation

@@ -25,6 +25,7 @@ func MergePass1Results(results []*Pass1Result) *Pass1Result {
 	sqlSeen := make(map[string]bool)
 	cicsSeen := make(map[string]bool)
 	extIfSeen := make(map[string]bool)
+	dbTableSeen := make(map[string]bool)
 	relSeen := make(map[string]bool)
 
 	for _, r := range results {
@@ -92,6 +93,12 @@ func MergePass1Results(results []*Pass1Result) *Pass1Result {
 			if !extIfSeen[e.ID] {
 				extIfSeen[e.ID] = true
 				merged.ExternalInterfaces = append(merged.ExternalInterfaces, e)
+			}
+		}
+		for _, t := range r.DBTables {
+			if !dbTableSeen[t.Name] {
+				dbTableSeen[t.Name] = true
+				merged.DBTables = append(merged.DBTables, t)
 			}
 		}
 		for _, rel := range r.Relationships {

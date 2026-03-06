@@ -35,6 +35,22 @@ type Reader interface {
 	GetParagraphFlow(ctx context.Context, programID string) ([]ParagraphFlowInfo, error)
 	GetDataFlow(ctx context.Context, programID string) ([]DataFlowInfo, error)
 	GetDataHierarchy(ctx context.Context, programID string) ([]DataHierarchyInfo, error)
+	// Phase 1: Dead paragraph detection
+	GetDeadParagraphs(ctx context.Context, programID string) ([]DeadParagraphInfo, error)
+	GetDeadCodeSummary(ctx context.Context) ([]DeadCodeSummaryInfo, error)
+	// Phase 2: JCL analysis
+	ListJCLJobs(ctx context.Context) ([]JCLJobInfo, error)
+	GetJCLJob(ctx context.Context, jobName string) (*JCLJobDetail, error)
+	GetProgramJCL(ctx context.Context, programID string) (*ProgramJCLInfo, error)
+	GetDatasetUsage(ctx context.Context, dsname string) ([]DatasetUsageInfo, error)
+	// Phase 3: DB table access
+	ListDBTables(ctx context.Context) ([]DBTableInfo, error)
+	GetTableUsage(ctx context.Context, tableName string) (*TableUsageInfo, error)
+	GetProgramTableAccess(ctx context.Context, programID string) (*ProgramTableAccessInfo, error)
+	// Phase 4: Cross-program data flow
+	GetCrossProgramDataFlow(ctx context.Context, programID string) ([]CrossProgramFlowInfo, error)
+	TraceFieldImpact(ctx context.Context, programID, fieldName string) ([]FieldImpactInfo, error)
+	GetSharedDataChannels(ctx context.Context) ([]SharedDataChannelInfo, error)
 }
 
 // Ensure Client implements Reader.

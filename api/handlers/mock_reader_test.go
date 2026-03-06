@@ -131,3 +131,51 @@ func (m *MockReader) GetDataFlow(_ context.Context, _ string) ([]n4j.DataFlowInf
 func (m *MockReader) GetDataHierarchy(_ context.Context, _ string) ([]n4j.DataHierarchyInfo, error) {
 	return nil, m.Err
 }
+
+func (m *MockReader) GetDeadParagraphs(_ context.Context, _ string) ([]n4j.DeadParagraphInfo, error) {
+	return nil, m.Err
+}
+
+func (m *MockReader) GetDeadCodeSummary(_ context.Context) ([]n4j.DeadCodeSummaryInfo, error) {
+	return nil, m.Err
+}
+
+func (m *MockReader) ListJCLJobs(_ context.Context) ([]n4j.JCLJobInfo, error) {
+	return nil, m.Err
+}
+
+func (m *MockReader) GetJCLJob(_ context.Context, _ string) (*n4j.JCLJobDetail, error) {
+	return nil, m.Err
+}
+
+func (m *MockReader) GetProgramJCL(_ context.Context, _ string) (*n4j.ProgramJCLInfo, error) {
+	return nil, m.Err
+}
+
+func (m *MockReader) GetDatasetUsage(_ context.Context, _ string) ([]n4j.DatasetUsageInfo, error) {
+	return nil, m.Err
+}
+
+func (m *MockReader) ListDBTables(_ context.Context) ([]n4j.DBTableInfo, error) {
+	return nil, m.Err
+}
+
+func (m *MockReader) GetTableUsage(_ context.Context, _ string) (*n4j.TableUsageInfo, error) {
+	return nil, m.Err
+}
+
+func (m *MockReader) GetProgramTableAccess(_ context.Context, _ string) (*n4j.ProgramTableAccessInfo, error) {
+	return nil, m.Err
+}
+
+func (m *MockReader) GetCrossProgramDataFlow(_ context.Context, _ string) ([]n4j.CrossProgramFlowInfo, error) {
+	return nil, m.Err
+}
+
+func (m *MockReader) TraceFieldImpact(_ context.Context, _ string, _ string) ([]n4j.FieldImpactInfo, error) {
+	return nil, m.Err
+}
+
+func (m *MockReader) GetSharedDataChannels(_ context.Context) ([]n4j.SharedDataChannelInfo, error) {
+	return nil, m.Err
+}

@@ -64,6 +64,14 @@ Return a single JSON object with these fields:
       "details": "string — brief description (queue name, linked program, function code, PCB name, etc.)",
       "paragraph": "string — paragraph name where this interface is invoked, or empty"
     }
+  ],
+  "dbTables": [
+    {
+      "name": "string — table name (uppercase)",
+      "schema": "string — schema/qualifier if present, else empty",
+      "columns": ["array of column names referenced across all SQL for this table"],
+      "operations": ["SELECT", "INSERT", "UPDATE", "DELETE"]
+    }
   ]
 }
 
@@ -95,4 +103,5 @@ Rules:
   - SORT or MERGE verb → SORT. Details should include sort file name and INPUT/OUTPUT PROCEDURE or USING/GIVING clause
   - CALL 'DFSORT' / 'ICETOOL' / 'IDCAMS' / 'IEBGENER' / 'IEBCOPY' → BATCH_UTIL. Details should include utility name and operation
   - Always populate the paragraph field with the paragraph name where the interface is invoked
+- For dbTables: deduplicate across all SQL statements. Collect all column names and operations per table. Extract table names from FROM, JOIN, INTO, UPDATE, DELETE FROM clauses. Extract column names from SELECT lists, WHERE predicates, SET clauses, INSERT column lists. Only include tables from EXEC SQL blocks
 - Return ONLY the JSON object, no markdown fences, no explanation

@@ -154,6 +154,10 @@ func mergeKeyForLabel(label string) string {
 		return "fqn"
 	case "ExternalInterface":
 		return "id"
+	case "DDCard":
+		return "id"
+	case "DBTable":
+		return "name"
 	default:
 		return "id"
 	}
@@ -344,6 +348,43 @@ func (w *BatchWriter) WritePass1Result(ctx context.Context, result *graph.Pass1R
 		}
 		if err := w.WriteNodes(ctx, "ExternalInterface", "id", nodes); err != nil {
 			return err
+		}
+	}
+
+	// Write DBTables + ACCESSES relationships
+	if len(result.DBTables) > 0 {
+		nodes := make([]map[string]any, len(result.DBTables))
+		for i, t := range result.DBTables {
+			nodes[i] = map[string]any{
+				"id":     t.ID,
+				"name":   t.Name,
+				"schema": t.Schema,
+			}
+		}
+		if err := w.WriteNodes(ctx, "DBTable", "name", nodes); err != nil {
+			return err
+		}
+
+		// Write ACCESSES relationships for each DBTable
+		programID := ""
+		if len(result.Programs) > 0 {
+			programID = result.Programs[0].ProgramID
+		}
+		if programID != "" {
+			var accessRows []map[string]any
+			for _, t := range result.DBTables {
+				accessRows = append(accessRows, map[string]any{
+					"fromKey": programID,
+					"toKey":   t.Name,
+					"props": map[string]any{
+						"operations": t.Operations,
+						"columns":    t.Columns,
+					},
+				})
+			}
+			if err := w.WriteRelationships(ctx, "ACCESSES", "Program", "programId", "DBTable", "name", accessRows); err != nil {
+				return err
+			}
 		}
 	}
 
@@ -775,6 +816,94 @@ func (w *BatchWriter) WritePass3Result(ctx context.Context, result *graph.Pass3R
 		zap.Int("copybookRisks", len(result.CopybookRisks)),
 		zap.Int("modernizationCandidates", len(result.ModernizationCandidates)),
 		zap.Int("volumeEstimates", len(result.VolumeEstimates)),
+	)
+
+	return nil
+}
+
+// WriteJCLResult writes JCL analysis results to Neo4j.
+func (w *BatchWriter) WriteJCLResult(ctx context.Context, result *graph.JCLAnalysisResult) error {
+	// Write JCLJob nodes
+	if len(result.Jobs) > 0 {
+		nodes := make([]map[string]any, len(result.Jobs))
+		for i, j := range result.Jobs {
+			nodes[i] = map[string]any{
+				"id":       j.ID,
+				"jobName":  j.JobName,
+				"class":    j.Class,
+				"msgclass": j.MsgClass,
+				"region":   j.Region,
+				"cond":     j.Cond,
+			}
+		}
+		if err := w.WriteNodes(ctx, "JCLJob", "jobName", nodes); err != nil {
+			return fmt.Errorf("writing JCLJob nodes: %w", err)
+		}
+	}
+
+	// Write JCLStep nodes
+	if len(result.Steps) > 0 {
+		nodes := make([]map[string]any, len(result.Steps))
+		for i, s := range result.Steps {
+			nodes[i] = map[string]any{
+				"id":       s.ID,
+				"stepName": s.StepName,
+				"program":  s.Program,
+				"proc":     s.Proc,
+				"cond":     s.Cond,
+				"jobName":  s.JobName,
+				"order":    s.Order,
+			}
+		}
+		if err := w.WriteNodes(ctx, "JCLStep", "id", nodes); err != nil {
+			return fmt.Errorf("writing JCLStep nodes: %w", err)
+		}
+	}
+
+	// Write DDCard nodes
+	if len(result.DDCards) > 0 {
+		nodes := make([]map[string]any, len(result.DDCards))
+		for i, dd := range result.DDCards {
+			nodes[i] = map[string]any{
+				"id":       dd.ID,
+				"ddName":   dd.DDName,
+				"dsname":   dd.DSName,
+				"disp":     dd.Disp,
+				"isInput":  dd.IsInput,
+				"isOutput": dd.IsOutput,
+				"jobName":  dd.JobName,
+				"stepName": dd.StepName,
+			}
+		}
+		if err := w.WriteNodes(ctx, "DDCard", "id", nodes); err != nil {
+			return fmt.Errorf("writing DDCard nodes: %w", err)
+		}
+	}
+
+	// Write relationships
+	grouped := groupRelationships(result.Relationships)
+	for key, rels := range grouped {
+		rows := make([]map[string]any, len(rels))
+		for i, r := range rels {
+			props := r.Properties
+			if props == nil {
+				props = map[string]any{}
+			}
+			rows[i] = map[string]any{
+				"fromKey": r.FromKey,
+				"toKey":   r.ToKey,
+				"props":   props,
+			}
+		}
+		if err := w.WriteRelationships(ctx, string(key.relType), key.fromLabel, mergeKeyForLabel(key.fromLabel), key.toLabel, mergeKeyForLabel(key.toLabel), rows); err != nil {
+			return fmt.Errorf("writing JCL relationship %s: %w", key.relType, err)
+		}
+	}
+
+	w.logger.Info("wrote JCL results",
+		zap.Int("jobs", len(result.Jobs)),
+		zap.Int("steps", len(result.Steps)),
+		zap.Int("ddCards", len(result.DDCards)),
 	)
 
 	return nil

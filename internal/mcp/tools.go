@@ -36,6 +36,22 @@ func registerAllTools(s *mcp.Server, reader n4j.Reader) {
 	registerGetParagraphFlow(s, reader)
 	registerGetDataFlow(s, reader)
 	registerGetDataHierarchy(s, reader)
+	// Phase 1: Dead paragraph detection
+	registerGetDeadParagraphs(s, reader)
+	registerGetDeadCodeSummary(s, reader)
+	// Phase 2: JCL analysis
+	registerListJCLJobs(s, reader)
+	registerGetJCLJob(s, reader)
+	registerGetProgramJCL(s, reader)
+	registerGetDatasetUsage(s, reader)
+	// Phase 3: DB table access
+	registerListDBTables(s, reader)
+	registerGetTableUsage(s, reader)
+	registerGetProgramTableAccess(s, reader)
+	// Phase 4: Cross-program data flow
+	registerGetCrossProgramDataFlow(s, reader)
+	registerTraceFieldImpact(s, reader)
+	registerGetSharedDataChannels(s, reader)
 }
 
 func toolError(msg string) *mcp.CallToolResult {
