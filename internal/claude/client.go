@@ -156,9 +156,12 @@ func (c *Client) AnalyzeDeep(ctx context.Context, chunk chunker.Chunk, contextPr
 }
 
 // AnalyzeCrossCutting sends a graph data slice to Claude Opus for Pass 3 cross-cutting analysis.
-func (c *Client) AnalyzeCrossCutting(ctx context.Context, graphSlice string) (string, error) {
+// existingDomains is a formatted list of already-assigned domain names to prevent duplication.
+func (c *Client) AnalyzeCrossCutting(ctx context.Context, graphSlice, existingDomains string) (string, error) {
 	var userMsg bytes.Buffer
-	if err := c.pass3Tmpl.Execute(&userMsg, nil); err != nil {
+	if err := c.pass3Tmpl.Execute(&userMsg, map[string]string{
+		"ExistingDomains": existingDomains,
+	}); err != nil {
 		return "", fmt.Errorf("rendering pass3 template: %w", err)
 	}
 
