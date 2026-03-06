@@ -1,0 +1,58 @@
+       IDENTIFICATION DIVISION.
+       PROGRAM-ID. CUSTMAINT.
+       AUTHOR. TEST.
+
+       ENVIRONMENT DIVISION.
+       INPUT-OUTPUT SECTION.
+       FILE-CONTROL.
+           SELECT CUSTOMER-FILE ASSIGN TO 'CUSTFILE'
+               ORGANIZATION IS INDEXED
+               ACCESS MODE IS DYNAMIC
+               RECORD KEY IS CUST-ID.
+
+       DATA DIVISION.
+       FILE SECTION.
+       FD CUSTOMER-FILE.
+       01 CUSTOMER-RECORD.
+           05 CUST-ID          PIC X(10).
+           05 CUST-NAME        PIC X(30).
+           05 CUST-BALANCE     PIC 9(7)V99.
+
+       WORKING-STORAGE SECTION.
+       01 WS-EOF               PIC X VALUE 'N'.
+       01 WS-ACTION            PIC X(10).
+       01 WS-RETURN-CODE       PIC 99 VALUE 0.
+       77 WS-COUNTER           PIC 9(5) VALUE 0.
+
+       COPY CUSTREC.
+
+       PROCEDURE DIVISION.
+       MAIN-PARA.
+           PERFORM INIT-PARA
+           PERFORM PROCESS-PARA
+           PERFORM CLEANUP-PARA
+           STOP RUN.
+
+       INIT-PARA.
+           OPEN I-O CUSTOMER-FILE
+           MOVE 'N' TO WS-EOF.
+
+       PROCESS-PARA.
+           PERFORM READ-CUSTOMER
+           IF WS-EOF = 'N'
+               PERFORM UPDATE-CUSTOMER
+               CALL 'CUSTRPT' USING CUSTOMER-RECORD
+           END-IF.
+
+       READ-CUSTOMER.
+           READ CUSTOMER-FILE
+               AT END MOVE 'Y' TO WS-EOF
+           END-READ
+           ADD 1 TO WS-COUNTER.
+
+       UPDATE-CUSTOMER.
+           MOVE WS-ACTION TO CUST-NAME
+           REWRITE CUSTOMER-RECORD.
+
+       CLEANUP-PARA.
+           CLOSE CUSTOMER-FILE.

@@ -1,0 +1,107 @@
+You are performing deep semantic analysis on a COBOL source file. Extract ALL relationships, data flows, and control flows.
+
+File: {{.FileName}}
+Chunk: {{.Index}} of {{.Total}}
+
+Return a single JSON object with these fields:
+
+{
+  "performs": [
+    {
+      "fromParagraph": "string — paragraph containing the PERFORM",
+      "toParagraph": "string — performed paragraph",
+      "thruParagraph": "string — THRU target or empty",
+      "isLoop": false,
+      "condition": "string — UNTIL/TIMES condition or empty"
+    }
+  ],
+  "dataFlows": [
+    {
+      "fromItem": "string — source data item",
+      "toItem": "string — destination data item",
+      "context": "string — paragraph or statement context"
+    }
+  ],
+  "fileOperations": [
+    {
+      "operation": "string — OPEN, CLOSE, READ, WRITE, REWRITE, DELETE, START",
+      "fileName": "string — FD name",
+      "paragraph": "string — paragraph where operation occurs"
+    }
+  ],
+  "sqlStatements": [
+    {
+      "type": "string — SELECT, INSERT, UPDATE, DELETE, DECLARE, etc.",
+      "text": "string — first 200 chars of the SQL"
+    }
+  ],
+  "cicsCommands": [
+    {
+      "command": "string — CICS command"
+    }
+  ],
+  "dataHierarchy": [
+    {
+      "name": "string — data item name",
+      "level": 1,
+      "parent": "string — parent item name or empty",
+      "picture": "string — PIC clause or empty",
+      "copybook": "string — originating copybook name or empty"
+    }
+  ],
+  "redefines": [
+    {
+      "item": "string — redefining item",
+      "redefines": "string — redefined item"
+    }
+  ],
+  "copybookDefinitions": [
+    {
+      "dataItem": "string — data item defined in copybook",
+      "copybook": "string — copybook name"
+    }
+  ],
+  "annotations": [
+    {
+      "paragraph": "string — paragraph name",
+      "description": "string — 1-2 sentence description of what this paragraph does",
+      "category": "string — INIT, VALIDATION, PROCESSING, IO, ERROR-HANDLING, CLEANUP, OTHER"
+    }
+  ],
+  "conditionalLogic": [
+    {
+      "paragraph": "string — paragraph containing the condition",
+      "condition": "string — the condition expression (e.g., 'IF WS-STATUS = SPACES')",
+      "variables": ["array of variable names tested in this condition"],
+      "type": "string — IF or EVALUATE"
+    }
+  ],
+  "dynamicCallResolution": [
+    {
+      "variable": "string — the variable used in CALL (e.g., WS-PROG-NAME)",
+      "resolvedTargets": ["array of likely target program names"],
+      "paragraph": "string — paragraph where the CALL occurs"
+    }
+  ],
+  "errorHandling": [
+    {
+      "paragraph": "string — paragraph name",
+      "pattern": "string — STRUCTURED, AD-HOC, FILE-STATUS, SQLCODE, or CICS-RESP",
+      "details": "string — brief description of the error handling approach"
+    }
+  ]
+}
+
+Rules:
+- For PERFORM: capture PERFORM ... THRU as separate thruParagraph; PERFORM ... UNTIL/TIMES → isLoop=true with condition
+- For data flows: capture MOVE, COMPUTE, ADD, SUBTRACT, MULTIPLY, DIVIDE, STRING, UNSTRING operations
+- For file operations: only COBOL file I/O verbs (not SQL or CICS)
+- For data hierarchy: include ALL levels (01 through 88), set parent to immediate containing group item
+- For items inside inlined copybooks (between *>> COPY ... INLINED markers), set the copybook field
+- For redefines: capture both explicit REDEFINES and 66-level RENAMES
+- For annotations: provide a concise business-level description of each paragraph's purpose, specific to what it does in THIS program — do not use generic descriptions like 'main processing' or 'initialization'
+- For conditionalLogic: extract IF and EVALUATE conditions with the variables they test, per paragraph
+- For dynamicCallResolution: for CALL variable-name, examine surrounding MOVE statements or VALUE clauses that set the variable; if you can determine likely target program(s), include them as resolvedTargets
+- For errorHandling: identify error handler paragraphs and classify the pattern (STRUCTURED = uses ON ERROR/NOT ON ERROR, FILE-STATUS = checks file status codes, SQLCODE = checks SQLCODE, CICS-RESP = checks EIBRESP, AD-HOC = informal error checking)
+- If this is a partial chunk, extract only what is visible — do not fabricate content from other chunks
+- Return ONLY the JSON object, no markdown fences, no explanation
