@@ -34,14 +34,17 @@ func RunPass1(ctx context.Context, chunks []chunker.Chunk, processFn ProcessFunc
 			defer wg.Done()
 
 			sem <- struct{}{}
-			defer func() { <-sem }()
 
 			if ctx.Err() != nil {
+				<-sem
 				results <- FileResult{FilePath: c.FileName, Err: ctx.Err()}
 				return
 			}
 
 			res, err := processFn(ctx, c)
+			// Release the worker slot before sending to the channel so
+			// a slow consumer (Neo4j writes) cannot stall LLM workers.
+			<-sem
 
 			if err != nil {
 				logger.Error("failed to process file",
@@ -105,14 +108,17 @@ func RunPass2(ctx context.Context, chunks []chunker.Chunk, processFn Pass2Proces
 			defer wg.Done()
 
 			sem <- struct{}{}
-			defer func() { <-sem }()
 
 			if ctx.Err() != nil {
+				<-sem
 				results <- Pass2ChunkResult{FileName: c.FileName, Chunk: c, Err: ctx.Err()}
 				return
 			}
 
 			res, err := processFn(ctx, c)
+			// Release the worker slot before sending to the channel so
+			// a slow consumer (Neo4j writes) cannot stall LLM workers.
+			<-sem
 
 			if err != nil {
 				logger.Error("pass2: failed to process chunk",

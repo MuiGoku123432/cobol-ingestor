@@ -3,6 +3,7 @@ package neo4j
 import (
 	"context"
 	"fmt"
+	"sync"
 
 	"cobol-ingestor/internal/graph"
 
@@ -11,7 +12,9 @@ import (
 )
 
 // BatchWriter writes graph data to Neo4j in batches.
+// All write methods are safe for concurrent use.
 type BatchWriter struct {
+	mu        sync.Mutex
 	client    *Client
 	batchSize int
 	logger    *zap.Logger
@@ -32,6 +35,9 @@ func (w *BatchWriter) WriteNodes(ctx context.Context, label, mergeKey string, no
 	if len(nodes) == 0 {
 		return nil
 	}
+
+	w.mu.Lock()
+	defer w.mu.Unlock()
 
 	cypher := fmt.Sprintf(
 		"UNWIND $rows AS row MERGE (n:%s {%s: row.%s}) SET n += row",
@@ -65,6 +71,9 @@ func (w *BatchWriter) WriteRelationships(ctx context.Context, relType, fromLabel
 	if len(rels) == 0 {
 		return nil
 	}
+
+	w.mu.Lock()
+	defer w.mu.Unlock()
 
 	cypher := fmt.Sprintf(
 		"UNWIND $rows AS row "+
@@ -102,6 +111,9 @@ func (w *BatchWriter) batchUpdate(ctx context.Context, cypher string, rows []map
 	if len(rows) == 0 {
 		return nil
 	}
+
+	w.mu.Lock()
+	defer w.mu.Unlock()
 
 	for i := 0; i < len(rows); i += w.batchSize {
 		end := i + w.batchSize

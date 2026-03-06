@@ -411,6 +411,9 @@ func (w *BatchWriter) WriteParagraphAnnotations(ctx context.Context, programID s
 		return nil
 	}
 
+	w.mu.Lock()
+	defer w.mu.Unlock()
+
 	cypher := "UNWIND $rows AS row " +
 		"MATCH (p:Paragraph {programId: $pid, name: row.name}) " +
 		"SET p.description = row.description, p.category = row.category"
