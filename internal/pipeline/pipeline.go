@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"os"
+	"sync"
 
 	"cobol-ingestor/internal/cache"
 	"cobol-ingestor/internal/chunker"
@@ -615,15 +616,6 @@ func (p *Pipeline) RunPass5(ctx context.Context, scanResult *scanner.ScanResult)
 		}
 	}
 
-	// Build file path lookup from scanResult
-	pathByProgramID := make(map[string]string)
-	for _, f := range scanResult.Files {
-		if f.Type != graph.FileTypeCOBOL {
-			continue
-		}
-		pathByProgramID[f.Path] = f.Path // will resolve below
-	}
-
 	// Step 2: Fix Gap #1 — Programs missing Pass 3 (re-run Pass 3 for them)
 	missingPass3, err := p.Neo4jClient.QueryProgramsMissingPass3(ctx)
 	if err != nil {
@@ -746,117 +738,161 @@ func (p *Pipeline) rerunPass3ForPrograms(ctx context.Context, programIDs []strin
 	return nil
 }
 
+// pass5Workers returns the bounded worker count for Pass 5 LLM calls.
+func (p *Pipeline) pass5Workers() int {
+	w := p.Config.Ingest.Pass5Workers
+	if w <= 0 {
+		w = p.Config.Ingest.Pass2Workers
+	}
+	if w <= 0 {
+		w = 3
+	}
+	return w
+}
+
 // repairRelationshipGap sends repair prompts to Opus for a gap type and writes results.
 func (p *Pipeline) repairRelationshipGap(ctx context.Context, programIDs []string, repairType string) {
+	sem := make(chan struct{}, p.pass5Workers())
+	var wg sync.WaitGroup
+
 	for _, pid := range programIDs {
-		filePath, err := p.Neo4jClient.GetProgramFilePath(ctx, pid)
-		if err != nil || filePath == "" {
-			p.Logger.Debug("pass 5: skipping repair (no source file)", zap.String("program", pid))
-			continue
-		}
+		wg.Add(1)
+		go func(pid string) {
+			defer wg.Done()
+			sem <- struct{}{}
+			defer func() { <-sem }()
 
-		sourceCode, err := os.ReadFile(filePath)
-		if err != nil {
-			p.Logger.Debug("pass 5: cannot read source file", zap.String("file", filePath), zap.Error(err))
-			continue
-		}
+			if ctx.Err() != nil {
+				return
+			}
 
-		jsonResp, err := p.Claude.AnalyzeRepair(ctx, repairType, pid, "", string(sourceCode), "")
-		if err != nil {
-			p.Logger.Warn("pass 5: repair LLM call failed",
-				zap.String("program", pid),
-				zap.String("repairType", repairType),
-				zap.Error(err))
-			continue
-		}
+			filePath, err := p.Neo4jClient.GetProgramFilePath(ctx, pid)
+			if err != nil || filePath == "" {
+				p.Logger.Debug("pass 5: skipping repair (no source file)", zap.String("program", pid))
+				return
+			}
 
-		var rels []graph.Relationship
-		switch repairType {
-		case "CHILD_OF":
-			rels, err = parser.ParseRepairChildOf(jsonResp, pid)
-		case "MOVES_TO":
-			rels, err = parser.ParseRepairMovesTo(jsonResp, pid)
-		case "MISSING_CALLS":
-			rels, err = parser.ParseRepairCalls(jsonResp, pid)
-		}
+			sourceCode, err := os.ReadFile(filePath)
+			if err != nil {
+				p.Logger.Debug("pass 5: cannot read source file", zap.String("file", filePath), zap.Error(err))
+				return
+			}
 
-		if err != nil {
-			p.Logger.Warn("pass 5: repair parse failed",
-				zap.String("program", pid),
-				zap.String("repairType", repairType),
-				zap.Error(err))
-			continue
-		}
-
-		if len(rels) > 0 {
-			if err := p.writeRepairRelationships(ctx, rels); err != nil {
-				p.Logger.Warn("pass 5: repair write failed",
+			jsonResp, err := p.Claude.AnalyzeRepair(ctx, repairType, pid, "", string(sourceCode), "")
+			if err != nil {
+				p.Logger.Warn("pass 5: repair LLM call failed",
 					zap.String("program", pid),
 					zap.String("repairType", repairType),
 					zap.Error(err))
-			} else {
-				p.Logger.Info("pass 5: repaired relationships",
+				return
+			}
+
+			var rels []graph.Relationship
+			switch repairType {
+			case "CHILD_OF":
+				rels, err = parser.ParseRepairChildOf(jsonResp, pid)
+			case "MOVES_TO":
+				rels, err = parser.ParseRepairMovesTo(jsonResp, pid)
+			case "MISSING_CALLS":
+				rels, err = parser.ParseRepairCalls(jsonResp, pid)
+			}
+
+			if err != nil {
+				p.Logger.Warn("pass 5: repair parse failed",
 					zap.String("program", pid),
 					zap.String("repairType", repairType),
-					zap.Int("count", len(rels)),
-				)
+					zap.Error(err))
+				return
 			}
-		}
+
+			if len(rels) > 0 {
+				if err := p.writeRepairRelationships(ctx, rels); err != nil {
+					p.Logger.Warn("pass 5: repair write failed",
+						zap.String("program", pid),
+						zap.String("repairType", repairType),
+						zap.Error(err))
+				} else {
+					p.Logger.Info("pass 5: repaired relationships",
+						zap.String("program", pid),
+						zap.String("repairType", repairType),
+						zap.Int("count", len(rels)),
+					)
+				}
+			}
+		}(pid)
 	}
+
+	wg.Wait()
 }
 
 // repairAnnotations sends annotation repair prompts for programs with unannotated paragraphs.
 func (p *Pipeline) repairAnnotations(ctx context.Context, unannotated map[string][]string) {
+	sem := make(chan struct{}, p.pass5Workers())
+	var wg sync.WaitGroup
+
 	for pid, paraNames := range unannotated {
-		filePath, err := p.Neo4jClient.GetProgramFilePath(ctx, pid)
-		if err != nil || filePath == "" {
-			continue
-		}
+		wg.Add(1)
+		go func(pid string, paraNames []string) {
+			defer wg.Done()
+			sem <- struct{}{}
+			defer func() { <-sem }()
 
-		sourceCode, err := os.ReadFile(filePath)
-		if err != nil {
-			continue
-		}
-
-		missingList := ""
-		for i, n := range paraNames {
-			if i > 0 {
-				missingList += ", "
+			if ctx.Err() != nil {
+				return
 			}
-			missingList += n
-		}
 
-		jsonResp, err := p.Claude.AnalyzeRepair(ctx, "ANNOTATIONS", pid, "", string(sourceCode), missingList)
-		if err != nil {
-			p.Logger.Warn("pass 5: annotation repair LLM failed", zap.String("program", pid), zap.Error(err))
-			continue
-		}
+			filePath, err := p.Neo4jClient.GetProgramFilePath(ctx, pid)
+			if err != nil || filePath == "" {
+				return
+			}
 
-		annotations, err := parser.ParseRepairAnnotations(jsonResp)
-		if err != nil {
-			p.Logger.Warn("pass 5: annotation parse failed", zap.String("program", pid), zap.Error(err))
-			continue
-		}
+			sourceCode, err := os.ReadFile(filePath)
+			if err != nil {
+				return
+			}
 
-		if len(annotations) > 0 {
-			rows := make([]map[string]any, len(annotations))
-			for i, a := range annotations {
-				rows[i] = map[string]any{
-					"name":        a.Paragraph,
-					"description": a.Description,
-					"category":    a.Category,
+			missingList := ""
+			for i, n := range paraNames {
+				if i > 0 {
+					missingList += ", "
+				}
+				missingList += n
+			}
+
+			jsonResp, err := p.Claude.AnalyzeRepair(ctx, "ANNOTATIONS", pid, "", string(sourceCode), missingList)
+			if err != nil {
+				p.Logger.Warn("pass 5: annotation repair LLM failed", zap.String("program", pid), zap.Error(err))
+				return
+			}
+
+			annotations, err := parser.ParseRepairAnnotations(jsonResp)
+			if err != nil {
+				p.Logger.Warn("pass 5: annotation parse failed", zap.String("program", pid), zap.Error(err))
+				return
+			}
+
+			if len(annotations) > 0 {
+				rows := make([]map[string]any, len(annotations))
+				for i, a := range annotations {
+					rows[i] = map[string]any{
+						"name":        a.Paragraph,
+						"description": a.Description,
+						"category":    a.Category,
+					}
+				}
+				if err := p.Writer.WriteParagraphAnnotations(ctx, pid, rows); err != nil {
+					p.Logger.Warn("pass 5: annotation write failed", zap.String("program", pid), zap.Error(err))
+				} else {
+					p.Logger.Info("pass 5: annotated paragraphs",
+						zap.String("program", pid),
+						zap.Int("count", len(annotations)),
+					)
 				}
 			}
-			if err := p.Writer.WriteParagraphAnnotations(ctx, pid, rows); err != nil {
-				p.Logger.Warn("pass 5: annotation write failed", zap.String("program", pid), zap.Error(err))
-			} else {
-				p.Logger.Info("pass 5: annotated paragraphs",
-					zap.String("program", pid),
-					zap.Int("count", len(annotations)),
-				)
-			}
-		}
+		}(pid, paraNames)
 	}
+
+	wg.Wait()
 }
 
 // writeRepairRelationships converts graph.Relationship slice to map rows and writes to Neo4j.
