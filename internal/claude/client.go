@@ -43,6 +43,7 @@ type Client struct {
 	pass3Tmpl      *template.Template
 	jclTmpl        *template.Template
 	pass4Tmpl      *template.Template
+	pass5Tmpl      *template.Template
 }
 
 // NewClient creates a Claude API client using an LLM provider.
@@ -72,6 +73,11 @@ func NewClient(provider llm.Provider, cfg config.ClaudeConfig, logger *zap.Logge
 		return nil, fmt.Errorf("parsing pass4 template: %w", err)
 	}
 
+	p5Tmpl, err := template.New("pass5").Parse(prompts.Pass5Repair)
+	if err != nil {
+		return nil, fmt.Errorf("parsing pass5 template: %w", err)
+	}
+
 	// Rate limit: ~50 requests per minute to stay within API limits
 	limiter := rate.NewLimiter(rate.Every(time.Second), 2)
 
@@ -97,6 +103,7 @@ func NewClient(provider llm.Provider, cfg config.ClaudeConfig, logger *zap.Logge
 		pass3Tmpl:   p3Tmpl,
 		jclTmpl:     jclTmpl,
 		pass4Tmpl:   p4Tmpl,
+		pass5Tmpl:   p5Tmpl,
 	}, nil
 }
 
@@ -207,6 +214,29 @@ func (c *Client) AnalyzeCrossProgramFlow(ctx context.Context, caller, callee, fi
 		Messages: []llm.Message{
 			{Role: llm.RoleSystem, Content: "You are an expert COBOL analyst mapping data fields between programs through LINKAGE SECTION parameters. Return structured JSON."},
 			{Role: llm.RoleUser, Content: userMsg.String() + "\n\n" + fieldContext},
+		},
+	})
+}
+
+// AnalyzeRepair sends a targeted repair prompt to Opus for Pass 5 gap repair.
+func (c *Client) AnalyzeRepair(ctx context.Context, repairType, programID, graphContext, sourceCode, missingParagraphs string) (string, error) {
+	var userMsg bytes.Buffer
+	if err := c.pass5Tmpl.Execute(&userMsg, map[string]string{
+		"ProgramID":         programID,
+		"RepairType":        repairType,
+		"GraphContext":      graphContext,
+		"SourceCode":        sourceCode,
+		"MissingParagraphs": missingParagraphs,
+	}); err != nil {
+		return "", fmt.Errorf("rendering pass5 template: %w", err)
+	}
+
+	return c.completeWithRetry(ctx, llm.CompletionRequest{
+		Model:     c.opusModel,
+		MaxTokens: c.pass2MaxTokens,
+		Messages: []llm.Message{
+			{Role: llm.RoleSystem, Content: "You are an expert COBOL analyst repairing gaps in extracted program metadata. Return only valid JSON matching the requested schema."},
+			{Role: llm.RoleUser, Content: userMsg.String()},
 		},
 	})
 }

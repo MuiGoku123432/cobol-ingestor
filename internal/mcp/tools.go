@@ -52,6 +52,8 @@ func registerAllTools(s *mcp.Server, reader n4j.Reader) {
 	registerGetCrossProgramDataFlow(s, reader)
 	registerTraceFieldImpact(s, reader)
 	registerGetSharedDataChannels(s, reader)
+	// Phase 5: Validation report
+	registerGetValidationReport(s, reader)
 }
 
 func toolError(msg string) *mcp.CallToolResult {

@@ -71,6 +71,7 @@ type IngestConfig struct {
 	OverlapLines    int
 	Pass3BatchSize  int
 	Pass4Workers    int
+	Pass5Workers    int
 }
 
 type APIConfig struct {
@@ -100,6 +101,7 @@ func Load() (*Config, error) {
 	viper.SetDefault("CLAUDE_PASS3_MAX_TOKENS", 16000)
 	viper.SetDefault("CLAUDE_PASS4_MAX_TOKENS", 4000)
 	viper.SetDefault("PASS4_MAX_WORKERS", 5)
+	viper.SetDefault("PASS5_MAX_WORKERS", 0) // defaults to Pass2 workers
 
 	// Neo4j defaults
 	viper.SetDefault("NEO4J_URI", "bolt://localhost:7687")
@@ -176,6 +178,7 @@ func Load() (*Config, error) {
 			OverlapLines:    viper.GetInt("PASS2_OVERLAP_LINES"),
 			Pass3BatchSize:  viper.GetInt("PASS3_BATCH_SIZE"),
 			Pass4Workers:    viper.GetInt("PASS4_MAX_WORKERS"),
+			Pass5Workers:    viper.GetInt("PASS5_MAX_WORKERS"),
 		},
 		API: APIConfig{
 			Port:     viper.GetString("API_PORT"),

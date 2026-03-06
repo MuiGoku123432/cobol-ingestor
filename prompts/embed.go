@@ -16,3 +16,6 @@ var Pass1JCL string
 
 //go:embed pass4_crossprogram.tmpl
 var Pass4CrossProgram string
+
+//go:embed pass5_repair.tmpl
+var Pass5Repair string

@@ -134,6 +134,26 @@ func (c *Client) QueryCallGraphSlice(ctx context.Context, batchSize, offset int)
 	return slices, nil
 }
 
+// QueryCallGraphSliceForPrograms returns ProgramSlice data for specific program IDs.
+func (c *Client) QueryCallGraphSliceForPrograms(ctx context.Context, programIDs []string) ([]ProgramSlice, error) {
+	var slices []ProgramSlice
+	for _, pid := range programIDs {
+		pc, err := c.QueryProgramContext(ctx, pid)
+		if err != nil {
+			continue
+		}
+		slices = append(slices, ProgramSlice{
+			ProgramID:  pid,
+			Callers:    pc.Callers,
+			Callees:    pc.Callees,
+			Copybooks:  pc.Copybooks,
+			Paragraphs: pc.Paragraphs,
+			FileDefs:   pc.FileDefs,
+		})
+	}
+	return slices, nil
+}
+
 // FormatGraphSlice renders a batch of ProgramSlice as text for the Claude prompt.
 func FormatGraphSlice(slices []ProgramSlice, orphans, hubs []string) string {
 	var b strings.Builder

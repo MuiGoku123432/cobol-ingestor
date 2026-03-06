@@ -202,3 +202,19 @@ func registerGetSharedDataChannels(s *mcp.Server, reader n4j.Reader) {
 		return nil, &output{Channels: items}, nil
 	})
 }
+
+// Phase 5: Validation report tool
+
+func registerGetValidationReport(s *mcp.Server, reader n4j.Reader) {
+	type emptyInput struct{}
+	mcp.AddTool(s, &mcp.Tool{
+		Name:        "get_validation_report",
+		Description: "Run graph validation checks and return a report of detected gaps: missing Pass 3 analysis, missing CHILD_OF/MOVES_TO/CALLS relationships, unannotated paragraphs, unlinked DD cards, dangling calls, and orphan data items.",
+	}, func(ctx context.Context, req *mcp.CallToolRequest, input emptyInput) (*mcp.CallToolResult, *n4j.ValidationResult, error) {
+		result, err := reader.GetValidationReport(ctx)
+		if err != nil {
+			return nil, nil, err
+		}
+		return nil, result, nil
+	})
+}

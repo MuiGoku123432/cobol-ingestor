@@ -179,3 +179,7 @@ func (m *MockReader) TraceFieldImpact(_ context.Context, _ string, _ string) ([]
 func (m *MockReader) GetSharedDataChannels(_ context.Context) ([]n4j.SharedDataChannelInfo, error) {
 	return nil, m.Err
 }
+
+func (m *MockReader) GetValidationReport(_ context.Context) (*n4j.ValidationResult, error) {
+	return nil, m.Err
+}

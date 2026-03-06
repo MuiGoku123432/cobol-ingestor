@@ -84,6 +84,8 @@ type DashboardStats struct {
 	RelationshipCount     int `json:"relationshipCount"`
 	OrphanCount           int `json:"orphanCount"`
 	DomainCount           int `json:"domainCount"`
+	DDCardCount           int `json:"ddCardCount"`
+	DBTableCount          int `json:"dbTableCount"`
 }
 
 // SearchResult holds a single full-text search match.
