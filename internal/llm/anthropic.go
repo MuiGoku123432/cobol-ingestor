@@ -8,9 +8,11 @@ import (
 
 	"github.com/anthropics/anthropic-sdk-go"
 	"github.com/anthropics/anthropic-sdk-go/option"
+	"github.com/anthropics/anthropic-sdk-go/packages/ssestream"
 )
 
 // AnthropicProvider implements Provider using the Anthropic SDK directly.
+// Uses streaming to avoid response header timeouts on large COBOL analysis.
 type AnthropicProvider struct {
 	client      anthropic.Client
 	opusModel   string
@@ -22,7 +24,10 @@ func NewAnthropicProvider(cfg *config.Config) (*AnthropicProvider, error) {
 		return nil, fmt.Errorf("ANTHROPIC_API_KEY is required for the anthropic provider")
 	}
 
-	client := anthropic.NewClient(option.WithAPIKey(cfg.LLM.APIKey))
+	client := anthropic.NewClient(
+		option.WithAPIKey(cfg.LLM.APIKey),
+		option.WithRequestTimeout(cfg.LLM.Timeout),
+	)
 
 	return &AnthropicProvider{
 		client:      client,
@@ -72,24 +77,44 @@ func (p *AnthropicProvider) Complete(ctx context.Context, req CompletionRequest)
 		params.Temperature = anthropic.Float(req.Temperature)
 	}
 
-	resp, err := p.client.Messages.New(ctx, params)
-	if err != nil {
-		return nil, fmt.Errorf("anthropic completion: %w", err)
-	}
+	stream := p.client.Messages.NewStreaming(ctx, params)
+	defer stream.Close()
 
 	var content string
-	for _, block := range resp.Content {
-		if block.Type == "text" {
-			content += block.Text
-		}
+	var inputTokens, outputTokens int
+	var stopReason string
+
+	if err := p.consumeStream(stream, &content, &inputTokens, &outputTokens, &stopReason); err != nil {
+		return nil, fmt.Errorf("anthropic streaming: %w", err)
 	}
 
 	return &CompletionResponse{
 		Content:      content,
-		Model:        string(resp.Model),
-		PromptTokens: int(resp.Usage.InputTokens),
-		OutputTokens: int(resp.Usage.OutputTokens),
+		Model:        string(params.Model),
+		PromptTokens: inputTokens,
+		OutputTokens: outputTokens,
+		StopReason:   stopReason,
+		Truncated:    stopReason == "max_tokens",
 	}, nil
+}
+
+func (p *AnthropicProvider) consumeStream(
+	stream *ssestream.Stream[anthropic.MessageStreamEventUnion],
+	content *string, inputTokens, outputTokens *int, stopReason *string,
+) error {
+	for stream.Next() {
+		event := stream.Current()
+		switch event.Type {
+		case "content_block_delta":
+			*content += event.Delta.Text
+		case "message_delta":
+			*stopReason = string(event.Delta.StopReason)
+			*outputTokens = int(event.Usage.OutputTokens)
+		case "message_start":
+			*inputTokens = int(event.Message.Usage.InputTokens)
+		}
+	}
+	return stream.Err()
 }
 
 func (p *AnthropicProvider) Name() string {

@@ -24,6 +24,18 @@ func TestParsePass3Response_Valid(t *testing.T) {
 		],
 		"riskFlags": [
 			{"programId": "MAINPROG", "riskType": "hub", "details": "Called by 15 programs", "score": 0.8}
+		],
+		"bridgePrograms": [
+			{"programId": "XFERPROG", "domains": ["Customer Management", "Account Processing"], "reason": "Bridges customer and account domains"}
+		],
+		"copybookRisk": [
+			{"copybook": "CUSTREC", "programCount": 25, "riskLevel": "HIGH", "reason": "Used by 25 programs across 3 domains"}
+		],
+		"modernizationCandidates": [
+			{"programId": "CUSTINQ", "score": 0.85, "reason": "Self-contained customer lookup", "approach": "API_EXTRACTION"}
+		],
+		"volumeEstimates": [
+			{"programId": "CUSTMAINT", "estimate": "HIGH", "reason": "Core customer maintenance with heavy DB2 access"}
 		]
 	}`
 
@@ -46,6 +58,29 @@ func TestParsePass3Response_Valid(t *testing.T) {
 	assert.Equal(t, "MAINPROG", result.RiskFlags[0].ProgramID)
 	assert.Equal(t, "hub", result.RiskFlags[0].RiskType)
 	assert.Equal(t, 0.8, result.RiskFlags[0].Score)
+
+	// Bridge programs
+	require.Len(t, result.BridgePrograms, 1)
+	assert.Equal(t, "XFERPROG", result.BridgePrograms[0].ProgramID)
+	assert.Equal(t, []string{"Customer Management", "Account Processing"}, result.BridgePrograms[0].Domains)
+
+	// Copybook risk
+	require.Len(t, result.CopybookRisks, 1)
+	assert.Equal(t, "CUSTREC", result.CopybookRisks[0].Copybook)
+	assert.Equal(t, 25, result.CopybookRisks[0].ProgramCount)
+	assert.Equal(t, "HIGH", result.CopybookRisks[0].RiskLevel)
+
+	// Modernization candidates
+	require.Len(t, result.ModernizationCandidates, 1)
+	assert.Equal(t, "CUSTINQ", result.ModernizationCandidates[0].ProgramID)
+	assert.Equal(t, 0.85, result.ModernizationCandidates[0].Score)
+	assert.Equal(t, "API_EXTRACTION", result.ModernizationCandidates[0].Approach)
+
+	// Volume estimates
+	require.Len(t, result.VolumeEstimates, 1)
+	assert.Equal(t, "CUSTMAINT", result.VolumeEstimates[0].ProgramID)
+	assert.Equal(t, "HIGH", result.VolumeEstimates[0].Estimate)
+	assert.Equal(t, "Core customer maintenance with heavy DB2 access", result.VolumeEstimates[0].Reason)
 }
 
 func TestParsePass3Response_WithMarkdownFences(t *testing.T) {

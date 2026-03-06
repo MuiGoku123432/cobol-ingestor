@@ -1,0 +1,71 @@
+       IDENTIFICATION DIVISION.
+       PROGRAM-ID. BATCHUTL.
+      *
+      * Test program exercising batch utility invocations:
+      * CALL 'DFSORT', 'ICETOOL', 'IDCAMS'.
+      *
+       ENVIRONMENT DIVISION.
+       DATA DIVISION.
+       WORKING-STORAGE SECTION.
+       01  WS-RETURN-CODE            PIC S9(4) COMP.
+       01  WS-SORT-PARMS.
+           05  SORT-PGMNAME          PIC X(8) VALUE 'DFSORT'.
+           05  SORT-CONTROL          PIC X(80).
+           05  SORT-RC               PIC S9(4) COMP.
+       01  WS-TOOL-PARMS.
+           05  TOOL-PGMNAME          PIC X(8) VALUE 'ICETOOL'.
+           05  TOOL-CONTROL          PIC X(80).
+           05  TOOL-RC               PIC S9(4) COMP.
+       01  WS-IDCAMS-PARMS.
+           05  IDCAMS-PGMNAME        PIC X(8) VALUE 'IDCAMS'.
+           05  IDCAMS-CONTROL        PIC X(80).
+           05  IDCAMS-RC             PIC S9(4) COMP.
+       01  WS-IEBGENER-PARMS.
+           05  IEBGENER-PGMNAME      PIC X(8) VALUE 'IEBGENER'.
+           05  IEBGENER-CONTROL      PIC X(80).
+           05  IEBGENER-RC           PIC S9(4) COMP.
+       01  WS-IEBCOPY-PARMS.
+           05  IEBCOPY-PGMNAME       PIC X(8) VALUE 'IEBCOPY'.
+           05  IEBCOPY-CONTROL       PIC X(80).
+           05  IEBCOPY-RC            PIC S9(4) COMP.
+       PROCEDURE DIVISION.
+       0000-MAIN.
+           PERFORM 1000-CALL-DFSORT
+           PERFORM 2000-CALL-ICETOOL
+           PERFORM 3000-CALL-IDCAMS
+           PERFORM 4000-CALL-IEBGENER
+           PERFORM 5000-CALL-IEBCOPY
+           GOBACK.
+       1000-CALL-DFSORT.
+           MOVE ' SORT FIELDS=(1,10,CH,A)' TO SORT-CONTROL
+           CALL 'DFSORT' USING WS-SORT-PARMS.
+           MOVE SORT-RC TO WS-RETURN-CODE
+           IF WS-RETURN-CODE NOT = 0
+               DISPLAY 'DFSORT FAILED RC=' WS-RETURN-CODE
+           END-IF.
+       2000-CALL-ICETOOL.
+           MOVE ' COPY FROM(INDD) TO(OUTDD)' TO TOOL-CONTROL
+           CALL 'ICETOOL' USING WS-TOOL-PARMS.
+           MOVE TOOL-RC TO WS-RETURN-CODE
+           IF WS-RETURN-CODE NOT = 0
+               DISPLAY 'ICETOOL FAILED RC=' WS-RETURN-CODE
+           END-IF.
+       3000-CALL-IDCAMS.
+           MOVE ' DEFINE CLUSTER(NAME(MY.VSAM))' TO IDCAMS-CONTROL
+           CALL 'IDCAMS' USING WS-IDCAMS-PARMS.
+           MOVE IDCAMS-RC TO WS-RETURN-CODE
+           IF WS-RETURN-CODE NOT = 0
+               DISPLAY 'IDCAMS FAILED RC=' WS-RETURN-CODE
+           END-IF.
+       4000-CALL-IEBGENER.
+           CALL 'IEBGENER' USING WS-IEBGENER-PARMS.
+           MOVE IEBGENER-RC TO WS-RETURN-CODE
+           IF WS-RETURN-CODE NOT = 0
+               DISPLAY 'IEBGENER FAILED RC=' WS-RETURN-CODE
+           END-IF.
+       5000-CALL-IEBCOPY.
+           CALL 'IEBCOPY' USING WS-IEBCOPY-PARMS.
+           MOVE IEBCOPY-RC TO WS-RETURN-CODE
+           IF WS-RETURN-CODE NOT = 0
+               DISPLAY 'IEBCOPY FAILED RC=' WS-RETURN-CODE
+           END-IF.

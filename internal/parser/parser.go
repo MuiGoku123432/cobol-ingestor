@@ -12,15 +12,19 @@ import (
 
 // Pass1JSON matches the JSON schema returned by Claude for Pass 1.
 type Pass1JSON struct {
-	ProgramID       string           `json:"programId"`
-	CopyReferences  []string         `json:"copyReferences"`
-	CallTargets     []CallTargetJSON `json:"callTargets"`
-	Paragraphs      []string         `json:"paragraphs"`
-	Sections        []string         `json:"sections"`
-	FileDefinitions []FileDefJSON    `json:"fileDefinitions"`
-	DataItems       []DataItemJSON   `json:"dataItems"`
-	SQLStatements   []SQLJSON        `json:"sqlStatements"`
-	CICSCommands    []CICSJSON       `json:"cicsCommands"`
+	ProgramID          string                  `json:"programId"`
+	ExecutionMode      string                  `json:"executionMode"`
+	CopyReferences     []string                `json:"copyReferences"`
+	CallTargets        []CallTargetJSON        `json:"callTargets"`
+	Paragraphs         []string                `json:"paragraphs"`
+	Sections           []string                `json:"sections"`
+	FileDefinitions    []FileDefJSON           `json:"fileDefinitions"`
+	DataItems          []DataItemJSON          `json:"dataItems"`
+	Conditions         []ConditionJSON         `json:"conditions"`
+	Parameters         []ParameterJSON         `json:"parameters"`
+	SQLStatements      []SQLJSON               `json:"sqlStatements"`
+	CICSCommands       []CICSJSON              `json:"cicsCommands"`
+	ExternalInterfaces []ExternalInterfaceJSON `json:"externalInterfaces"`
 }
 
 type CallTargetJSON struct {
@@ -29,23 +33,45 @@ type CallTargetJSON struct {
 }
 
 type FileDefJSON struct {
-	Name         string `json:"name"`
-	Organization string `json:"organization"`
+	Name          string `json:"name"`
+	Organization  string `json:"organization"`
+	VSAMType      string `json:"vsamType"`
+	DataStoreType string `json:"dataStoreType"`
 }
 
 type DataItemJSON struct {
 	Name    string `json:"name"`
 	Level   int    `json:"level"`
 	Picture string `json:"picture"`
+	Usage   string `json:"usage"`
+}
+
+type ConditionJSON struct {
+	Name   string `json:"name"`
+	Parent string `json:"parent"`
+	Value  string `json:"value"`
+}
+
+type ParameterJSON struct {
+	Name      string `json:"name"`
+	Level     int    `json:"level"`
+	Direction string `json:"direction"`
 }
 
 type SQLJSON struct {
-	Type string `json:"type"`
-	Text string `json:"text"`
+	Type        string `json:"type"`
+	Text        string `json:"text"`
+	TargetTable string `json:"targetTable"`
 }
 
 type CICSJSON struct {
 	Command string `json:"command"`
+}
+
+type ExternalInterfaceJSON struct {
+	Type      string `json:"type"`
+	Details   string `json:"details"`
+	Paragraph string `json:"paragraph"`
 }
 
 // ParsePass1Response parses Claude's JSON response into a Pass1Result.
@@ -64,12 +90,18 @@ func ParsePass1Response(jsonStr, sourceFile string) (*graph.Pass1Result, error) 
 		programID = "UNKNOWN"
 	}
 
+	executionMode := raw.ExecutionMode
+	if executionMode == "" {
+		executionMode = "UNKNOWN"
+	}
+
 	// Program node
 	prog := graph.Program{
-		ID:        newID(),
-		ProgramID: programID,
-		FilePath:  sourceFile,
-		Language:  "COBOL",
+		ID:            newID(),
+		ProgramID:     programID,
+		FilePath:      sourceFile,
+		Language:      "COBOL",
+		ExecutionMode: executionMode,
 	}
 	result.Programs = append(result.Programs, prog)
 
@@ -107,7 +139,7 @@ func ParsePass1Response(jsonStr, sourceFile string) (*graph.Pass1Result, error) 
 		result.Relationships = append(result.Relationships, graph.Relationship{
 			Type:      graph.RelBelongsTo,
 			FromLabel: "Paragraph",
-			FromKey:   name,
+			FromKey:   programID + "." + name,
 			ToLabel:   "Program",
 			ToKey:     programID,
 		})
@@ -120,7 +152,7 @@ func ParsePass1Response(jsonStr, sourceFile string) (*graph.Pass1Result, error) 
 		result.Relationships = append(result.Relationships, graph.Relationship{
 			Type:      graph.RelBelongsTo,
 			FromLabel: "Section",
-			FromKey:   name,
+			FromKey:   programID + "." + name,
 			ToLabel:   "Program",
 			ToKey:     programID,
 		})
@@ -129,10 +161,12 @@ func ParsePass1Response(jsonStr, sourceFile string) (*graph.Pass1Result, error) 
 	// File definitions
 	for _, fd := range raw.FileDefinitions {
 		fileDef := graph.FileDefinition{
-			ID:           newID(),
-			Name:         fd.Name,
-			ProgramID:    programID,
-			Organization: fd.Organization,
+			ID:            newID(),
+			Name:          fd.Name,
+			ProgramID:     programID,
+			Organization:  fd.Organization,
+			VSAMType:      fd.VSAMType,
+			DataStoreType: fd.DataStoreType,
 		}
 		result.FileDefs = append(result.FileDefs, fileDef)
 	}
@@ -147,17 +181,61 @@ func ParsePass1Response(jsonStr, sourceFile string) (*graph.Pass1Result, error) 
 			ProgramID: programID,
 			FQN:       fqn,
 			Picture:   di.Picture,
+			Usage:     di.Usage,
 		}
 		result.DataItems = append(result.DataItems, item)
+	}
+
+	// Conditions (88-level)
+	for _, c := range raw.Conditions {
+		fqn := programID + "." + c.Name
+		cond := graph.Condition{
+			ID:        newID(),
+			Name:      c.Name,
+			Parent:    c.Parent,
+			Value:     c.Value,
+			ProgramID: programID,
+			FQN:       fqn,
+		}
+		result.Conditions = append(result.Conditions, cond)
+		result.Relationships = append(result.Relationships, graph.Relationship{
+			Type:      graph.RelConditionOf,
+			FromLabel: "Condition",
+			FromKey:   fqn,
+			ToLabel:   "DataItem",
+			ToKey:     c.Parent,
+		})
+	}
+
+	// Parameters (LINKAGE SECTION items)
+	for _, p := range raw.Parameters {
+		fqn := programID + "." + p.Name
+		param := graph.Parameter{
+			ID:        newID(),
+			Name:      p.Name,
+			Level:     p.Level,
+			Direction: p.Direction,
+			ProgramID: programID,
+			FQN:       fqn,
+		}
+		result.Parameters = append(result.Parameters, param)
+		result.Relationships = append(result.Relationships, graph.Relationship{
+			Type:      graph.RelParameterOf,
+			FromLabel: "Parameter",
+			FromKey:   fqn,
+			ToLabel:   "Program",
+			ToKey:     programID,
+		})
 	}
 
 	// SQL statements
 	for _, sql := range raw.SQLStatements {
 		stmt := graph.SQLStatement{
-			ID:        newID(),
-			Text:      sql.Text,
-			ProgramID: programID,
-			Type:      sql.Type,
+			ID:          newID(),
+			Text:        sql.Text,
+			ProgramID:   programID,
+			Type:        sql.Type,
+			TargetTable: sql.TargetTable,
 		}
 		result.SQLStatements = append(result.SQLStatements, stmt)
 		result.Relationships = append(result.Relationships, graph.Relationship{
@@ -186,6 +264,25 @@ func ParsePass1Response(jsonStr, sourceFile string) (*graph.Pass1Result, error) 
 		})
 	}
 
+	// External interfaces
+	for _, ei := range raw.ExternalInterfaces {
+		iface := graph.ExternalInterface{
+			ID:        newID(),
+			Type:      ei.Type,
+			Details:   ei.Details,
+			Paragraph: ei.Paragraph,
+			ProgramID: programID,
+		}
+		result.ExternalInterfaces = append(result.ExternalInterfaces, iface)
+		result.Relationships = append(result.Relationships, graph.Relationship{
+			Type:      graph.RelExternalInterface,
+			FromLabel: "Program",
+			FromKey:   programID,
+			ToLabel:   "ExternalInterface",
+			ToKey:     iface.ID,
+		})
+	}
+
 	return result, nil
 }
 
@@ -208,15 +305,18 @@ func stripMarkdownFences(s string) string {
 
 // Pass2JSON matches the JSON schema returned by Claude for Pass 2.
 type Pass2JSON struct {
-	Performs            []PerformJSON       `json:"performs"`
-	DataFlows           []DataFlowJSON      `json:"dataFlows"`
-	FileOperations      []FileOpJSON        `json:"fileOperations"`
-	SQLStatements       []SQLJSON           `json:"sqlStatements"`
-	CICSCommands        []CICSJSON          `json:"cicsCommands"`
-	DataHierarchy       []DataHierarchyJSON `json:"dataHierarchy"`
-	Redefines           []RedefineJSON      `json:"redefines"`
-	CopybookDefinitions []CopybookDefJSON   `json:"copybookDefinitions"`
-	Annotations         []AnnotationJSON    `json:"annotations"`
+	Performs               []PerformJSON              `json:"performs"`
+	DataFlows              []DataFlowJSON             `json:"dataFlows"`
+	FileOperations         []FileOpJSON               `json:"fileOperations"`
+	SQLStatements          []SQLJSON                  `json:"sqlStatements"`
+	CICSCommands           []CICSJSON                 `json:"cicsCommands"`
+	DataHierarchy          []DataHierarchyJSON        `json:"dataHierarchy"`
+	Redefines              []RedefineJSON             `json:"redefines"`
+	CopybookDefinitions    []CopybookDefJSON          `json:"copybookDefinitions"`
+	Annotations            []AnnotationJSON           `json:"annotations"`
+	ConditionalLogic       []ConditionalLogicJSON     `json:"conditionalLogic"`
+	DynamicCallResolution  []DynamicCallResolutionJSON `json:"dynamicCallResolution"`
+	ErrorHandling          []ErrorHandlingJSON        `json:"errorHandling"`
 }
 
 type PerformJSON struct {
@@ -263,6 +363,25 @@ type AnnotationJSON struct {
 	Category    string `json:"category"`
 }
 
+type ConditionalLogicJSON struct {
+	Paragraph string   `json:"paragraph"`
+	Condition string   `json:"condition"`
+	Variables []string `json:"variables"`
+	Type      string   `json:"type"`
+}
+
+type DynamicCallResolutionJSON struct {
+	Variable        string   `json:"variable"`
+	ResolvedTargets []string `json:"resolvedTargets"`
+	Paragraph       string   `json:"paragraph"`
+}
+
+type ErrorHandlingJSON struct {
+	Paragraph string `json:"paragraph"`
+	Pattern   string `json:"pattern"`
+	Details   string `json:"details"`
+}
+
 // ParsePass2Response parses Claude's JSON response into a Pass2Result.
 func ParsePass2Response(jsonStr, sourceFile, programID string) (*graph.Pass2Result, error) {
 	cleaned := stripMarkdownFences(jsonStr)
@@ -305,10 +424,11 @@ func ParsePass2Response(jsonStr, sourceFile, programID string) (*graph.Pass2Resu
 
 	for _, s := range raw.SQLStatements {
 		result.SQLDetails = append(result.SQLDetails, graph.SQLStatement{
-			ID:        newID(),
-			Text:      s.Text,
-			ProgramID: programID,
-			Type:      s.Type,
+			ID:          newID(),
+			Text:        s.Text,
+			ProgramID:   programID,
+			Type:        s.Type,
+			TargetTable: s.TargetTable,
 		})
 	}
 
@@ -349,6 +469,31 @@ func ParsePass2Response(jsonStr, sourceFile, programID string) (*graph.Pass2Resu
 			Paragraph:   a.Paragraph,
 			Description: a.Description,
 			Category:    a.Category,
+		})
+	}
+
+	for _, cl := range raw.ConditionalLogic {
+		result.ConditionalLogic = append(result.ConditionalLogic, graph.ConditionalLogicItem{
+			Paragraph: cl.Paragraph,
+			Condition: cl.Condition,
+			Variables: cl.Variables,
+			Type:      cl.Type,
+		})
+	}
+
+	for _, dc := range raw.DynamicCallResolution {
+		result.DynamicCallResolutions = append(result.DynamicCallResolutions, graph.DynamicCallResolution{
+			Variable:        dc.Variable,
+			ResolvedTargets: dc.ResolvedTargets,
+			Paragraph:       dc.Paragraph,
+		})
+	}
+
+	for _, eh := range raw.ErrorHandling {
+		result.ErrorHandlers = append(result.ErrorHandlers, graph.ErrorHandler{
+			Paragraph: eh.Paragraph,
+			Pattern:   eh.Pattern,
+			Details:   eh.Details,
 		})
 	}
 

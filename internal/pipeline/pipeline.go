@@ -48,6 +48,9 @@ func (p *Pipeline) Run(ctx context.Context, scanResult *scanner.ScanResult, pass
 }
 
 // RunPass1 executes Pass 1 structural analysis.
+// Results are streamed to Neo4j as each file completes (or as all chunks for a
+// multi-chunk file complete). This ensures partial progress is persisted even
+// if the pipeline is interrupted.
 func (p *Pipeline) RunPass1(ctx context.Context, scanResult *scanner.ScanResult) error {
 	var changed []graph.FileInfo
 	for _, f := range scanResult.Files {
@@ -69,6 +72,14 @@ func (p *Pipeline) RunPass1(ctx context.Context, scanResult *scanner.ScanResult)
 	}
 	p.Logger.Info("pass 1: files to process", zap.Int("changed", len(changed)))
 
+	// Build a hash lookup for marking cache after write
+	hashByPath := make(map[string]string, len(changed))
+	for _, f := range changed {
+		hashByPath[f.Path] = f.Hash
+	}
+
+	// Pre-compute how many chunks each file produces
+	chunksPerFile := make(map[string]int)
 	var chunks []chunker.Chunk
 	for _, f := range changed {
 		fileChunks, err := chunker.ChunkFile(f, p.Config.Ingest.TokenLimit, p.Logger)
@@ -76,6 +87,7 @@ func (p *Pipeline) RunPass1(ctx context.Context, scanResult *scanner.ScanResult)
 			p.Logger.Error("chunking failed", zap.String("file", f.Path), zap.Error(err))
 			continue
 		}
+		chunksPerFile[f.Path] = len(fileChunks)
 		chunks = append(chunks, fileChunks...)
 	}
 
@@ -87,41 +99,68 @@ func (p *Pipeline) RunPass1(ctx context.Context, scanResult *scanner.ScanResult)
 		return parser.ParsePass1Response(jsonResp, chunk.FileName)
 	}
 
-	results := pool.RunPass1(ctx, chunks, processFn, p.Config.Claude.MaxWorkers, p.Logger)
+	resultsCh := pool.RunPass1(ctx, chunks, processFn, p.Config.Claude.MaxWorkers, p.Logger)
 
+	// Accumulate multi-chunk results per file, write as soon as all chunks arrive.
+	// Single-chunk files (the common case) are written immediately.
+	pendingChunks := make(map[string][]*graph.Pass1Result)
+	fileHasError := make(map[string]bool)
 	successCount := 0
 	errorCount := 0
-	for _, r := range results {
+
+	for r := range resultsCh {
 		if r.Err != nil {
 			errorCount++
+			fileHasError[r.FilePath] = true
 			continue
 		}
-		if err := p.Writer.WritePass1Result(ctx, r.Result); err != nil {
-			p.Logger.Error("failed to write to neo4j", zap.String("file", r.FilePath), zap.Error(err))
-			errorCount++
-			continue
-		}
-		for _, f := range changed {
-			if f.Path == r.FilePath {
-				if err := p.Cache.MarkProcessed(f.Path, f.Hash); err != nil {
-					p.Logger.Error("failed to update cache", zap.String("file", f.Path), zap.Error(err))
+
+		expected := chunksPerFile[r.FilePath]
+		if expected <= 1 {
+			// Single-chunk file — write immediately
+			if err := p.Writer.WritePass1Result(ctx, r.Result); err != nil {
+				p.Logger.Error("failed to write to neo4j", zap.String("file", r.FilePath), zap.Error(err))
+				errorCount++
+				continue
+			}
+			if hash, ok := hashByPath[r.FilePath]; ok {
+				if err := p.Cache.MarkProcessed(r.FilePath, hash); err != nil {
+					p.Logger.Error("failed to update cache", zap.String("file", r.FilePath), zap.Error(err))
 				}
-				break
+			}
+			successCount++
+		} else {
+			// Multi-chunk file — accumulate and write when all chunks arrive
+			pendingChunks[r.FilePath] = append(pendingChunks[r.FilePath], r.Result)
+
+			if len(pendingChunks[r.FilePath]) == expected && !fileHasError[r.FilePath] {
+				merged := graph.MergePass1Results(pendingChunks[r.FilePath])
+				if err := p.Writer.WritePass1Result(ctx, merged); err != nil {
+					p.Logger.Error("failed to write to neo4j", zap.String("file", r.FilePath), zap.Error(err))
+					errorCount++
+				} else {
+					if hash, ok := hashByPath[r.FilePath]; ok {
+						if err := p.Cache.MarkProcessed(r.FilePath, hash); err != nil {
+							p.Logger.Error("failed to update cache", zap.String("file", r.FilePath), zap.Error(err))
+						}
+					}
+					successCount++
+				}
+				delete(pendingChunks, r.FilePath)
 			}
 		}
-		successCount++
 	}
 
 	p.Logger.Info("pass 1 complete",
 		zap.Int("success", successCount),
 		zap.Int("errors", errorCount),
-		zap.Int("total", len(results)),
 	)
 
 	return nil
 }
 
 // RunPass2 executes Pass 2 deep semantic analysis.
+// Results are streamed to Neo4j as each file's chunks complete.
 func (p *Pipeline) RunPass2(ctx context.Context, scanResult *scanner.ScanResult) error {
 	copybookIndex := chunker.BuildCopybookIndex(scanResult.Files)
 	p.Logger.Info("pass 2: built copybook index", zap.Int("copybooks", len(copybookIndex)))
@@ -146,12 +185,18 @@ func (p *Pipeline) RunPass2(ctx context.Context, scanResult *scanner.ScanResult)
 	}
 	p.Logger.Info("pass 2: files to process", zap.Int("changed", len(changed)))
 
+	hashByPath := make(map[string]string, len(changed))
+	for _, f := range changed {
+		hashByPath[f.Path] = f.Hash
+	}
+
 	chunkOpts := chunker.Pass2ChunkOptions{
 		TokenLimit:    p.Config.Ingest.Pass2TokenLimit,
 		OverlapLines:  p.Config.Ingest.OverlapLines,
 		CopybookIndex: copybookIndex,
 	}
 
+	chunksPerFile := make(map[string]int)
 	var allChunks []chunker.Chunk
 	fileProgramIDs := make(map[string]string)
 
@@ -161,19 +206,30 @@ func (p *Pipeline) RunPass2(ctx context.Context, scanResult *scanner.ScanResult)
 			p.Logger.Error("pass 2: chunking failed", zap.String("file", f.Path), zap.Error(err))
 			continue
 		}
+		chunksPerFile[f.Path] = len(fileChunks)
 		allChunks = append(allChunks, fileChunks...)
 	}
 
-	for _, f := range changed {
+	// Batch lookup: resolve file paths to program IDs in a single query
+	{
+		paths := make([]any, len(changed))
+		for i, f := range changed {
+			paths[i] = f.Path
+		}
 		session := p.Neo4jClient.NewSession(ctx)
 		result, err := session.Run(ctx,
-			"MATCH (prog:Program {filePath: $path}) RETURN prog.programId AS pid LIMIT 1",
-			map[string]any{"path": f.Path},
+			"UNWIND $paths AS path MATCH (prog:Program {filePath: path}) RETURN path, prog.programId AS pid",
+			map[string]any{"paths": paths},
 		)
-		if err == nil && result.Next(ctx) {
-			if val, ok := result.Record().Get("pid"); ok {
-				if pid, ok := val.(string); ok {
-					fileProgramIDs[f.Path] = pid
+		if err == nil {
+			for result.Next(ctx) {
+				record := result.Record()
+				pathVal, _ := record.Get("path")
+				pidVal, _ := record.Get("pid")
+				if path, ok := pathVal.(string); ok {
+					if pid, ok := pidVal.(string); ok {
+						fileProgramIDs[path] = pid
+					}
 				}
 			}
 		}
@@ -208,35 +264,60 @@ func (p *Pipeline) RunPass2(ctx context.Context, scanResult *scanner.ScanResult)
 	if pass2Workers <= 0 {
 		pass2Workers = 3
 	}
-	results := pool.RunPass2(ctx, allChunks, pass2Fn, pass2Workers, p.Logger)
+	resultsCh := pool.RunPass2(ctx, allChunks, pass2Fn, pass2Workers, p.Logger)
 
+	// Stream results to Neo4j, merging multi-chunk files as they complete
+	pendingChunks := make(map[string][]*graph.Pass2Result)
+	fileHasError := make(map[string]bool)
 	successCount := 0
 	errorCount := 0
-	for _, r := range results {
-		if r.Err != nil {
+
+	for cr := range resultsCh {
+		if cr.Err != nil {
 			errorCount++
+			fileHasError[cr.FileName] = true
 			continue
 		}
-		if err := p.Writer.WritePass2Result(ctx, r.Result); err != nil {
-			p.Logger.Error("pass 2: failed to write to neo4j", zap.String("file", r.FilePath), zap.Error(err))
-			errorCount++
-			continue
-		}
-		for _, f := range changed {
-			if f.Path == r.FilePath {
-				if err := p.Cache.MarkProcessedForPass(f.Path, f.Hash, 2); err != nil {
-					p.Logger.Error("pass 2: failed to update cache", zap.String("file", f.Path), zap.Error(err))
+
+		expected := chunksPerFile[cr.FileName]
+		if expected <= 1 {
+			// Single-chunk file — write immediately
+			if err := p.Writer.WritePass2Result(ctx, cr.Result); err != nil {
+				p.Logger.Error("pass 2: failed to write to neo4j", zap.String("file", cr.FileName), zap.Error(err))
+				errorCount++
+				continue
+			}
+			if hash, ok := hashByPath[cr.FileName]; ok {
+				if err := p.Cache.MarkProcessedForPass(cr.FileName, hash, 2); err != nil {
+					p.Logger.Error("pass 2: failed to update cache", zap.String("file", cr.FileName), zap.Error(err))
 				}
-				break
+			}
+			successCount++
+		} else {
+			// Multi-chunk file — accumulate and write when all chunks arrive
+			pendingChunks[cr.FileName] = append(pendingChunks[cr.FileName], cr.Result)
+
+			if len(pendingChunks[cr.FileName]) == expected && !fileHasError[cr.FileName] {
+				merged := graph.MergePass2Results(pendingChunks[cr.FileName])
+				if err := p.Writer.WritePass2Result(ctx, merged); err != nil {
+					p.Logger.Error("pass 2: failed to write to neo4j", zap.String("file", cr.FileName), zap.Error(err))
+					errorCount++
+				} else {
+					if hash, ok := hashByPath[cr.FileName]; ok {
+						if err := p.Cache.MarkProcessedForPass(cr.FileName, hash, 2); err != nil {
+							p.Logger.Error("pass 2: failed to update cache", zap.String("file", cr.FileName), zap.Error(err))
+						}
+					}
+					successCount++
+				}
+				delete(pendingChunks, cr.FileName)
 			}
 		}
-		successCount++
 	}
 
 	p.Logger.Info("pass 2 complete",
 		zap.Int("success", successCount),
 		zap.Int("errors", errorCount),
-		zap.Int("total", len(results)),
 	)
 
 	return nil
@@ -264,6 +345,7 @@ func (p *Pipeline) RunPass3(ctx context.Context) error {
 
 	offset := 0
 	totalBatches := 0
+	var failedPrograms []string
 	for {
 		slices, err := p.Neo4jClient.QueryCallGraphSlice(ctx, batchSize, offset)
 		if err != nil {
@@ -273,27 +355,38 @@ func (p *Pipeline) RunPass3(ctx context.Context) error {
 			break
 		}
 
-		graphText := n4j.FormatGraphSlice(slices, orphans, hubs)
+		if err := p.processPass3Batch(ctx, slices, orphans, hubs); err != nil {
+			p.Logger.Error("pass 3: batch failed, retrying halves",
+				zap.Int("offset", offset), zap.Int("size", len(slices)), zap.Error(err))
 
-		jsonResp, err := p.Claude.AnalyzeCrossCutting(ctx, graphText)
-		if err != nil {
-			p.Logger.Error("pass 3: Claude analysis failed", zap.Error(err))
-			offset += batchSize
-			continue
+			half := len(slices) / 2
+			if half > 0 {
+				if err := p.processPass3Batch(ctx, slices[:half], orphans, hubs); err != nil {
+					p.Logger.Error("pass 3: first half retry failed", zap.Error(err))
+					for _, s := range slices[:half] {
+						failedPrograms = append(failedPrograms, s.ProgramID)
+					}
+				} else {
+					totalBatches++
+				}
+				if err := p.processPass3Batch(ctx, slices[half:], orphans, hubs); err != nil {
+					p.Logger.Error("pass 3: second half retry failed", zap.Error(err))
+					for _, s := range slices[half:] {
+						failedPrograms = append(failedPrograms, s.ProgramID)
+					}
+				} else {
+					totalBatches++
+				}
+			} else {
+				// Single program batch still failed
+				for _, s := range slices {
+					failedPrograms = append(failedPrograms, s.ProgramID)
+				}
+			}
+		} else {
+			totalBatches++
 		}
 
-		result, err := parser.ParsePass3Response(jsonResp)
-		if err != nil {
-			p.Logger.Error("pass 3: parsing failed", zap.Error(err))
-			offset += batchSize
-			continue
-		}
-
-		if err := p.Writer.WritePass3Result(ctx, result); err != nil {
-			p.Logger.Error("pass 3: write failed", zap.Error(err))
-		}
-
-		totalBatches++
 		offset += batchSize
 
 		if len(slices) < batchSize {
@@ -301,6 +394,33 @@ func (p *Pipeline) RunPass3(ctx context.Context) error {
 		}
 	}
 
+	if len(failedPrograms) > 0 {
+		p.Logger.Warn("pass 3: programs failed analysis",
+			zap.Int("count", len(failedPrograms)),
+			zap.Strings("programIds", failedPrograms))
+	}
+
 	p.Logger.Info("pass 3 complete", zap.Int("batches", totalBatches))
+	return nil
+}
+
+// processPass3Batch runs Claude analysis and writes results for a batch of program slices.
+func (p *Pipeline) processPass3Batch(ctx context.Context, slices []n4j.ProgramSlice, orphans, hubs []string) error {
+	graphText := n4j.FormatGraphSlice(slices, orphans, hubs)
+
+	jsonResp, err := p.Claude.AnalyzeCrossCutting(ctx, graphText)
+	if err != nil {
+		return fmt.Errorf("claude analysis: %w", err)
+	}
+
+	result, err := parser.ParsePass3Response(jsonResp)
+	if err != nil {
+		return fmt.Errorf("parsing: %w", err)
+	}
+
+	if err := p.Writer.WritePass3Result(ctx, result); err != nil {
+		return fmt.Errorf("write: %w", err)
+	}
+
 	return nil
 }

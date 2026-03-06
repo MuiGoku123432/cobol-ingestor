@@ -9,11 +9,26 @@ import (
 )
 
 type Config struct {
-	LLM     LLMConfig
-	Claude  ClaudeConfig
-	Neo4j   Neo4jConfig
-	Ingest  IngestConfig
-	API     APIConfig
+	LLM       LLMConfig
+	Claude    ClaudeConfig
+	Neo4j     Neo4jConfig
+	Ingest    IngestConfig
+	API       APIConfig
+	MCP       MCPConfig
+	Modernize ModernizeConfig
+}
+
+type MCPConfig struct {
+	HTTPPort string // MCP_HTTP_PORT — if set, serve Streamable HTTP instead of stdio
+}
+
+type ModernizeConfig struct {
+	Port          string // MODERNIZE_PORT
+	MCPTransport  string // MCP_TRANSPORT: "command" or "http"
+	MCPServerBin  string // MCP_SERVER_BIN
+	MCPServerURL  string // MCP_SERVER_URL (for http transport)
+	ChatModel     string // MODERNIZE_CHAT_MODEL
+	ChatMaxTokens int    // MODERNIZE_CHAT_MAX_TOKENS
 }
 
 // LLMConfig selects which provider backend to use.
@@ -35,6 +50,7 @@ type ClaudeConfig struct {
 	Pass1MaxTokens   int
 	Pass2MaxTokens   int
 	Pass3MaxTokens   int
+	RequestTimeout   time.Duration
 }
 
 type Neo4jConfig struct {
@@ -69,16 +85,16 @@ func Load() (*Config, error) {
 	// LLM provider defaults
 	viper.SetDefault("LLM_PROVIDER", "anthropic")
 	viper.SetDefault("COPILOT_ACCOUNT_TYPE", "individual")
-	viper.SetDefault("LLM_TIMEOUT", "180s")
-	viper.SetDefault("LLM_RESPONSE_HEADER_TIMEOUT", "120s")
+	viper.SetDefault("LLM_TIMEOUT", "600s")
+	viper.SetDefault("LLM_RESPONSE_HEADER_TIMEOUT", "300s")
 
 	// Claude model defaults (used by both providers)
 	viper.SetDefault("CLAUDE_OPUS_MODEL", "claude-opus-4-6")
 	viper.SetDefault("CLAUDE_SONNET_MODEL", "claude-sonnet-4-5-20250929")
 	viper.SetDefault("CLAUDE_MAX_WORKERS", 5)
 	viper.SetDefault("CLAUDE_MAX_RETRIES", 3)
-	viper.SetDefault("CLAUDE_PASS1_MAX_TOKENS", 4096)
-	viper.SetDefault("CLAUDE_PASS2_MAX_TOKENS", 10000)
+	viper.SetDefault("CLAUDE_PASS1_MAX_TOKENS", 8192)
+	viper.SetDefault("CLAUDE_PASS2_MAX_TOKENS", 16000)
 	viper.SetDefault("CLAUDE_PASS3_MAX_TOKENS", 16000)
 
 	// Neo4j defaults
@@ -90,9 +106,9 @@ func Load() (*Config, error) {
 	// Ingest defaults
 	viper.SetDefault("INGEST_BATCH_SIZE", 500)
 	viper.SetDefault("INGEST_CACHE_DB", "./cache.sqlite")
-	viper.SetDefault("INGEST_TOKEN_LIMIT", 150000)
+	viper.SetDefault("INGEST_TOKEN_LIMIT", 30000)
 	viper.SetDefault("PASS2_MAX_WORKERS", 3)
-	viper.SetDefault("PASS2_TOKEN_LIMIT", 100000)
+	viper.SetDefault("PASS2_TOKEN_LIMIT", 20000)
 	viper.SetDefault("PASS2_OVERLAP_LINES", 20)
 	viper.SetDefault("PASS3_BATCH_SIZE", 50)
 
@@ -100,13 +116,24 @@ func Load() (*Config, error) {
 	viper.SetDefault("API_PORT", "8080")
 	viper.SetDefault("API_LOG_LEVEL", "info")
 
+	// MCP defaults
+	viper.SetDefault("MCP_HTTP_PORT", "")
+
+	// Modernize defaults
+	viper.SetDefault("MODERNIZE_PORT", "8081")
+	viper.SetDefault("MCP_TRANSPORT", "command")
+	viper.SetDefault("MCP_SERVER_BIN", "./bin/cobol-graph-mcp")
+	viper.SetDefault("MCP_SERVER_URL", "")
+	viper.SetDefault("MODERNIZE_CHAT_MODEL", "")
+	viper.SetDefault("MODERNIZE_CHAT_MAX_TOKENS", 16384)
+
 	llmTimeout, err := time.ParseDuration(viper.GetString("LLM_TIMEOUT"))
 	if err != nil {
-		llmTimeout = 180 * time.Second
+		llmTimeout = 600 * time.Second
 	}
 	llmResponseHeaderTimeout, err := time.ParseDuration(viper.GetString("LLM_RESPONSE_HEADER_TIMEOUT"))
 	if err != nil {
-		llmResponseHeaderTimeout = 120 * time.Second
+		llmResponseHeaderTimeout = 300 * time.Second
 	}
 
 	cfg := &Config{
@@ -126,6 +153,7 @@ func Load() (*Config, error) {
 			Pass1MaxTokens: viper.GetInt("CLAUDE_PASS1_MAX_TOKENS"),
 			Pass2MaxTokens: viper.GetInt("CLAUDE_PASS2_MAX_TOKENS"),
 			Pass3MaxTokens: viper.GetInt("CLAUDE_PASS3_MAX_TOKENS"),
+			RequestTimeout: llmTimeout,
 		},
 		Neo4j: Neo4jConfig{
 			URI:      viper.GetString("NEO4J_URI"),
@@ -146,6 +174,17 @@ func Load() (*Config, error) {
 		API: APIConfig{
 			Port:     viper.GetString("API_PORT"),
 			LogLevel: viper.GetString("API_LOG_LEVEL"),
+		},
+		MCP: MCPConfig{
+			HTTPPort: viper.GetString("MCP_HTTP_PORT"),
+		},
+		Modernize: ModernizeConfig{
+			Port:          viper.GetString("MODERNIZE_PORT"),
+			MCPTransport:  viper.GetString("MCP_TRANSPORT"),
+			MCPServerBin:  viper.GetString("MCP_SERVER_BIN"),
+			MCPServerURL:  viper.GetString("MCP_SERVER_URL"),
+			ChatModel:     viper.GetString("MODERNIZE_CHAT_MODEL"),
+			ChatMaxTokens: viper.GetInt("MODERNIZE_CHAT_MAX_TOKENS"),
 		},
 	}
 

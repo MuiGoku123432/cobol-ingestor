@@ -14,6 +14,15 @@ import (
 	"go.uber.org/zap"
 )
 
+// collectPass1 drains a FileResult channel into a slice.
+func collectPass1(ch <-chan FileResult) []FileResult {
+	var results []FileResult
+	for r := range ch {
+		results = append(results, r)
+	}
+	return results
+}
+
 func TestRunPass1_Success(t *testing.T) {
 	logger := zap.NewNop()
 
@@ -30,7 +39,7 @@ func TestRunPass1_Success(t *testing.T) {
 		}, nil
 	}
 
-	results := RunPass1(context.Background(), chunks, processFn, 2, logger)
+	results := collectPass1(RunPass1(context.Background(), chunks, processFn, 2, logger))
 
 	require.Len(t, results, 3)
 	for _, r := range results {
@@ -55,7 +64,7 @@ func TestRunPass1_ErrorsCollected(t *testing.T) {
 		return &graph.Pass1Result{SourceFile: c.FileName}, nil
 	}
 
-	results := RunPass1(context.Background(), chunks, processFn, 2, logger)
+	results := collectPass1(RunPass1(context.Background(), chunks, processFn, 2, logger))
 
 	require.Len(t, results, 3)
 
@@ -96,17 +105,26 @@ func TestRunPass1_ConcurrencyBounded(t *testing.T) {
 		return &graph.Pass1Result{SourceFile: c.FileName}, nil
 	}
 
-	results := RunPass1(context.Background(), chunks, processFn, maxWorkers, logger)
+	results := collectPass1(RunPass1(context.Background(), chunks, processFn, maxWorkers, logger))
 	require.Len(t, results, 10)
 
 	// Max concurrent should not exceed maxWorkers
 	assert.LessOrEqual(t, int(maxConcurrent.Load()), maxWorkers)
 }
 
-func TestRunPass2_GroupsAndMerges(t *testing.T) {
+// collectPass2 drains a Pass2ChunkResult channel into a slice.
+func collectPass2(ch <-chan Pass2ChunkResult) []Pass2ChunkResult {
+	var results []Pass2ChunkResult
+	for r := range ch {
+		results = append(results, r)
+	}
+	return results
+}
+
+func TestRunPass2_StreamsResults(t *testing.T) {
 	logger := zap.NewNop()
 
-	// Two chunks from the same file
+	// Two chunks from the same file + one single-chunk file
 	chunks := []chunker.Chunk{
 		{FileName: "file1.cbl", Content: "chunk1", Index: 0, Total: 2, Pass: 2},
 		{FileName: "file1.cbl", Content: "chunk2", Index: 1, Total: 2, Pass: 2},
@@ -123,18 +141,30 @@ func TestRunPass2_GroupsAndMerges(t *testing.T) {
 		}, nil
 	}
 
-	results := RunPass2(context.Background(), chunks, processFn, 2, logger)
+	results := collectPass2(RunPass2(context.Background(), chunks, processFn, 2, logger))
 
-	// Should produce 2 results (one per file)
-	require.Len(t, results, 2)
+	// Should produce 3 chunk results (one per chunk)
+	require.Len(t, results, 3)
 
-	// file1.cbl should have merged results (deduped A->B from 2 chunks)
-	assert.Equal(t, "file1.cbl", results[0].FilePath)
-	assert.NoError(t, results[0].Err)
-	assert.Len(t, results[0].Result.Performs, 1) // deduped
+	// All should succeed
+	for _, r := range results {
+		assert.NoError(t, r.Err)
+		assert.NotNil(t, r.Result)
+	}
 
-	assert.Equal(t, "file2.cbl", results[1].FilePath)
-	assert.NoError(t, results[1].Err)
+	// Verify file1 has 2 results and file2 has 1
+	file1Count := 0
+	file2Count := 0
+	for _, r := range results {
+		switch r.FileName {
+		case "file1.cbl":
+			file1Count++
+		case "file2.cbl":
+			file2Count++
+		}
+	}
+	assert.Equal(t, 2, file1Count)
+	assert.Equal(t, 1, file2Count)
 }
 
 func TestRunPass2_ErrorsCollected(t *testing.T) {
@@ -152,9 +182,19 @@ func TestRunPass2_ErrorsCollected(t *testing.T) {
 		return &graph.Pass2Result{SourceFile: c.FileName, ProgramID: "TEST"}, nil
 	}
 
-	results := RunPass2(context.Background(), chunks, processFn, 2, logger)
+	results := collectPass2(RunPass2(context.Background(), chunks, processFn, 2, logger))
 
 	require.Len(t, results, 2)
-	assert.NoError(t, results[0].Err)
-	assert.Error(t, results[1].Err)
+
+	successCount := 0
+	errorCount := 0
+	for _, r := range results {
+		if r.Err != nil {
+			errorCount++
+		} else {
+			successCount++
+		}
+	}
+	assert.Equal(t, 1, successCount)
+	assert.Equal(t, 1, errorCount)
 }

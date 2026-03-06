@@ -9,9 +9,13 @@ import (
 
 // Pass3JSON matches the JSON schema returned by Claude for Pass 3.
 type Pass3JSON struct {
-	Domains   []Pass3DomainJSON   `json:"domains"`
-	DeadCode  []Pass3DeadCodeJSON `json:"deadCode"`
-	RiskFlags []Pass3RiskJSON     `json:"riskFlags"`
+	Domains                 []Pass3DomainJSON                 `json:"domains"`
+	DeadCode                []Pass3DeadCodeJSON               `json:"deadCode"`
+	RiskFlags               []Pass3RiskJSON                   `json:"riskFlags"`
+	BridgePrograms          []Pass3BridgeProgramJSON          `json:"bridgePrograms"`
+	CopybookRisk            []Pass3CopybookRiskJSON           `json:"copybookRisk"`
+	ModernizationCandidates []Pass3ModernizationCandidateJSON `json:"modernizationCandidates"`
+	VolumeEstimates         []Pass3VolumeEstimateJSON         `json:"volumeEstimates"`
 }
 
 type Pass3DomainJSON struct {
@@ -35,6 +39,32 @@ type Pass3RiskJSON struct {
 	RiskType  string  `json:"riskType"`
 	Details   string  `json:"details"`
 	Score     float64 `json:"score"`
+}
+
+type Pass3BridgeProgramJSON struct {
+	ProgramID string   `json:"programId"`
+	Domains   []string `json:"domains"`
+	Reason    string   `json:"reason"`
+}
+
+type Pass3CopybookRiskJSON struct {
+	Copybook     string `json:"copybook"`
+	ProgramCount int    `json:"programCount"`
+	RiskLevel    string `json:"riskLevel"`
+	Reason       string `json:"reason"`
+}
+
+type Pass3ModernizationCandidateJSON struct {
+	ProgramID string  `json:"programId"`
+	Score     float64 `json:"score"`
+	Reason    string  `json:"reason"`
+	Approach  string  `json:"approach"`
+}
+
+type Pass3VolumeEstimateJSON struct {
+	ProgramID string `json:"programId"`
+	Estimate  string `json:"estimate"`
+	Reason    string `json:"reason"`
 }
 
 // ParsePass3Response parses Claude's JSON response into a Pass3Result.
@@ -78,6 +108,40 @@ func ParsePass3Response(jsonStr string) (*graph.Pass3Result, error) {
 			RiskType:  rf.RiskType,
 			Details:   rf.Details,
 			Score:     rf.Score,
+		})
+	}
+
+	for _, bp := range raw.BridgePrograms {
+		result.BridgePrograms = append(result.BridgePrograms, graph.BridgeProgram{
+			ProgramID: bp.ProgramID,
+			Domains:   bp.Domains,
+			Reason:    bp.Reason,
+		})
+	}
+
+	for _, cr := range raw.CopybookRisk {
+		result.CopybookRisks = append(result.CopybookRisks, graph.CopybookRisk{
+			Copybook:     cr.Copybook,
+			ProgramCount: cr.ProgramCount,
+			RiskLevel:    cr.RiskLevel,
+			Reason:       cr.Reason,
+		})
+	}
+
+	for _, mc := range raw.ModernizationCandidates {
+		result.ModernizationCandidates = append(result.ModernizationCandidates, graph.ModernizationCandidate{
+			ProgramID: mc.ProgramID,
+			Score:     mc.Score,
+			Reason:    mc.Reason,
+			Approach:  mc.Approach,
+		})
+	}
+
+	for _, ve := range raw.VolumeEstimates {
+		result.VolumeEstimates = append(result.VolumeEstimates, graph.VolumeEstimate{
+			ProgramID: ve.ProgramID,
+			Estimate:  ve.Estimate,
+			Reason:    ve.Reason,
 		})
 	}
 

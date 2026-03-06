@@ -9,6 +9,21 @@ You are analyzing a batch of COBOL programs from their graph relationships. Base
    - Programs with many external dependencies (files, SQL, CICS)
    - Programs with complex control flow (many paragraphs)
 
+4. **Bridge Programs**: Identify programs that connect multiple business domains — programs that are called by programs in one domain and call programs in another, or that share copybooks across domain boundaries. These represent tight coupling points.
+
+5. **Copybook Risk**: Identify shared copybooks with high program count that represent change risk — a modification to these copybooks would require retesting many programs. Rate risk as LOW, MEDIUM, HIGH, or CRITICAL.
+
+6. **Modernization Candidates**: Identify programs that are good candidates for extraction as microservices based on:
+   - Self-contained functionality (few incoming callers, clear interface)
+   - Well-defined data boundaries (own files/tables, limited shared copybooks)
+   - Business value (not dead code, actively used)
+   Suggest an approach: API_EXTRACTION, STRANGLER_FIG, EVENT_DRIVEN, or REWRITE.
+
+7. **Volume Estimates**: For each program, estimate transaction volume based on code structure:
+   - HIGH = batch with many file I/O loops, large PERFORM UNTIL constructs, or high CICS SEND MAP count
+   - MEDIUM = moderate processing, standard CRUD operations
+   - LOW = utility/lookup programs, simple parameter validation
+
 Return your analysis as JSON with this exact structure:
 
 ```json
@@ -27,6 +42,18 @@ Return your analysis as JSON with this exact structure:
   ],
   "riskFlags": [
     {"programId": "PROG3", "riskType": "hub", "details": "Called by 15 programs", "score": 0.8}
+  ],
+  "bridgePrograms": [
+    {"programId": "PROG4", "domains": ["Customer Management", "Account Processing"], "reason": "Bridges customer and account domains via shared data"}
+  ],
+  "copybookRisk": [
+    {"copybook": "CUSTREC", "programCount": 25, "riskLevel": "HIGH", "reason": "Used by 25 programs across 3 domains"}
+  ],
+  "modernizationCandidates": [
+    {"programId": "PROG5", "score": 0.85, "reason": "Self-contained customer lookup with clear API boundary", "approach": "API_EXTRACTION"}
+  ],
+  "volumeEstimates": [
+    {"programId": "PROG1", "estimate": "HIGH", "reason": "Multiple PERFORM UNTIL loops processing large files, batch window indicator"}
   ]
 }
 ```
@@ -37,5 +64,10 @@ Rules:
 - Risk scores range from 0.0 (low) to 1.0 (critical)
 - Use descriptive, business-meaningful domain names
 - Confidence ranges from 0.0 to 1.0
+- Bridge programs should connect at least 2 different domains
+- Copybook risk should consider both program count and cross-domain usage
+- Modernization scores range from 0.0 (poor candidate) to 1.0 (ideal candidate)
+- Volume estimates should cover all programs in the input
+- Volume estimate values must be exactly HIGH, MEDIUM, or LOW
 
 Analyze the following programs:

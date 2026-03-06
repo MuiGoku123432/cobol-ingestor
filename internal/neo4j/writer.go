@@ -96,6 +96,33 @@ func (w *BatchWriter) WriteRelationships(ctx context.Context, relType, fromLabel
 	return nil
 }
 
+// batchUpdate runs a Cypher statement with UNWIND against batches of rows.
+// This replaces N+1 individual session.ExecuteWrite calls with batched UNWIND queries.
+func (w *BatchWriter) batchUpdate(ctx context.Context, cypher string, rows []map[string]any) error {
+	if len(rows) == 0 {
+		return nil
+	}
+
+	for i := 0; i < len(rows); i += w.batchSize {
+		end := i + w.batchSize
+		if end > len(rows) {
+			end = len(rows)
+		}
+		batch := rows[i:end]
+
+		session := w.client.NewSession(ctx)
+		_, err := session.ExecuteWrite(ctx, func(tx neo4j.ManagedTransaction) (any, error) {
+			_, err := tx.Run(ctx, cypher, map[string]any{"rows": batch})
+			return nil, err
+		})
+		session.Close(ctx)
+		if err != nil {
+			return fmt.Errorf("batch update: %w", err)
+		}
+	}
+	return nil
+}
+
 // mergeKeyForLabel returns the MERGE property key for a given node label.
 func mergeKeyForLabel(label string) string {
 	switch label {
@@ -106,9 +133,9 @@ func mergeKeyForLabel(label string) string {
 	case "DataItem":
 		return "fqn"
 	case "Paragraph":
-		return "name"
+		return "mergeId"
 	case "Section":
-		return "name"
+		return "mergeId"
 	case "File":
 		return "name"
 	case "SQLStatement":
@@ -121,6 +148,12 @@ func mergeKeyForLabel(label string) string {
 		return "id"
 	case "BusinessDomain":
 		return "name"
+	case "Condition":
+		return "fqn"
+	case "Parameter":
+		return "fqn"
+	case "ExternalInterface":
+		return "id"
 	default:
 		return "id"
 	}
@@ -133,10 +166,12 @@ func (w *BatchWriter) WritePass1Result(ctx context.Context, result *graph.Pass1R
 		nodes := make([]map[string]any, len(result.Programs))
 		for i, p := range result.Programs {
 			nodes[i] = map[string]any{
-				"id":        p.ID,
-				"programId": p.ProgramID,
-				"filePath":  p.FilePath,
-				"language":  p.Language,
+				"id":            p.ID,
+				"programId":     p.ProgramID,
+				"filePath":      p.FilePath,
+				"language":      p.Language,
+				"lineCount":     p.LineCount,
+				"executionMode": p.ExecutionMode,
 			}
 		}
 		if err := w.WriteNodes(ctx, "Program", "programId", nodes); err != nil {
@@ -152,9 +187,10 @@ func (w *BatchWriter) WritePass1Result(ctx context.Context, result *graph.Pass1R
 				"id":        p.ID,
 				"name":      p.Name,
 				"programId": p.ProgramID,
+				"mergeId":   p.ProgramID + "." + p.Name,
 			}
 		}
-		if err := w.WriteNodes(ctx, "Paragraph", "name", nodes); err != nil {
+		if err := w.WriteNodes(ctx, "Paragraph", "mergeId", nodes); err != nil {
 			return err
 		}
 	}
@@ -167,9 +203,10 @@ func (w *BatchWriter) WritePass1Result(ctx context.Context, result *graph.Pass1R
 				"id":        s.ID,
 				"name":      s.Name,
 				"programId": s.ProgramID,
+				"mergeId":   s.ProgramID + "." + s.Name,
 			}
 		}
-		if err := w.WriteNodes(ctx, "Section", "name", nodes); err != nil {
+		if err := w.WriteNodes(ctx, "Section", "mergeId", nodes); err != nil {
 			return err
 		}
 	}
@@ -199,9 +236,46 @@ func (w *BatchWriter) WritePass1Result(ctx context.Context, result *graph.Pass1R
 				"programId": d.ProgramID,
 				"fqn":       d.FQN,
 				"picture":   d.Picture,
+				"usage":     d.Usage,
 			}
 		}
 		if err := w.WriteNodes(ctx, "DataItem", "fqn", nodes); err != nil {
+			return err
+		}
+	}
+
+	// Write Conditions (88-level)
+	if len(result.Conditions) > 0 {
+		nodes := make([]map[string]any, len(result.Conditions))
+		for i, c := range result.Conditions {
+			nodes[i] = map[string]any{
+				"id":        c.ID,
+				"name":      c.Name,
+				"parent":    c.Parent,
+				"value":     c.Value,
+				"programId": c.ProgramID,
+				"fqn":       c.FQN,
+			}
+		}
+		if err := w.WriteNodes(ctx, "Condition", "fqn", nodes); err != nil {
+			return err
+		}
+	}
+
+	// Write Parameters (LINKAGE SECTION)
+	if len(result.Parameters) > 0 {
+		nodes := make([]map[string]any, len(result.Parameters))
+		for i, p := range result.Parameters {
+			nodes[i] = map[string]any{
+				"id":        p.ID,
+				"name":      p.Name,
+				"level":     p.Level,
+				"direction": p.Direction,
+				"programId": p.ProgramID,
+				"fqn":       p.FQN,
+			}
+		}
+		if err := w.WriteNodes(ctx, "Parameter", "fqn", nodes); err != nil {
 			return err
 		}
 	}
@@ -211,10 +285,12 @@ func (w *BatchWriter) WritePass1Result(ctx context.Context, result *graph.Pass1R
 		nodes := make([]map[string]any, len(result.FileDefs))
 		for i, f := range result.FileDefs {
 			nodes[i] = map[string]any{
-				"id":           f.ID,
-				"name":         f.Name,
-				"programId":    f.ProgramID,
-				"organization": f.Organization,
+				"id":            f.ID,
+				"name":          f.Name,
+				"programId":     f.ProgramID,
+				"organization":  f.Organization,
+				"vsamType":      f.VSAMType,
+				"dataStoreType": f.DataStoreType,
 			}
 		}
 		if err := w.WriteNodes(ctx, "File", "name", nodes); err != nil {
@@ -227,10 +303,11 @@ func (w *BatchWriter) WritePass1Result(ctx context.Context, result *graph.Pass1R
 		nodes := make([]map[string]any, len(result.SQLStatements))
 		for i, s := range result.SQLStatements {
 			nodes[i] = map[string]any{
-				"id":        s.ID,
-				"text":      s.Text,
-				"programId": s.ProgramID,
-				"type":      s.Type,
+				"id":          s.ID,
+				"text":        s.Text,
+				"programId":   s.ProgramID,
+				"type":        s.Type,
+				"targetTable": s.TargetTable,
 			}
 		}
 		if err := w.WriteNodes(ctx, "SQLStatement", "id", nodes); err != nil {
@@ -249,6 +326,23 @@ func (w *BatchWriter) WritePass1Result(ctx context.Context, result *graph.Pass1R
 			}
 		}
 		if err := w.WriteNodes(ctx, "CICSTransaction", "id", nodes); err != nil {
+			return err
+		}
+	}
+
+	// Write ExternalInterfaces
+	if len(result.ExternalInterfaces) > 0 {
+		nodes := make([]map[string]any, len(result.ExternalInterfaces))
+		for i, e := range result.ExternalInterfaces {
+			nodes[i] = map[string]any{
+				"id":        e.ID,
+				"type":      e.Type,
+				"details":   e.Details,
+				"paragraph": e.Paragraph,
+				"programId": e.ProgramID,
+			}
+		}
+		if err := w.WriteNodes(ctx, "ExternalInterface", "id", nodes); err != nil {
 			return err
 		}
 	}
@@ -296,14 +390,14 @@ func (w *BatchWriter) WritePass2Result(ctx context.Context, result *graph.Pass2R
 	programID := result.ProgramID
 	var rels []graph.Relationship
 
-	// PERFORMS relationships
+	// PERFORMS relationships — use composite mergeId for Paragraph nodes
 	for _, p := range result.Performs {
 		rel := graph.Relationship{
 			Type:      graph.RelPerforms,
 			FromLabel: "Paragraph",
-			FromKey:   p.FromParagraph,
+			FromKey:   programID + "." + p.FromParagraph,
 			ToLabel:   "Paragraph",
-			ToKey:     p.ToParagraph,
+			ToKey:     programID + "." + p.ToParagraph,
 			Properties: map[string]any{
 				"isLoop":    p.IsLoop,
 				"condition": p.Condition,
@@ -315,25 +409,11 @@ func (w *BatchWriter) WritePass2Result(ctx context.Context, result *graph.Pass2R
 			rels = append(rels, graph.Relationship{
 				Type:      graph.RelPerformsThru,
 				FromLabel: "Paragraph",
-				FromKey:   p.FromParagraph,
+				FromKey:   programID + "." + p.FromParagraph,
 				ToLabel:   "Paragraph",
-				ToKey:     p.ThruParagraph,
+				ToKey:     programID + "." + p.ThruParagraph,
 			})
 		}
-	}
-
-	// MOVES_TO (data flow) relationships
-	for _, d := range result.DataFlows {
-		rels = append(rels, graph.Relationship{
-			Type:      graph.RelMovesTo,
-			FromLabel: "DataItem",
-			FromKey:   d.FromItem,
-			ToLabel:   "DataItem",
-			ToKey:     d.ToItem,
-			Properties: map[string]any{
-				"context": d.Context,
-			},
-		})
 	}
 
 	// File operation relationships (READS/WRITES)
@@ -358,42 +438,7 @@ func (w *BatchWriter) WritePass2Result(ctx context.Context, result *graph.Pass2R
 		})
 	}
 
-	// Data hierarchy — CHILD_OF relationships
-	for _, d := range result.DataHierarchy {
-		if d.Parent != "" {
-			rels = append(rels, graph.Relationship{
-				Type:      graph.RelChildOf,
-				FromLabel: "DataItem",
-				FromKey:   d.Name,
-				ToLabel:   "DataItem",
-				ToKey:     d.Parent,
-			})
-		}
-	}
-
-	// REDEFINES relationships
-	for _, r := range result.Redefines {
-		rels = append(rels, graph.Relationship{
-			Type:      graph.RelRedefines,
-			FromLabel: "DataItem",
-			FromKey:   r.Item,
-			ToLabel:   "DataItem",
-			ToKey:     r.Redefines,
-		})
-	}
-
-	// DEFINED_IN (copybook definitions)
-	for _, c := range result.CopybookDefs {
-		rels = append(rels, graph.Relationship{
-			Type:      graph.RelDefinedIn,
-			FromLabel: "DataItem",
-			FromKey:   c.DataItem,
-			ToLabel:   "Copybook",
-			ToKey:     c.Copybook,
-		})
-	}
-
-	// Write relationships using existing grouped pattern
+	// Write PERFORMS/PERFORMS_THRU and file op relationships using grouped pattern
 	grouped := groupRelationships(rels)
 	for key, groupRels := range grouped {
 		rows := make([]map[string]any, len(groupRels))
@@ -413,31 +458,169 @@ func (w *BatchWriter) WritePass2Result(ctx context.Context, result *graph.Pass2R
 		}
 	}
 
-	// Update Paragraph nodes with annotations (description + category)
+	// MOVES_TO (data flow) — custom Cypher matching on {name, programId}
+	if len(result.DataFlows) > 0 {
+		var flowRows []map[string]any
+		for _, d := range result.DataFlows {
+			flowRows = append(flowRows, map[string]any{
+				"fromName": d.FromItem,
+				"toName":   d.ToItem,
+				"pid":      programID,
+				"context":  d.Context,
+			})
+		}
+		if err := w.batchUpdate(ctx,
+			"UNWIND $rows AS row "+
+				"MATCH (src:DataItem {name: row.fromName, programId: row.pid}) "+
+				"MATCH (dst:DataItem {name: row.toName, programId: row.pid}) "+
+				"MERGE (src)-[r:MOVES_TO]->(dst) SET r.context = row.context",
+			flowRows); err != nil {
+			w.logger.Warn("failed to write MOVES_TO relationships", zap.Error(err))
+		}
+	}
+
+	// Data hierarchy — CHILD_OF relationships — custom Cypher matching on {name, programId}
+	if len(result.DataHierarchy) > 0 {
+		var childRows []map[string]any
+		for _, d := range result.DataHierarchy {
+			if d.Parent != "" {
+				childRows = append(childRows, map[string]any{
+					"childName":  d.Name,
+					"parentName": d.Parent,
+					"pid":        programID,
+				})
+			}
+		}
+		if err := w.batchUpdate(ctx,
+			"UNWIND $rows AS row "+
+				"MATCH (child:DataItem {name: row.childName, programId: row.pid}) "+
+				"MATCH (parent:DataItem {name: row.parentName, programId: row.pid}) "+
+				"MERGE (child)-[:CHILD_OF]->(parent)",
+			childRows); err != nil {
+			w.logger.Warn("failed to write CHILD_OF relationships", zap.Error(err))
+		}
+	}
+
+	// REDEFINES relationships — custom Cypher matching on {name, programId}
+	if len(result.Redefines) > 0 {
+		var redefRows []map[string]any
+		for _, r := range result.Redefines {
+			redefRows = append(redefRows, map[string]any{
+				"itemName":   r.Item,
+				"targetName": r.Redefines,
+				"pid":        programID,
+			})
+		}
+		if err := w.batchUpdate(ctx,
+			"UNWIND $rows AS row "+
+				"MATCH (item:DataItem {name: row.itemName, programId: row.pid}) "+
+				"MATCH (target:DataItem {name: row.targetName, programId: row.pid}) "+
+				"MERGE (item)-[:REDEFINES]->(target)",
+			redefRows); err != nil {
+			w.logger.Warn("failed to write REDEFINES relationships", zap.Error(err))
+		}
+	}
+
+	// DEFINED_IN (copybook definitions) — custom Cypher matching DataItem on {name, programId}
+	if len(result.CopybookDefs) > 0 {
+		var defRows []map[string]any
+		for _, c := range result.CopybookDefs {
+			defRows = append(defRows, map[string]any{
+				"itemName": c.DataItem,
+				"cbName":   c.Copybook,
+				"pid":      programID,
+			})
+		}
+		if err := w.batchUpdate(ctx,
+			"UNWIND $rows AS row "+
+				"MATCH (item:DataItem {name: row.itemName, programId: row.pid}) "+
+				"MATCH (cb:Copybook {name: row.cbName}) "+
+				"MERGE (item)-[:DEFINED_IN]->(cb)",
+			defRows); err != nil {
+			w.logger.Warn("failed to write DEFINED_IN relationships", zap.Error(err))
+		}
+	}
+
+	// Update Paragraph nodes with conditional logic (batched)
+	if len(result.ConditionalLogic) > 0 {
+		var clRows []map[string]any
+		for _, cl := range result.ConditionalLogic {
+			if cl.Paragraph == "" {
+				continue
+			}
+			clRows = append(clRows, map[string]any{
+				"name":  cl.Paragraph,
+				"pid":   programID,
+				"entry": fmt.Sprintf("[%s] %s", cl.Type, cl.Condition),
+			})
+		}
+		if err := w.batchUpdate(ctx,
+			"UNWIND $rows AS row MATCH (p:Paragraph {name: row.name, programId: row.pid}) "+
+				"SET p.conditionalLogic = coalesce(p.conditionalLogic, []) + [row.entry]",
+			clRows); err != nil {
+			w.logger.Warn("failed to update conditional logic", zap.Error(err))
+		}
+	}
+
+	// Write dynamic call resolutions as CALLS relationships with resolved targets
+	for _, dc := range result.DynamicCallResolutions {
+		for _, target := range dc.ResolvedTargets {
+			rels = append(rels, graph.Relationship{
+				Type:      graph.RelCalls,
+				FromLabel: "Program",
+				FromKey:   programID,
+				ToLabel:   "Program",
+				ToKey:     target,
+				Properties: map[string]any{
+					"isDynamic":     true,
+					"resolvedFrom":  dc.Variable,
+					"fromParagraph": dc.Paragraph,
+				},
+			})
+		}
+	}
+
+	// Update Paragraph nodes with error handling patterns (batched)
+	if len(result.ErrorHandlers) > 0 {
+		var ehRows []map[string]any
+		for _, eh := range result.ErrorHandlers {
+			if eh.Paragraph == "" {
+				continue
+			}
+			ehRows = append(ehRows, map[string]any{
+				"name":    eh.Paragraph,
+				"pid":     programID,
+				"pattern": eh.Pattern,
+				"details": eh.Details,
+			})
+		}
+		if err := w.batchUpdate(ctx,
+			"UNWIND $rows AS row MATCH (p:Paragraph {name: row.name, programId: row.pid}) "+
+				"SET p.errorPattern = row.pattern, p.errorDetails = row.details",
+			ehRows); err != nil {
+			w.logger.Warn("failed to update error handling", zap.Error(err))
+		}
+	}
+
+	// Update Paragraph nodes with annotations (batched)
 	if len(result.Annotations) > 0 {
+		var annRows []map[string]any
 		for _, a := range result.Annotations {
 			if a.Paragraph == "" {
 				continue
 			}
-			session := w.client.NewSession(ctx)
-			_, err := session.ExecuteWrite(ctx, func(tx neo4j.ManagedTransaction) (any, error) {
-				_, err := tx.Run(ctx,
-					"MATCH (p:Paragraph {name: $name}) SET p.description = $desc, p.category = $cat",
-					map[string]any{
-						"name": a.Paragraph,
-						"desc": a.Description,
-						"cat":  a.Category,
-					},
-				)
-				return nil, err
+			annRows = append(annRows, map[string]any{
+				"name": a.Paragraph,
+				"pid":  programID,
+				"desc": a.Description,
+				"cat":  a.Category,
 			})
-			session.Close(ctx)
-			if err != nil {
-				w.logger.Warn("failed to update paragraph annotation",
-					zap.String("paragraph", a.Paragraph),
-					zap.Error(err),
-				)
-			}
+		}
+		if err := w.batchUpdate(ctx,
+			"UNWIND $rows AS row MATCH (p:Paragraph {name: row.name, programId: row.pid}) "+
+				"SET p.description = row.desc, p.category = row.cat",
+			annRows); err != nil {
+			w.logger.Warn("failed to update paragraph annotations", zap.Error(err))
 		}
 	}
 
@@ -476,40 +659,110 @@ func (w *BatchWriter) WritePass3Result(ctx context.Context, result *graph.Pass3R
 		}
 	}
 
-	// Set deadCode flags on programs
-	for _, dc := range result.DeadCodeFlags {
-		session := w.client.NewSession(ctx)
-		_, err := session.ExecuteWrite(ctx, func(tx neo4j.ManagedTransaction) (any, error) {
-			_, err := tx.Run(ctx,
-				"MATCH (p:Program {programId: $pid}) SET p.deadCode = true, p.deadCodeReason = $reason",
-				map[string]any{"pid": dc.ProgramID, "reason": dc.Reason})
-			return nil, err
-		})
-		session.Close(ctx)
-		if err != nil {
-			w.logger.Warn("failed to set dead code flag",
-				zap.String("program", dc.ProgramID), zap.Error(err))
+	// Set deadCode flags on programs (batched)
+	if len(result.DeadCodeFlags) > 0 {
+		rows := make([]map[string]any, len(result.DeadCodeFlags))
+		for i, dc := range result.DeadCodeFlags {
+			rows[i] = map[string]any{"pid": dc.ProgramID, "reason": dc.Reason}
+		}
+		if err := w.batchUpdate(ctx,
+			"UNWIND $rows AS row MATCH (p:Program {programId: row.pid}) "+
+				"SET p.deadCode = true, p.deadCodeReason = row.reason",
+			rows); err != nil {
+			w.logger.Warn("failed to set dead code flags", zap.Error(err))
 		}
 	}
 
-	// Set risk flags on programs
-	for _, rf := range result.RiskFlags {
-		session := w.client.NewSession(ctx)
-		_, err := session.ExecuteWrite(ctx, func(tx neo4j.ManagedTransaction) (any, error) {
-			_, err := tx.Run(ctx,
-				"MATCH (p:Program {programId: $pid}) SET p.riskScore = $score, p.riskType = $riskType, p.riskDetails = $details",
-				map[string]any{
-					"pid":      rf.ProgramID,
-					"score":    rf.Score,
-					"riskType": rf.RiskType,
-					"details":  rf.Details,
-				})
-			return nil, err
-		})
-		session.Close(ctx)
-		if err != nil {
-			w.logger.Warn("failed to set risk flag",
-				zap.String("program", rf.ProgramID), zap.Error(err))
+	// Set risk flags on programs (batched)
+	if len(result.RiskFlags) > 0 {
+		rows := make([]map[string]any, len(result.RiskFlags))
+		for i, rf := range result.RiskFlags {
+			rows[i] = map[string]any{
+				"pid":      rf.ProgramID,
+				"score":    rf.Score,
+				"riskType": rf.RiskType,
+				"details":  rf.Details,
+			}
+		}
+		if err := w.batchUpdate(ctx,
+			"UNWIND $rows AS row MATCH (p:Program {programId: row.pid}) "+
+				"SET p.riskScore = row.score, p.riskType = row.riskType, p.riskDetails = row.details",
+			rows); err != nil {
+			w.logger.Warn("failed to set risk flags", zap.Error(err))
+		}
+	}
+
+	// Set bridge program flags (batched)
+	if len(result.BridgePrograms) > 0 {
+		rows := make([]map[string]any, len(result.BridgePrograms))
+		for i, bp := range result.BridgePrograms {
+			rows[i] = map[string]any{
+				"pid":     bp.ProgramID,
+				"domains": bp.Domains,
+				"reason":  bp.Reason,
+			}
+		}
+		if err := w.batchUpdate(ctx,
+			"UNWIND $rows AS row MATCH (p:Program {programId: row.pid}) "+
+				"SET p.isBridge = true, p.bridgeDomains = row.domains, p.bridgeReason = row.reason",
+			rows); err != nil {
+			w.logger.Warn("failed to set bridge program flags", zap.Error(err))
+		}
+	}
+
+	// Set copybook risk flags (batched)
+	if len(result.CopybookRisks) > 0 {
+		rows := make([]map[string]any, len(result.CopybookRisks))
+		for i, cr := range result.CopybookRisks {
+			rows[i] = map[string]any{
+				"name":   cr.Copybook,
+				"risk":   cr.RiskLevel,
+				"count":  cr.ProgramCount,
+				"reason": cr.Reason,
+			}
+		}
+		if err := w.batchUpdate(ctx,
+			"UNWIND $rows AS row MATCH (c:Copybook {name: row.name}) "+
+				"SET c.riskLevel = row.risk, c.programCount = row.count, c.riskReason = row.reason",
+			rows); err != nil {
+			w.logger.Warn("failed to set copybook risks", zap.Error(err))
+		}
+	}
+
+	// Set modernization candidate flags (batched)
+	if len(result.ModernizationCandidates) > 0 {
+		rows := make([]map[string]any, len(result.ModernizationCandidates))
+		for i, mc := range result.ModernizationCandidates {
+			rows[i] = map[string]any{
+				"pid":      mc.ProgramID,
+				"score":    mc.Score,
+				"reason":   mc.Reason,
+				"approach": mc.Approach,
+			}
+		}
+		if err := w.batchUpdate(ctx,
+			"UNWIND $rows AS row MATCH (p:Program {programId: row.pid}) "+
+				"SET p.modernizationScore = row.score, p.modernizationReason = row.reason, p.modernizationApproach = row.approach",
+			rows); err != nil {
+			w.logger.Warn("failed to set modernization candidates", zap.Error(err))
+		}
+	}
+
+	// Set volume estimates on programs (batched)
+	if len(result.VolumeEstimates) > 0 {
+		rows := make([]map[string]any, len(result.VolumeEstimates))
+		for i, ve := range result.VolumeEstimates {
+			rows[i] = map[string]any{
+				"pid":      ve.ProgramID,
+				"estimate": ve.Estimate,
+				"reason":   ve.Reason,
+			}
+		}
+		if err := w.batchUpdate(ctx,
+			"UNWIND $rows AS row MATCH (p:Program {programId: row.pid}) "+
+				"SET p.volumeEstimate = row.estimate, p.volumeReason = row.reason",
+			rows); err != nil {
+			w.logger.Warn("failed to set volume estimates", zap.Error(err))
 		}
 	}
 
@@ -518,6 +771,10 @@ func (w *BatchWriter) WritePass3Result(ctx context.Context, result *graph.Pass3R
 		zap.Int("members", len(result.DomainMembers)),
 		zap.Int("deadCode", len(result.DeadCodeFlags)),
 		zap.Int("riskFlags", len(result.RiskFlags)),
+		zap.Int("bridgePrograms", len(result.BridgePrograms)),
+		zap.Int("copybookRisks", len(result.CopybookRisks)),
+		zap.Int("modernizationCandidates", len(result.ModernizationCandidates)),
+		zap.Int("volumeEstimates", len(result.VolumeEstimates)),
 	)
 
 	return nil

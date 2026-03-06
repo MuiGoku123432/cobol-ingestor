@@ -56,8 +56,8 @@ func TestGetProgram_Found(t *testing.T) {
 			ProgramID: "CUSTMAINT",
 			FilePath:  "/src/CUSTMAINT.cbl",
 			Language:  "COBOL",
-			Callers:   []string{"MAIN"},
-			Callees:   []string{"CUSTRPT"},
+			Callers:   []n4j.CallInfo{{ProgramID: "MAIN"}},
+			Callees:   []n4j.CallInfo{{ProgramID: "CUSTRPT"}},
 		},
 	}
 	r := setupProgramRouter(mock)

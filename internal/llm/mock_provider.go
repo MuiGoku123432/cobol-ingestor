@@ -9,11 +9,12 @@ import (
 // MockProvider is a test double for the Provider interface.
 // It returns pre-configured responses in order and records all calls.
 type MockProvider struct {
-	Responses []string            // returned in order, cycling
-	Calls     []CompletionRequest // recorded calls
-	Error     error               // if set, all calls fail
-	callIdx   int
-	mu        sync.Mutex
+	Responses  []string            // returned in order, cycling
+	Calls      []CompletionRequest // recorded calls
+	Error      error               // if set, all calls fail
+	StopReason string              // if set, used as StopReason in responses
+	callIdx    int
+	mu         sync.Mutex
 }
 
 func (m *MockProvider) Complete(_ context.Context, req CompletionRequest) (*CompletionResponse, error) {
@@ -33,11 +34,17 @@ func (m *MockProvider) Complete(_ context.Context, req CompletionRequest) (*Comp
 	resp := m.Responses[m.callIdx%len(m.Responses)]
 	m.callIdx++
 
+	stopReason := m.StopReason
+	if stopReason == "" {
+		stopReason = "end_turn"
+	}
 	return &CompletionResponse{
 		Content:      resp,
 		Model:        req.Model,
 		PromptTokens: 100,
 		OutputTokens: 50,
+		StopReason:   stopReason,
+		Truncated:    stopReason == "max_tokens",
 	}, nil
 }
 

@@ -42,6 +42,7 @@ func TestScan(t *testing.T) {
 		types[f.Type]++
 		assert.NotEmpty(t, f.Hash, "hash should be populated for %s", f.Path)
 		assert.Greater(t, f.Size, int64(0))
+		assert.Greater(t, f.LineCount, 0, "LineCount should be > 0 for %s", f.Path)
 	}
 
 	assert.Equal(t, 2, types[graph.FileTypeCOBOL])

@@ -93,6 +93,28 @@ const samplePass2JSON = `{
       "description": "Opens files and initializes working storage variables.",
       "category": "INIT"
     }
+  ],
+  "conditionalLogic": [
+    {
+      "paragraph": "2000-PROCESS",
+      "condition": "IF WS-STATUS = SPACES",
+      "variables": ["WS-STATUS"],
+      "type": "IF"
+    }
+  ],
+  "dynamicCallResolution": [
+    {
+      "variable": "WS-PROG-NAME",
+      "resolvedTargets": ["CUSTRPT", "CUSTVAL"],
+      "paragraph": "2000-PROCESS"
+    }
+  ],
+  "errorHandling": [
+    {
+      "paragraph": "9000-ERROR",
+      "pattern": "FILE-STATUS",
+      "details": "Checks FILE-STATUS after each I/O operation"
+    }
   ]
 }`
 
@@ -146,6 +168,22 @@ func TestParsePass2Response(t *testing.T) {
 	require.Len(t, result.Annotations, 2)
 	assert.Equal(t, "0000-MAIN", result.Annotations[0].Paragraph)
 	assert.Equal(t, "PROCESSING", result.Annotations[0].Category)
+
+	// Conditional logic
+	require.Len(t, result.ConditionalLogic, 1)
+	assert.Equal(t, "2000-PROCESS", result.ConditionalLogic[0].Paragraph)
+	assert.Equal(t, "IF", result.ConditionalLogic[0].Type)
+	assert.Contains(t, result.ConditionalLogic[0].Variables, "WS-STATUS")
+
+	// Dynamic call resolution
+	require.Len(t, result.DynamicCallResolutions, 1)
+	assert.Equal(t, "WS-PROG-NAME", result.DynamicCallResolutions[0].Variable)
+	assert.Equal(t, []string{"CUSTRPT", "CUSTVAL"}, result.DynamicCallResolutions[0].ResolvedTargets)
+
+	// Error handling
+	require.Len(t, result.ErrorHandlers, 1)
+	assert.Equal(t, "9000-ERROR", result.ErrorHandlers[0].Paragraph)
+	assert.Equal(t, "FILE-STATUS", result.ErrorHandlers[0].Pattern)
 }
 
 func TestParsePass2Response_MarkdownFences(t *testing.T) {

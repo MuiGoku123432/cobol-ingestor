@@ -10,14 +10,17 @@ import (
 
 // ProgramContext holds Pass 1 graph data used as context for Pass 2 analysis.
 type ProgramContext struct {
-	ProgramID  string
-	Callers    []string
-	Callees    []string
-	Copybooks  []string
-	Paragraphs []string
-	Sections   []string
-	FileDefs   []string
-	DataItems  []string
+	ProgramID          string
+	Callers            []string
+	Callees            []string
+	Copybooks          []string
+	Paragraphs         []string
+	Sections           []string
+	FileDefs           []string
+	DataItems          []string
+	Conditions         []string
+	Parameters         []string
+	ExternalInterfaces []string
 }
 
 // QueryProgramContext retrieves Pass 1 graph context for a program.
@@ -66,6 +69,21 @@ func (c *Client) QueryProgramContext(ctx context.Context, programID string) (*Pr
 			cypher: "MATCH (d:DataItem {programId: $id}) RETURN d.name AS val LIMIT 50",
 			field:  "val",
 			dest:   &pc.DataItems,
+		},
+		{
+			cypher: "MATCH (c:Condition {programId: $id}) RETURN c.name AS val",
+			field:  "val",
+			dest:   &pc.Conditions,
+		},
+		{
+			cypher: "MATCH (p:Parameter {programId: $id}) RETURN p.name AS val",
+			field:  "val",
+			dest:   &pc.Parameters,
+		},
+		{
+			cypher: "MATCH (e:ExternalInterface {programId: $id}) RETURN e.type + ': ' + e.details AS val",
+			field:  "val",
+			dest:   &pc.ExternalInterfaces,
 		},
 	}
 
@@ -122,6 +140,15 @@ func FormatContextPreamble(pc *ProgramContext) string {
 	}
 	if len(pc.DataItems) > 0 {
 		b.WriteString(fmt.Sprintf("Data Items: %s\n", strings.Join(pc.DataItems, ", ")))
+	}
+	if len(pc.Conditions) > 0 {
+		b.WriteString(fmt.Sprintf("Conditions: %s\n", strings.Join(pc.Conditions, ", ")))
+	}
+	if len(pc.Parameters) > 0 {
+		b.WriteString(fmt.Sprintf("Parameters: %s\n", strings.Join(pc.Parameters, ", ")))
+	}
+	if len(pc.ExternalInterfaces) > 0 {
+		b.WriteString(fmt.Sprintf("External Interfaces: %s\n", strings.Join(pc.ExternalInterfaces, ", ")))
 	}
 
 	b.WriteString("=== END GRAPH CONTEXT ===")
