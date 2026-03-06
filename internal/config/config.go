@@ -41,17 +41,16 @@ type LLMConfig struct {
 	ResponseHeaderTimeout time.Duration // Time to wait for first response byte (LLM_RESPONSE_HEADER_TIMEOUT)
 }
 
-// ClaudeConfig holds model names and concurrency settings (used by both providers).
+// ClaudeConfig holds model names and token settings (used by both providers).
 type ClaudeConfig struct {
-	OpusModel        string
-	SonnetModel      string
-	MaxWorkers       int
-	MaxRetries       int
-	Pass1MaxTokens   int
-	Pass2MaxTokens   int
-	Pass3MaxTokens   int
-	Pass4MaxTokens   int
-	RequestTimeout   time.Duration
+	OpusModel      string
+	SonnetModel    string
+	MaxRetries     int
+	Pass1MaxTokens int
+	Pass2MaxTokens int
+	Pass3MaxTokens int
+	Pass4MaxTokens int
+	RequestTimeout time.Duration
 }
 
 type Neo4jConfig struct {
@@ -66,12 +65,10 @@ type IngestConfig struct {
 	BatchSize       int
 	CacheDB         string
 	TokenLimit      int
-	Pass2Workers    int
+	MaxWorkers      int
 	Pass2TokenLimit int
 	OverlapLines    int
 	Pass3BatchSize  int
-	Pass4Workers    int
-	Pass5Workers    int
 }
 
 type APIConfig struct {
@@ -94,14 +91,11 @@ func Load() (*Config, error) {
 	// Claude model defaults (used by both providers)
 	viper.SetDefault("CLAUDE_OPUS_MODEL", "claude-opus-4-6")
 	viper.SetDefault("CLAUDE_SONNET_MODEL", "claude-sonnet-4-5-20250929")
-	viper.SetDefault("CLAUDE_MAX_WORKERS", 5)
 	viper.SetDefault("CLAUDE_MAX_RETRIES", 3)
 	viper.SetDefault("CLAUDE_PASS1_MAX_TOKENS", 8192)
 	viper.SetDefault("CLAUDE_PASS2_MAX_TOKENS", 16000)
 	viper.SetDefault("CLAUDE_PASS3_MAX_TOKENS", 16000)
 	viper.SetDefault("CLAUDE_PASS4_MAX_TOKENS", 4000)
-	viper.SetDefault("PASS4_MAX_WORKERS", 5)
-	viper.SetDefault("PASS5_MAX_WORKERS", 0) // defaults to Pass2 workers
 
 	// Neo4j defaults
 	viper.SetDefault("NEO4J_URI", "bolt://localhost:7687")
@@ -113,7 +107,7 @@ func Load() (*Config, error) {
 	viper.SetDefault("INGEST_BATCH_SIZE", 500)
 	viper.SetDefault("INGEST_CACHE_DB", "./cache.sqlite")
 	viper.SetDefault("INGEST_TOKEN_LIMIT", 30000)
-	viper.SetDefault("PASS2_MAX_WORKERS", 3)
+	viper.SetDefault("MAX_WORKERS", 15)
 	viper.SetDefault("PASS2_TOKEN_LIMIT", 20000)
 	viper.SetDefault("PASS2_OVERLAP_LINES", 20)
 	viper.SetDefault("PASS3_BATCH_SIZE", 50)
@@ -154,7 +148,6 @@ func Load() (*Config, error) {
 		Claude: ClaudeConfig{
 			OpusModel:      viper.GetString("CLAUDE_OPUS_MODEL"),
 			SonnetModel:    viper.GetString("CLAUDE_SONNET_MODEL"),
-			MaxWorkers:     viper.GetInt("CLAUDE_MAX_WORKERS"),
 			MaxRetries:     viper.GetInt("CLAUDE_MAX_RETRIES"),
 			Pass1MaxTokens: viper.GetInt("CLAUDE_PASS1_MAX_TOKENS"),
 			Pass2MaxTokens: viper.GetInt("CLAUDE_PASS2_MAX_TOKENS"),
@@ -173,12 +166,10 @@ func Load() (*Config, error) {
 			BatchSize:       viper.GetInt("INGEST_BATCH_SIZE"),
 			CacheDB:         viper.GetString("INGEST_CACHE_DB"),
 			TokenLimit:      viper.GetInt("INGEST_TOKEN_LIMIT"),
-			Pass2Workers:    viper.GetInt("PASS2_MAX_WORKERS"),
+			MaxWorkers:      viper.GetInt("MAX_WORKERS"),
 			Pass2TokenLimit: viper.GetInt("PASS2_TOKEN_LIMIT"),
 			OverlapLines:    viper.GetInt("PASS2_OVERLAP_LINES"),
 			Pass3BatchSize:  viper.GetInt("PASS3_BATCH_SIZE"),
-			Pass4Workers:    viper.GetInt("PASS4_MAX_WORKERS"),
-			Pass5Workers:    viper.GetInt("PASS5_MAX_WORKERS"),
 		},
 		API: APIConfig{
 			Port:     viper.GetString("API_PORT"),

@@ -168,7 +168,7 @@ func runIngest(cmd *cobra.Command, args []string) error {
 
 	logger.Info("starting ingestion",
 		zap.String("dir", cfg.Ingest.RootDir),
-		zap.Int("max_workers", cfg.Claude.MaxWorkers),
+		zap.Int("max_workers", cfg.Ingest.MaxWorkers),
 		zap.Int("pass", passFlag),
 	)
 

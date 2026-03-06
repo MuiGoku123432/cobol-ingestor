@@ -129,7 +129,7 @@ func (p *Pipeline) RunPass1(ctx context.Context, scanResult *scanner.ScanResult)
 		return parser.ParsePass1Response(jsonResp, chunk.FileName)
 	}
 
-	resultsCh := pool.RunPass1(ctx, chunks, processFn, p.Config.Claude.MaxWorkers, p.Logger)
+	resultsCh := pool.RunPass1(ctx, chunks, processFn, p.Config.Ingest.MaxWorkers, p.Logger)
 
 	// Accumulate multi-chunk results per file, write as soon as all chunks arrive.
 	// Single-chunk files (the common case) are written immediately.
@@ -290,11 +290,7 @@ func (p *Pipeline) RunPass2(ctx context.Context, scanResult *scanner.ScanResult)
 		return parser.ParsePass2Response(jsonResp, chunk.FileName, programID)
 	}
 
-	pass2Workers := p.Config.Ingest.Pass2Workers
-	if pass2Workers <= 0 {
-		pass2Workers = 3
-	}
-	resultsCh := pool.RunPass2(ctx, allChunks, pass2Fn, pass2Workers, p.Logger)
+	resultsCh := pool.RunPass2(ctx, allChunks, pass2Fn, p.Config.Ingest.MaxWorkers, p.Logger)
 
 	// Stream results to Neo4j, merging multi-chunk files as they complete
 	pendingChunks := make(map[string][]*graph.Pass2Result)
@@ -791,16 +787,9 @@ func (p *Pipeline) rerunPass3ForPrograms(ctx context.Context, programIDs []strin
 	return nil
 }
 
-// pass5Workers returns the bounded worker count for Pass 5 LLM calls.
+// pass5Workers returns the worker count for Pass 5 LLM calls.
 func (p *Pipeline) pass5Workers() int {
-	w := p.Config.Ingest.Pass5Workers
-	if w <= 0 {
-		w = p.Config.Ingest.Pass2Workers
-	}
-	if w <= 0 {
-		w = 3
-	}
-	return w
+	return p.Config.Ingest.MaxWorkers
 }
 
 // repairRelationshipGap sends repair prompts to Opus for a gap type and writes results.

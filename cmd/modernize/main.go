@@ -3,7 +3,6 @@ package main
 import (
 	"context"
 	"fmt"
-	"io/fs"
 	"net/http"
 	"os"
 
@@ -82,16 +81,13 @@ func main() {
 	r.Use(gin.Recovery())
 
 	// Serve static files from embedded FS
-	staticFS, err := fs.Sub(webmod.StaticFS, ".")
-	if err != nil {
-		logger.Fatal("creating static filesystem", zap.Error(err))
-	}
-
 	r.GET("/", func(c *gin.Context) {
-		c.FileFromFS("index.html", http.FS(staticFS))
+		data, _ := webmod.StaticFS.ReadFile("index.html")
+		c.Data(http.StatusOK, "text/html; charset=utf-8", data)
 	})
 	r.GET("/app.js", func(c *gin.Context) {
-		c.FileFromFS("app.js", http.FS(staticFS))
+		data, _ := webmod.StaticFS.ReadFile("app.js")
+		c.Data(http.StatusOK, "application/javascript; charset=utf-8", data)
 	})
 
 	// API endpoints
