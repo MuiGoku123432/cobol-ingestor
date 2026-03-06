@@ -34,12 +34,16 @@ type Client struct {
 	pass1MaxTokens int
 	pass2MaxTokens int
 	pass3MaxTokens int
+	pass4MaxTokens int
 	requestTimeout time.Duration
 	limiter        *rate.Limiter
 	logger         *zap.Logger
 	pass1Tmpl      *template.Template
 	pass2Tmpl      *template.Template
 	pass3Tmpl      *template.Template
+	jclTmpl        *template.Template
+	pass4Tmpl      *template.Template
+	pass5Tmpl      *template.Template
 }
 
 // NewClient creates a Claude API client using an LLM provider.
@@ -59,6 +63,21 @@ func NewClient(provider llm.Provider, cfg config.ClaudeConfig, logger *zap.Logge
 		return nil, fmt.Errorf("parsing pass3 template: %w", err)
 	}
 
+	jclTmpl, err := template.New("jcl").Parse(prompts.Pass1JCL)
+	if err != nil {
+		return nil, fmt.Errorf("parsing jcl template: %w", err)
+	}
+
+	p4Tmpl, err := template.New("pass4").Parse(prompts.Pass4CrossProgram)
+	if err != nil {
+		return nil, fmt.Errorf("parsing pass4 template: %w", err)
+	}
+
+	p5Tmpl, err := template.New("pass5").Parse(prompts.Pass5Repair)
+	if err != nil {
+		return nil, fmt.Errorf("parsing pass5 template: %w", err)
+	}
+
 	// Rate limit: ~50 requests per minute to stay within API limits
 	limiter := rate.NewLimiter(rate.Every(time.Second), 2)
 
@@ -75,12 +94,16 @@ func NewClient(provider llm.Provider, cfg config.ClaudeConfig, logger *zap.Logge
 		pass1MaxTokens: cfg.Pass1MaxTokens,
 		pass2MaxTokens: cfg.Pass2MaxTokens,
 		pass3MaxTokens: cfg.Pass3MaxTokens,
+		pass4MaxTokens: cfg.Pass4MaxTokens,
 		requestTimeout: requestTimeout,
 		limiter:        limiter,
 		logger:      logger,
 		pass1Tmpl:   p1Tmpl,
 		pass2Tmpl:   p2Tmpl,
 		pass3Tmpl:   p3Tmpl,
+		jclTmpl:     jclTmpl,
+		pass4Tmpl:   p4Tmpl,
+		pass5Tmpl:   p5Tmpl,
 	}, nil
 }
 
@@ -147,6 +170,73 @@ func (c *Client) AnalyzeCrossCutting(ctx context.Context, graphSlice string) (st
 		Messages: []llm.Message{
 			{Role: llm.RoleSystem, Content: "You are an expert COBOL systems analyst. You analyze program relationships to identify business domains, dead code, and risk factors. Return structured JSON."},
 			{Role: llm.RoleUser, Content: userContent},
+		},
+	})
+}
+
+// AnalyzeJCL sends a JCL file to Claude Sonnet for structural extraction.
+func (c *Client) AnalyzeJCL(ctx context.Context, fileName, content string) (string, error) {
+	var userMsg bytes.Buffer
+	if err := c.jclTmpl.Execute(&userMsg, map[string]string{
+		"FileName": fileName,
+	}); err != nil {
+		return "", fmt.Errorf("rendering jcl template: %w", err)
+	}
+
+	return c.completeWithRetry(ctx, llm.CompletionRequest{
+		Model:     c.sonnetModel,
+		MaxTokens: c.pass1MaxTokens,
+		Messages: []llm.Message{
+			{Role: llm.RoleSystem, Content: "You are a mainframe JCL analysis assistant. You extract structural information from JCL files and return it as JSON."},
+			{Role: llm.RoleUser, Content: userMsg.String() + "\n\n---\n\n" + content},
+		},
+	})
+}
+
+// AnalyzeCrossProgramFlow sends caller/callee field context to Claude Sonnet for LINKAGE mapping.
+func (c *Client) AnalyzeCrossProgramFlow(ctx context.Context, caller, callee, fieldContext string) (string, error) {
+	var userMsg bytes.Buffer
+	if err := c.pass4Tmpl.Execute(&userMsg, map[string]string{
+		"Caller": caller,
+		"Callee": callee,
+	}); err != nil {
+		return "", fmt.Errorf("rendering pass4 template: %w", err)
+	}
+
+	maxTokens := c.pass4MaxTokens
+	if maxTokens <= 0 {
+		maxTokens = 4000
+	}
+
+	return c.completeWithRetry(ctx, llm.CompletionRequest{
+		Model:     c.sonnetModel,
+		MaxTokens: maxTokens,
+		Messages: []llm.Message{
+			{Role: llm.RoleSystem, Content: "You are an expert COBOL analyst mapping data fields between programs through LINKAGE SECTION parameters. Return structured JSON."},
+			{Role: llm.RoleUser, Content: userMsg.String() + "\n\n" + fieldContext},
+		},
+	})
+}
+
+// AnalyzeRepair sends a targeted repair prompt to Opus for Pass 5 gap repair.
+func (c *Client) AnalyzeRepair(ctx context.Context, repairType, programID, graphContext, sourceCode, missingParagraphs string) (string, error) {
+	var userMsg bytes.Buffer
+	if err := c.pass5Tmpl.Execute(&userMsg, map[string]string{
+		"ProgramID":         programID,
+		"RepairType":        repairType,
+		"GraphContext":      graphContext,
+		"SourceCode":        sourceCode,
+		"MissingParagraphs": missingParagraphs,
+	}); err != nil {
+		return "", fmt.Errorf("rendering pass5 template: %w", err)
+	}
+
+	return c.completeWithRetry(ctx, llm.CompletionRequest{
+		Model:     c.opusModel,
+		MaxTokens: c.pass2MaxTokens,
+		Messages: []llm.Message{
+			{Role: llm.RoleSystem, Content: "You are an expert COBOL analyst repairing gaps in extracted program metadata. Return only valid JSON matching the requested schema."},
+			{Role: llm.RoleUser, Content: userMsg.String()},
 		},
 	})
 }

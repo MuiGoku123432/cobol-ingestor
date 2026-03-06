@@ -25,6 +25,14 @@ type Pass1JSON struct {
 	SQLStatements      []SQLJSON               `json:"sqlStatements"`
 	CICSCommands       []CICSJSON              `json:"cicsCommands"`
 	ExternalInterfaces []ExternalInterfaceJSON `json:"externalInterfaces"`
+	DBTables           []DBTableJSON           `json:"dbTables"`
+}
+
+type DBTableJSON struct {
+	Name       string   `json:"name"`
+	Schema     string   `json:"schema"`
+	Columns    []string `json:"columns"`
+	Operations []string `json:"operations"`
 }
 
 type CallTargetJSON struct {
@@ -262,6 +270,18 @@ func ParsePass1Response(jsonStr, sourceFile string) (*graph.Pass1Result, error) 
 			ToLabel:   "CICSTransaction",
 			ToKey:     txn.ID,
 		})
+	}
+
+	// DB Tables
+	for _, dt := range raw.DBTables {
+		table := graph.DBTable{
+			ID:         newID(),
+			Name:       dt.Name,
+			Schema:     dt.Schema,
+			Columns:    dt.Columns,
+			Operations: dt.Operations,
+		}
+		result.DBTables = append(result.DBTables, table)
 	}
 
 	// External interfaces

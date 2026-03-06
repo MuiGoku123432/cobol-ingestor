@@ -50,6 +50,7 @@ type ClaudeConfig struct {
 	Pass1MaxTokens   int
 	Pass2MaxTokens   int
 	Pass3MaxTokens   int
+	Pass4MaxTokens   int
 	RequestTimeout   time.Duration
 }
 
@@ -69,6 +70,8 @@ type IngestConfig struct {
 	Pass2TokenLimit int
 	OverlapLines    int
 	Pass3BatchSize  int
+	Pass4Workers    int
+	Pass5Workers    int
 }
 
 type APIConfig struct {
@@ -96,6 +99,9 @@ func Load() (*Config, error) {
 	viper.SetDefault("CLAUDE_PASS1_MAX_TOKENS", 8192)
 	viper.SetDefault("CLAUDE_PASS2_MAX_TOKENS", 16000)
 	viper.SetDefault("CLAUDE_PASS3_MAX_TOKENS", 16000)
+	viper.SetDefault("CLAUDE_PASS4_MAX_TOKENS", 4000)
+	viper.SetDefault("PASS4_MAX_WORKERS", 5)
+	viper.SetDefault("PASS5_MAX_WORKERS", 0) // defaults to Pass2 workers
 
 	// Neo4j defaults
 	viper.SetDefault("NEO4J_URI", "bolt://localhost:7687")
@@ -153,6 +159,7 @@ func Load() (*Config, error) {
 			Pass1MaxTokens: viper.GetInt("CLAUDE_PASS1_MAX_TOKENS"),
 			Pass2MaxTokens: viper.GetInt("CLAUDE_PASS2_MAX_TOKENS"),
 			Pass3MaxTokens: viper.GetInt("CLAUDE_PASS3_MAX_TOKENS"),
+			Pass4MaxTokens: viper.GetInt("CLAUDE_PASS4_MAX_TOKENS"),
 			RequestTimeout: llmTimeout,
 		},
 		Neo4j: Neo4jConfig{
@@ -170,6 +177,8 @@ func Load() (*Config, error) {
 			Pass2TokenLimit: viper.GetInt("PASS2_TOKEN_LIMIT"),
 			OverlapLines:    viper.GetInt("PASS2_OVERLAP_LINES"),
 			Pass3BatchSize:  viper.GetInt("PASS3_BATCH_SIZE"),
+			Pass4Workers:    viper.GetInt("PASS4_MAX_WORKERS"),
+			Pass5Workers:    viper.GetInt("PASS5_MAX_WORKERS"),
 		},
 		API: APIConfig{
 			Port:     viper.GetString("API_PORT"),

@@ -1,0 +1,39 @@
+You are analyzing a JCL (Job Control Language) file to extract its structure. Extract ONLY what is explicitly present — do not infer or fabricate.
+
+File: {{.FileName}}
+
+Return a single JSON object with these fields:
+
+{
+  "jobName": "string — JOB card name",
+  "class": "string — JOB CLASS parameter, or empty",
+  "msgclass": "string — JOB MSGCLASS parameter, or empty",
+  "steps": [
+    {
+      "stepName": "string — step name from // label",
+      "pgm": "string — PGM= value on EXEC card, or empty if PROC step",
+      "proc": "string — PROC name if EXEC procname (no PGM=), else empty",
+      "cond": "string — step COND parameter, or empty",
+      "ddCards": [
+        {
+          "ddName": "string — DD name (e.g., CUSTFILE, SYSUT1)",
+          "dsname": "string — dataset name from DSN= or DSNAME=",
+          "disp": "string — full DISP parameter (e.g., (OLD), (NEW,CATLG,DELETE), SHR)",
+          "isInput": true,
+          "isOutput": false
+        }
+      ]
+    }
+  ]
+}
+
+Rules:
+- pgm = PGM= value on EXEC card; proc = PROC name if EXEC procname (no PGM= keyword)
+- DD DISP=(OLD) or DISP=SHR -> isInput=true, isOutput=false
+- DD DISP=(NEW,CATLG) or DISP=MOD -> isInput=false, isOutput=true
+- DD DISP=(OLD,DELETE) -> isInput=true, isOutput=true
+- Skip system DDs (SYSPRINT, SYSOUT, SYSUDUMP, CEEDUMP, SYSIN with * data) unless they have meaningful DSNAMEs
+- For PROC steps, extract DD overrides as ddCards
+- For concatenated DDs (multiple DD statements for same DD name), use the first DSN and note concatenation in disp
+- If a step has no DD cards, return an empty ddCards array
+- Return ONLY the JSON object, no markdown fences, no explanation
