@@ -133,9 +133,9 @@ func mergeKeyForLabel(label string) string {
 	case "DataItem":
 		return "fqn"
 	case "Paragraph":
-		return "name"
+		return "mergeId"
 	case "Section":
-		return "name"
+		return "mergeId"
 	case "File":
 		return "name"
 	case "SQLStatement":
@@ -187,9 +187,10 @@ func (w *BatchWriter) WritePass1Result(ctx context.Context, result *graph.Pass1R
 				"id":        p.ID,
 				"name":      p.Name,
 				"programId": p.ProgramID,
+				"mergeId":   p.ProgramID + "." + p.Name,
 			}
 		}
-		if err := w.WriteNodes(ctx, "Paragraph", "name", nodes); err != nil {
+		if err := w.WriteNodes(ctx, "Paragraph", "mergeId", nodes); err != nil {
 			return err
 		}
 	}
@@ -202,9 +203,10 @@ func (w *BatchWriter) WritePass1Result(ctx context.Context, result *graph.Pass1R
 				"id":        s.ID,
 				"name":      s.Name,
 				"programId": s.ProgramID,
+				"mergeId":   s.ProgramID + "." + s.Name,
 			}
 		}
-		if err := w.WriteNodes(ctx, "Section", "name", nodes); err != nil {
+		if err := w.WriteNodes(ctx, "Section", "mergeId", nodes); err != nil {
 			return err
 		}
 	}
@@ -388,14 +390,14 @@ func (w *BatchWriter) WritePass2Result(ctx context.Context, result *graph.Pass2R
 	programID := result.ProgramID
 	var rels []graph.Relationship
 
-	// PERFORMS relationships
+	// PERFORMS relationships — use composite mergeId for Paragraph nodes
 	for _, p := range result.Performs {
 		rel := graph.Relationship{
 			Type:      graph.RelPerforms,
 			FromLabel: "Paragraph",
-			FromKey:   p.FromParagraph,
+			FromKey:   programID + "." + p.FromParagraph,
 			ToLabel:   "Paragraph",
-			ToKey:     p.ToParagraph,
+			ToKey:     programID + "." + p.ToParagraph,
 			Properties: map[string]any{
 				"isLoop":    p.IsLoop,
 				"condition": p.Condition,
@@ -407,25 +409,11 @@ func (w *BatchWriter) WritePass2Result(ctx context.Context, result *graph.Pass2R
 			rels = append(rels, graph.Relationship{
 				Type:      graph.RelPerformsThru,
 				FromLabel: "Paragraph",
-				FromKey:   p.FromParagraph,
+				FromKey:   programID + "." + p.FromParagraph,
 				ToLabel:   "Paragraph",
-				ToKey:     p.ThruParagraph,
+				ToKey:     programID + "." + p.ThruParagraph,
 			})
 		}
-	}
-
-	// MOVES_TO (data flow) relationships
-	for _, d := range result.DataFlows {
-		rels = append(rels, graph.Relationship{
-			Type:      graph.RelMovesTo,
-			FromLabel: "DataItem",
-			FromKey:   d.FromItem,
-			ToLabel:   "DataItem",
-			ToKey:     d.ToItem,
-			Properties: map[string]any{
-				"context": d.Context,
-			},
-		})
 	}
 
 	// File operation relationships (READS/WRITES)
@@ -450,42 +438,7 @@ func (w *BatchWriter) WritePass2Result(ctx context.Context, result *graph.Pass2R
 		})
 	}
 
-	// Data hierarchy — CHILD_OF relationships
-	for _, d := range result.DataHierarchy {
-		if d.Parent != "" {
-			rels = append(rels, graph.Relationship{
-				Type:      graph.RelChildOf,
-				FromLabel: "DataItem",
-				FromKey:   d.Name,
-				ToLabel:   "DataItem",
-				ToKey:     d.Parent,
-			})
-		}
-	}
-
-	// REDEFINES relationships
-	for _, r := range result.Redefines {
-		rels = append(rels, graph.Relationship{
-			Type:      graph.RelRedefines,
-			FromLabel: "DataItem",
-			FromKey:   r.Item,
-			ToLabel:   "DataItem",
-			ToKey:     r.Redefines,
-		})
-	}
-
-	// DEFINED_IN (copybook definitions)
-	for _, c := range result.CopybookDefs {
-		rels = append(rels, graph.Relationship{
-			Type:      graph.RelDefinedIn,
-			FromLabel: "DataItem",
-			FromKey:   c.DataItem,
-			ToLabel:   "Copybook",
-			ToKey:     c.Copybook,
-		})
-	}
-
-	// Write relationships using existing grouped pattern
+	// Write PERFORMS/PERFORMS_THRU and file op relationships using grouped pattern
 	grouped := groupRelationships(rels)
 	for key, groupRels := range grouped {
 		rows := make([]map[string]any, len(groupRels))
@@ -505,6 +458,89 @@ func (w *BatchWriter) WritePass2Result(ctx context.Context, result *graph.Pass2R
 		}
 	}
 
+	// MOVES_TO (data flow) — custom Cypher matching on {name, programId}
+	if len(result.DataFlows) > 0 {
+		var flowRows []map[string]any
+		for _, d := range result.DataFlows {
+			flowRows = append(flowRows, map[string]any{
+				"fromName": d.FromItem,
+				"toName":   d.ToItem,
+				"pid":      programID,
+				"context":  d.Context,
+			})
+		}
+		if err := w.batchUpdate(ctx,
+			"UNWIND $rows AS row "+
+				"MATCH (src:DataItem {name: row.fromName, programId: row.pid}) "+
+				"MATCH (dst:DataItem {name: row.toName, programId: row.pid}) "+
+				"MERGE (src)-[r:MOVES_TO]->(dst) SET r.context = row.context",
+			flowRows); err != nil {
+			w.logger.Warn("failed to write MOVES_TO relationships", zap.Error(err))
+		}
+	}
+
+	// Data hierarchy — CHILD_OF relationships — custom Cypher matching on {name, programId}
+	if len(result.DataHierarchy) > 0 {
+		var childRows []map[string]any
+		for _, d := range result.DataHierarchy {
+			if d.Parent != "" {
+				childRows = append(childRows, map[string]any{
+					"childName":  d.Name,
+					"parentName": d.Parent,
+					"pid":        programID,
+				})
+			}
+		}
+		if err := w.batchUpdate(ctx,
+			"UNWIND $rows AS row "+
+				"MATCH (child:DataItem {name: row.childName, programId: row.pid}) "+
+				"MATCH (parent:DataItem {name: row.parentName, programId: row.pid}) "+
+				"MERGE (child)-[:CHILD_OF]->(parent)",
+			childRows); err != nil {
+			w.logger.Warn("failed to write CHILD_OF relationships", zap.Error(err))
+		}
+	}
+
+	// REDEFINES relationships — custom Cypher matching on {name, programId}
+	if len(result.Redefines) > 0 {
+		var redefRows []map[string]any
+		for _, r := range result.Redefines {
+			redefRows = append(redefRows, map[string]any{
+				"itemName":   r.Item,
+				"targetName": r.Redefines,
+				"pid":        programID,
+			})
+		}
+		if err := w.batchUpdate(ctx,
+			"UNWIND $rows AS row "+
+				"MATCH (item:DataItem {name: row.itemName, programId: row.pid}) "+
+				"MATCH (target:DataItem {name: row.targetName, programId: row.pid}) "+
+				"MERGE (item)-[:REDEFINES]->(target)",
+			redefRows); err != nil {
+			w.logger.Warn("failed to write REDEFINES relationships", zap.Error(err))
+		}
+	}
+
+	// DEFINED_IN (copybook definitions) — custom Cypher matching DataItem on {name, programId}
+	if len(result.CopybookDefs) > 0 {
+		var defRows []map[string]any
+		for _, c := range result.CopybookDefs {
+			defRows = append(defRows, map[string]any{
+				"itemName": c.DataItem,
+				"cbName":   c.Copybook,
+				"pid":      programID,
+			})
+		}
+		if err := w.batchUpdate(ctx,
+			"UNWIND $rows AS row "+
+				"MATCH (item:DataItem {name: row.itemName, programId: row.pid}) "+
+				"MATCH (cb:Copybook {name: row.cbName}) "+
+				"MERGE (item)-[:DEFINED_IN]->(cb)",
+			defRows); err != nil {
+			w.logger.Warn("failed to write DEFINED_IN relationships", zap.Error(err))
+		}
+	}
+
 	// Update Paragraph nodes with conditional logic (batched)
 	if len(result.ConditionalLogic) > 0 {
 		var clRows []map[string]any
@@ -514,11 +550,12 @@ func (w *BatchWriter) WritePass2Result(ctx context.Context, result *graph.Pass2R
 			}
 			clRows = append(clRows, map[string]any{
 				"name":  cl.Paragraph,
+				"pid":   programID,
 				"entry": fmt.Sprintf("[%s] %s", cl.Type, cl.Condition),
 			})
 		}
 		if err := w.batchUpdate(ctx,
-			"UNWIND $rows AS row MATCH (p:Paragraph {name: row.name}) "+
+			"UNWIND $rows AS row MATCH (p:Paragraph {name: row.name, programId: row.pid}) "+
 				"SET p.conditionalLogic = coalesce(p.conditionalLogic, []) + [row.entry]",
 			clRows); err != nil {
 			w.logger.Warn("failed to update conditional logic", zap.Error(err))
@@ -552,12 +589,13 @@ func (w *BatchWriter) WritePass2Result(ctx context.Context, result *graph.Pass2R
 			}
 			ehRows = append(ehRows, map[string]any{
 				"name":    eh.Paragraph,
+				"pid":     programID,
 				"pattern": eh.Pattern,
 				"details": eh.Details,
 			})
 		}
 		if err := w.batchUpdate(ctx,
-			"UNWIND $rows AS row MATCH (p:Paragraph {name: row.name}) "+
+			"UNWIND $rows AS row MATCH (p:Paragraph {name: row.name, programId: row.pid}) "+
 				"SET p.errorPattern = row.pattern, p.errorDetails = row.details",
 			ehRows); err != nil {
 			w.logger.Warn("failed to update error handling", zap.Error(err))

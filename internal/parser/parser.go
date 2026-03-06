@@ -139,7 +139,7 @@ func ParsePass1Response(jsonStr, sourceFile string) (*graph.Pass1Result, error) 
 		result.Relationships = append(result.Relationships, graph.Relationship{
 			Type:      graph.RelBelongsTo,
 			FromLabel: "Paragraph",
-			FromKey:   name,
+			FromKey:   programID + "." + name,
 			ToLabel:   "Program",
 			ToKey:     programID,
 		})
@@ -152,7 +152,7 @@ func ParsePass1Response(jsonStr, sourceFile string) (*graph.Pass1Result, error) 
 		result.Relationships = append(result.Relationships, graph.Relationship{
 			Type:      graph.RelBelongsTo,
 			FromLabel: "Section",
-			FromKey:   name,
+			FromKey:   programID + "." + name,
 			ToLabel:   "Program",
 			ToKey:     programID,
 		})
