@@ -43,14 +43,15 @@ type LLMConfig struct {
 
 // ClaudeConfig holds model names and token settings (used by both providers).
 type ClaudeConfig struct {
-	OpusModel      string
-	SonnetModel    string
-	MaxRetries     int
-	Pass1MaxTokens int
-	Pass2MaxTokens int
-	Pass3MaxTokens int
-	Pass4MaxTokens int
-	RequestTimeout time.Duration
+	OpusModel        string
+	SonnetModel      string
+	MaxRetries       int
+	Pass1MaxTokens   int
+	Pass2MaxTokens   int
+	Pass3MaxTokens   int
+	Pass4MaxTokens   int
+	RequestTimeout   time.Duration
+	DisableRateLimit bool
 }
 
 type Neo4jConfig struct {
@@ -96,6 +97,7 @@ func Load() (*Config, error) {
 	viper.SetDefault("CLAUDE_PASS2_MAX_TOKENS", 16000)
 	viper.SetDefault("CLAUDE_PASS3_MAX_TOKENS", 16000)
 	viper.SetDefault("CLAUDE_PASS4_MAX_TOKENS", 4000)
+	viper.SetDefault("DISABLE_RATE_LIMIT", false)
 
 	// Neo4j defaults
 	viper.SetDefault("NEO4J_URI", "bolt://localhost:7687")
@@ -152,8 +154,9 @@ func Load() (*Config, error) {
 			Pass1MaxTokens: viper.GetInt("CLAUDE_PASS1_MAX_TOKENS"),
 			Pass2MaxTokens: viper.GetInt("CLAUDE_PASS2_MAX_TOKENS"),
 			Pass3MaxTokens: viper.GetInt("CLAUDE_PASS3_MAX_TOKENS"),
-			Pass4MaxTokens: viper.GetInt("CLAUDE_PASS4_MAX_TOKENS"),
-			RequestTimeout: llmTimeout,
+			Pass4MaxTokens:   viper.GetInt("CLAUDE_PASS4_MAX_TOKENS"),
+			RequestTimeout:   llmTimeout,
+			DisableRateLimit: viper.GetBool("DISABLE_RATE_LIMIT"),
 		},
 		Neo4j: Neo4jConfig{
 			URI:      viper.GetString("NEO4J_URI"),

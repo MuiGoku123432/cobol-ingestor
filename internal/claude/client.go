@@ -78,8 +78,14 @@ func NewClient(provider llm.Provider, cfg config.ClaudeConfig, logger *zap.Logge
 		return nil, fmt.Errorf("parsing pass5 template: %w", err)
 	}
 
-	// Rate limit: ~50 requests per minute to stay within API limits
-	limiter := rate.NewLimiter(rate.Every(time.Second), 2)
+	// Rate limit: ~120 requests per minute to stay within API limits.
+	// DISABLE_RATE_LIMIT=true removes the limit entirely.
+	var limiter *rate.Limiter
+	if cfg.DisableRateLimit {
+		limiter = rate.NewLimiter(rate.Inf, 0)
+	} else {
+		limiter = rate.NewLimiter(rate.Every(time.Second), 2)
+	}
 
 	requestTimeout := cfg.RequestTimeout
 	if requestTimeout == 0 {
