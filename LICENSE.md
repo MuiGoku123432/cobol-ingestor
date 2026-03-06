@@ -19,6 +19,23 @@ parties (including affiliates of such entities) that would offer the
 Licensed Work in connection with a broader service offering. Internal
 use, development, testing, and non-commercial use are always permitted.
 
+**Named Entity Grant — Uniti Group Inc.**
+Notwithstanding any other provision of this License, the Licensor grants
+Uniti Group Inc. and its wholly owned subsidiaries (including Windstream
+Holdings and its operating entities) a perpetual, royalty-free,
+non-exclusive, non-transferable, non-sublicensable right to use, copy,
+and modify the Licensed Work (including all current and future versions)
+solely for their own internal COBOL modernization and related development
+purposes. This grant expressly excludes the right to (a) redistribute,
+sublicense, or otherwise make the Licensed Work or any derivative work
+available to any third party, (b) sell, lease, or commercially exploit
+the Licensed Work or any derivative work as a standalone product or
+service, or (c) offer the Licensed Work as part of a managed, hosted, or
+cloud service to third parties. This Named Entity Grant survives any
+termination of rights under the general License terms above, provided
+that Uniti Group Inc. continues to comply with the restrictions in this
+paragraph.
+
 **Change Date**: 2032-03-05
 
 **Change License**: [Apache License, Version 2.0](https://www.apache.org/licenses/LICENSE-2.0)
