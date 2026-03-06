@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"os"
+	"strings"
 	"sync"
 
 	"cobol-ingestor/internal/cache"
@@ -367,6 +368,12 @@ func (p *Pipeline) RunPass3(ctx context.Context) error {
 		p.Logger.Warn("pass 3: failed to query hubs", zap.Error(err))
 	}
 
+	// Query existing domain names so batches reuse them instead of inventing synonyms
+	existingDomains, err := p.Neo4jClient.QueryExistingDomainNames(ctx)
+	if err != nil {
+		p.Logger.Warn("pass 3: failed to query existing domains", zap.Error(err))
+	}
+
 	batchSize := p.Config.Ingest.Pass3BatchSize
 	if batchSize <= 0 {
 		batchSize = 50
@@ -384,27 +391,32 @@ func (p *Pipeline) RunPass3(ctx context.Context) error {
 			break
 		}
 
-		if err := p.processPass3Batch(ctx, slices, orphans, hubs); err != nil {
+		existingDomainsStr := formatDomainList(existingDomains)
+
+		if err := p.processPass3Batch(ctx, slices, orphans, hubs, existingDomainsStr); err != nil {
 			p.Logger.Error("pass 3: batch failed, retrying halves",
 				zap.Int("offset", offset), zap.Int("size", len(slices)), zap.Error(err))
 
 			half := len(slices) / 2
 			if half > 0 {
-				if err := p.processPass3Batch(ctx, slices[:half], orphans, hubs); err != nil {
+				if err := p.processPass3Batch(ctx, slices[:half], orphans, hubs, existingDomainsStr); err != nil {
 					p.Logger.Error("pass 3: first half retry failed", zap.Error(err))
 					for _, s := range slices[:half] {
 						failedPrograms = append(failedPrograms, s.ProgramID)
 					}
 				} else {
 					totalBatches++
+					existingDomains = p.refreshDomainNames(ctx, existingDomains)
 				}
-				if err := p.processPass3Batch(ctx, slices[half:], orphans, hubs); err != nil {
+				existingDomainsStr = formatDomainList(existingDomains)
+				if err := p.processPass3Batch(ctx, slices[half:], orphans, hubs, existingDomainsStr); err != nil {
 					p.Logger.Error("pass 3: second half retry failed", zap.Error(err))
 					for _, s := range slices[half:] {
 						failedPrograms = append(failedPrograms, s.ProgramID)
 					}
 				} else {
 					totalBatches++
+					existingDomains = p.refreshDomainNames(ctx, existingDomains)
 				}
 			} else {
 				// Single program batch still failed
@@ -414,6 +426,7 @@ func (p *Pipeline) RunPass3(ctx context.Context) error {
 			}
 		} else {
 			totalBatches++
+			existingDomains = p.refreshDomainNames(ctx, existingDomains)
 		}
 
 		offset += batchSize
@@ -431,6 +444,30 @@ func (p *Pipeline) RunPass3(ctx context.Context) error {
 
 	p.Logger.Info("pass 3 complete", zap.Int("batches", totalBatches))
 	return nil
+}
+
+// formatDomainList formats domain names as a bulleted list for the prompt.
+func formatDomainList(domains []string) string {
+	if len(domains) == 0 {
+		return ""
+	}
+	var b strings.Builder
+	for _, d := range domains {
+		b.WriteString("- ")
+		b.WriteString(d)
+		b.WriteString("\n")
+	}
+	return b.String()
+}
+
+// refreshDomainNames re-queries domain names from Neo4j after a batch write.
+func (p *Pipeline) refreshDomainNames(ctx context.Context, fallback []string) []string {
+	updated, err := p.Neo4jClient.QueryExistingDomainNames(ctx)
+	if err != nil {
+		p.Logger.Warn("pass 3: failed to refresh domain names", zap.Error(err))
+		return fallback
+	}
+	return updated
 }
 
 // RunPass1JCL analyzes JCL files using Sonnet (cheap/fast).
@@ -627,6 +664,13 @@ func (p *Pipeline) RunPass5(ctx context.Context, scanResult *scanner.ScanResult)
 		}
 	}
 
+	// Step 2.5: Merge duplicate domains (safety net after Pass 3 reruns)
+	if merged, err := p.Writer.MergeDuplicateDomains(ctx); err != nil {
+		p.Logger.Warn("pass 5: domain merge failed", zap.Error(err))
+	} else if merged > 0 {
+		p.Logger.Info("pass 5: merged duplicate domains", zap.Int("merged", merged))
+	}
+
 	// Step 3: Fix Gap #2 — Missing CHILD_OF
 	missingChildOf, err := p.Neo4jClient.QueryProgramsMissingChildOf(ctx)
 	if err != nil {
@@ -713,6 +757,12 @@ func (p *Pipeline) rerunPass3ForPrograms(ctx context.Context, programIDs []strin
 		p.Logger.Warn("pass 5: failed to query hubs for Pass 3 rerun", zap.Error(err))
 	}
 
+	// Feed existing domains so rerun batches don't invent synonyms
+	existingDomains, err := p.Neo4jClient.QueryExistingDomainNames(ctx)
+	if err != nil {
+		p.Logger.Warn("pass 5: failed to query existing domains for Pass 3 rerun", zap.Error(err))
+	}
+
 	// Query call graph slices for just the missing programs
 	for i := 0; i < len(programIDs); i += batchSize {
 		end := i + batchSize
@@ -730,8 +780,11 @@ func (p *Pipeline) rerunPass3ForPrograms(ctx context.Context, programIDs []strin
 			continue
 		}
 
-		if err := p.processPass3Batch(ctx, slices, orphans, hubs); err != nil {
+		existingDomainsStr := formatDomainList(existingDomains)
+		if err := p.processPass3Batch(ctx, slices, orphans, hubs, existingDomainsStr); err != nil {
 			p.Logger.Warn("pass 5: Pass 3 rerun batch failed", zap.Error(err))
+		} else {
+			existingDomains = p.refreshDomainNames(ctx, existingDomains)
 		}
 	}
 
@@ -952,10 +1005,10 @@ func mergeKeyForLabel(label string) string {
 }
 
 // processPass3Batch runs Claude analysis and writes results for a batch of program slices.
-func (p *Pipeline) processPass3Batch(ctx context.Context, slices []n4j.ProgramSlice, orphans, hubs []string) error {
+func (p *Pipeline) processPass3Batch(ctx context.Context, slices []n4j.ProgramSlice, orphans, hubs []string, existingDomains string) error {
 	graphText := n4j.FormatGraphSlice(slices, orphans, hubs)
 
-	jsonResp, err := p.Claude.AnalyzeCrossCutting(ctx, graphText)
+	jsonResp, err := p.Claude.AnalyzeCrossCutting(ctx, graphText, existingDomains)
 	if err != nil {
 		return fmt.Errorf("claude analysis: %w", err)
 	}

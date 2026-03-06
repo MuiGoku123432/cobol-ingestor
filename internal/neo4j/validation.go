@@ -151,6 +151,111 @@ func (w *BatchWriter) RunValidation(ctx context.Context) (*ValidationResult, err
 	return result, nil
 }
 
+// MergeDuplicateDomains collapses BusinessDomain nodes that share >80% of their programs.
+// Returns the number of domains merged.
+func (w *BatchWriter) MergeDuplicateDomains(ctx context.Context) (int, error) {
+	session := w.client.NewSession(ctx)
+	defer session.Close(ctx)
+
+	// Find domain pairs with high program overlap
+	res, err := session.Run(ctx,
+		"MATCH (d1:BusinessDomain)<-[:BELONGS_TO]-(p:Program)-[:BELONGS_TO]->(d2:BusinessDomain) "+
+			"WHERE id(d1) < id(d2) "+
+			"WITH d1, d2, count(p) AS shared, "+
+			"size([(p1:Program)-[:BELONGS_TO]->(d1) | p1]) AS size1, "+
+			"size([(p2:Program)-[:BELONGS_TO]->(d2) | p2]) AS size2 "+
+			"WHERE shared > 0.8 * toFloat(CASE WHEN size1 < size2 THEN size1 ELSE size2 END) "+
+			"RETURN d1.name AS name1, d2.name AS name2, shared, size1, size2",
+		nil)
+	if err != nil {
+		return 0, fmt.Errorf("querying duplicate domains: %w", err)
+	}
+
+	type mergePair struct {
+		keepName  string
+		mergeName string
+	}
+	var pairs []mergePair
+
+	for res.Next(ctx) {
+		rec := res.Record()
+		name1 := getStr(rec, "name1")
+		name2 := getStr(rec, "name2")
+		size1Val, _ := rec.Get("size1")
+		size2Val, _ := rec.Get("size2")
+		s1, _ := size1Val.(int64)
+		s2, _ := size2Val.(int64)
+
+		// Keep the domain with more members; shorter name as tiebreaker
+		keep, merge := name1, name2
+		if s2 > s1 || (s1 == s2 && len(name2) < len(name1)) {
+			keep, merge = name2, name1
+		}
+
+		w.logger.Info("merging duplicate domains",
+			zap.String("keep", keep),
+			zap.String("merge", merge),
+			zap.Int64("size1", s1),
+			zap.Int64("size2", s2),
+		)
+
+		pairs = append(pairs, mergePair{keepName: keep, mergeName: merge})
+	}
+
+	merged := 0
+	for _, pair := range pairs {
+		_, err := session.ExecuteWrite(ctx, func(tx neo4j.ManagedTransaction) (any, error) {
+			// Reassign programs not already in the kept domain
+			_, err := tx.Run(ctx,
+				"MATCH (p:Program)-[r:BELONGS_TO]->(d:BusinessDomain {name: $mergeName}) "+
+					"WHERE NOT (p)-[:BELONGS_TO]->(:BusinessDomain {name: $keepName}) "+
+					"WITH p, r "+
+					"MATCH (keep:BusinessDomain {name: $keepName}) "+
+					"MERGE (p)-[:BELONGS_TO {confidence: r.confidence}]->(keep) "+
+					"DELETE r",
+				map[string]any{"mergeName": pair.mergeName, "keepName": pair.keepName})
+			if err != nil {
+				return nil, err
+			}
+
+			// Delete remaining duplicate edges
+			_, err = tx.Run(ctx,
+				"MATCH (:Program)-[r:BELONGS_TO]->(d:BusinessDomain {name: $mergeName}) DELETE r",
+				map[string]any{"mergeName": pair.mergeName})
+			if err != nil {
+				return nil, err
+			}
+
+			// Delete the merged domain node
+			_, err = tx.Run(ctx,
+				"MATCH (d:BusinessDomain {name: $mergeName}) DELETE d",
+				map[string]any{"mergeName": pair.mergeName})
+			if err != nil {
+				return nil, err
+			}
+
+			// Update any BridgeProgram references
+			_, err = tx.Run(ctx,
+				"MATCH (bp:Program) WHERE bp.bridgeDomains IS NOT NULL "+
+					"AND $mergeName IN bp.bridgeDomains "+
+					"SET bp.bridgeDomains = [d IN bp.bridgeDomains WHERE d <> $mergeName] + "+
+					"CASE WHEN $keepName IN bp.bridgeDomains THEN [] ELSE [$keepName] END",
+				map[string]any{"mergeName": pair.mergeName, "keepName": pair.keepName})
+			return nil, err
+		})
+		if err != nil {
+			w.logger.Warn("failed to merge domain pair",
+				zap.String("keep", pair.keepName),
+				zap.String("merge", pair.mergeName),
+				zap.Error(err))
+			continue
+		}
+		merged++
+	}
+
+	return merged, nil
+}
+
 // QueryProgramsMissingPass3 returns program IDs that lack riskScore (never analyzed by Pass 3).
 func (c *Client) QueryProgramsMissingPass3(ctx context.Context) ([]string, error) {
 	return c.queryIDList(ctx, "MATCH (p:Program) WHERE p.riskScore IS NULL RETURN p.programId AS id")
