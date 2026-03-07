@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"os"
+	"strconv"
 	"strings"
 	"sync"
 
@@ -927,6 +928,11 @@ func (p *Pipeline) repairRelationshipGap(ctx context.Context, programIDs []strin
 				return
 			}
 
+			// Ensure DataItem nodes exist before writing CHILD_OF relationships
+			if repairType == "CHILD_OF" && len(rels) > 0 {
+				p.ensureDataItemNodesForRepair(ctx, pid, rels)
+			}
+
 			if len(rels) > 0 {
 				if err := p.writeRepairRelationships(ctx, rels); err != nil {
 					p.Logger.Warn("pass 5: repair write failed",
@@ -1057,6 +1063,37 @@ func truncateForRepair(sourceCode string, tokenBudget int, repairType string) st
 		return trimmed
 	}
 	return trimmed[:maxChars]
+}
+
+// ensureDataItemNodesForRepair creates minimal DataItem nodes for CHILD_OF repair targets.
+func (p *Pipeline) ensureDataItemNodesForRepair(ctx context.Context, programID string, rels []graph.Relationship) {
+	seen := make(map[string]bool)
+	var nodes []map[string]any
+	for _, r := range rels {
+		for _, fqn := range []string{r.FromKey, r.ToKey} {
+			if seen[fqn] {
+				continue
+			}
+			seen[fqn] = true
+			// Parse level and name from FQN: "PROGRAM.LEVEL.NAME"
+			parts := strings.SplitN(fqn, ".", 3)
+			if len(parts) != 3 {
+				continue
+			}
+			level, _ := strconv.Atoi(parts[1])
+			nodes = append(nodes, map[string]any{
+				"name":      parts[2],
+				"level":     level,
+				"programId": programID,
+				"fqn":       fqn,
+			})
+		}
+	}
+	if len(nodes) > 0 {
+		if err := p.Writer.WriteNodes(ctx, "DataItem", "fqn", nodes); err != nil {
+			p.Logger.Warn("pass 5: failed to ensure DataItem nodes for CHILD_OF repair", zap.Error(err))
+		}
+	}
 }
 
 // writeRepairRelationships converts graph.Relationship slice to map rows and writes to Neo4j.

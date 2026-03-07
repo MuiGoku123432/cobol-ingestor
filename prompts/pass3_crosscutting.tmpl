@@ -4,10 +4,11 @@ You are analyzing a batch of COBOL programs from their graph relationships. Base
 
 2. **Dead Code Detection**: From the orphan programs list (programs with no callers), determine which are likely dead code vs. entry points (batch jobs, CICS transactions, main programs). Entry points are NOT dead code.
 
-3. **Risk Assessment**: Flag high-risk programs based on:
+3. **Risk Assessment**: Assess EVERY program's risk level based on:
    - Hub programs (called by many others) — changes have wide blast radius
    - Programs with many external dependencies (files, SQL, CICS)
    - Programs with complex control flow (many paragraphs)
+   - Low-risk programs get a score of 0.0-0.3 with riskType "standard"
 
 4. **Bridge Programs**: Identify programs that connect multiple business domains — programs that are called by programs in one domain and call programs in another, or that share copybooks across domain boundaries. These represent tight coupling points.
 
@@ -41,7 +42,8 @@ Return your analysis as JSON with this exact structure:
     {"programId": "PROG2", "reason": "No callers and name suggests utility, not an entry point"}
   ],
   "riskFlags": [
-    {"programId": "PROG3", "riskType": "hub", "details": "Called by 15 programs", "score": 0.8}
+    {"programId": "PROG3", "riskType": "hub", "details": "Called by 15 programs", "score": 0.8},
+    {"programId": "PROG1", "riskType": "standard", "details": "Simple utility with no external dependencies", "score": 0.1}
   ],
   "bridgePrograms": [
     {"programId": "PROG4", "domains": ["Customer Management", "Account Processing"], "reason": "Bridges customer and account domains via shared data"}
@@ -67,6 +69,7 @@ Rules:
 - Bridge programs should connect at least 2 different domains
 - Copybook risk should consider both program count and cross-domain usage
 - Modernization scores range from 0.0 (poor candidate) to 1.0 (ideal candidate)
+- Risk flags MUST cover ALL programs in the input (like volume estimates)
 - Volume estimates should cover all programs in the input
 - Volume estimate values must be exactly HIGH, MEDIUM, or LOW
 {{if .ExistingDomains}}

@@ -256,7 +256,9 @@ func (w *BatchWriter) MergeDuplicateDomains(ctx context.Context) (int, error) {
 	return merged, nil
 }
 
-// QueryProgramsMissingPass3 returns program IDs that lack riskScore (never analyzed by Pass 3).
+// QueryProgramsMissingPass3 returns program IDs that lack riskScore (never processed by Pass 3).
+// All programs processed by Pass 3 receive a riskScore (even low-risk ones),
+// so riskScore IS NULL reliably indicates programs that were skipped or failed.
 func (c *Client) QueryProgramsMissingPass3(ctx context.Context) ([]string, error) {
 	return c.queryIDList(ctx, "MATCH (p:Program) WHERE p.riskScore IS NULL RETURN p.programId AS id")
 }

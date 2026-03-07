@@ -532,6 +532,24 @@ func (w *BatchWriter) WritePass2Result(ctx context.Context, result *graph.Pass2R
 		}
 	}
 
+	// Ensure DataItem nodes exist for all hierarchy items (Pass 1 only creates 01/77-level)
+	if len(result.DataHierarchy) > 0 {
+		nodes := make([]map[string]any, len(result.DataHierarchy))
+		for i, d := range result.DataHierarchy {
+			fqn := fmt.Sprintf("%s.%02d.%s", programID, d.Level, d.Name)
+			nodes[i] = map[string]any{
+				"name":      d.Name,
+				"level":     d.Level,
+				"programId": programID,
+				"fqn":       fqn,
+				"picture":   d.Picture,
+			}
+		}
+		if err := w.WriteNodes(ctx, "DataItem", "fqn", nodes); err != nil {
+			w.logger.Warn("failed to write DataItem nodes from hierarchy", zap.Error(err))
+		}
+	}
+
 	// Data hierarchy — CHILD_OF relationships — custom Cypher matching on {name, programId}
 	if len(result.DataHierarchy) > 0 {
 		var childRows []map[string]any

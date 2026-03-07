@@ -344,7 +344,7 @@ type DeadCodeFlag struct {
 	Reason    string
 }
 
-// RiskFlag marks a program as high-risk.
+// RiskFlag captures a program's risk assessment (all programs receive one).
 type RiskFlag struct {
 	ProgramID string
 	RiskType  string
