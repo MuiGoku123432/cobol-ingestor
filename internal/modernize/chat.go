@@ -15,7 +15,7 @@ const maxToolIterations = 10
 // ChatHandler creates a Gin handler for the chat endpoint.
 // Accepts *ProviderState for deferred provider initialization (Copilot auth flow).
 // The defaultModel and defaultMaxTokens are used as fallbacks when no model has been selected via the model picker.
-func ChatHandler(ps *ProviderState, mcpClient *MCPClient, defaultModel string, defaultMaxTokens int) gin.HandlerFunc {
+func ChatHandler(ps *ProviderState, mcpClient *MCPClient, defaultModel string, defaultMaxTokens int, sessionStore SessionStore) gin.HandlerFunc {
 	tools := GetToolDefinitions()
 
 	return func(c *gin.Context) {
@@ -38,6 +38,7 @@ func ChatHandler(ps *ProviderState, mcpClient *MCPClient, defaultModel string, d
 			Messages       []chatInputMessage `json:"messages"`
 			TargetLanguage string             `json:"targetLanguage"`
 			Framework      string             `json:"framework"`
+			SessionID      string             `json:"sessionId"`
 		}
 		if err := c.ShouldBindJSON(&req); err != nil {
 			c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
@@ -89,6 +90,29 @@ func ChatHandler(ps *ProviderState, mcpClient *MCPClient, defaultModel string, d
 			}
 
 			if resp.StopReason != "tool_use" {
+				// Persist session
+				if sessionStore != nil {
+					assistantText := resp.TextContent()
+					allMessages := make([]chatInputMessage, len(req.Messages))
+					copy(allMessages, req.Messages)
+					if assistantText != "" {
+						allMessages = append(allMessages, chatInputMessage{Role: "assistant", Content: assistantText})
+					}
+
+					if req.SessionID == "" {
+						title := req.Messages[0].Content
+						if len(title) > 50 {
+							title = title[:50]
+						}
+						session, err := sessionStore.Create(title)
+						if err == nil {
+							_ = sessionStore.Update(session.ID, allMessages, "")
+							SendSSEJSON(c.Writer, "session_created", map[string]string{"id": session.ID, "title": session.Title})
+						}
+					} else {
+						_ = sessionStore.Update(req.SessionID, allMessages, "")
+					}
+				}
 				SendSSE(c.Writer, "done", "{}")
 				return
 			}

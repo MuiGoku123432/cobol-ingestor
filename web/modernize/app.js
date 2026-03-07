@@ -159,6 +159,8 @@ checkAuth();
 let messages = [];
 let isStreaming = false;
 let swarmEnabled = false;
+let activeSessionId = localStorage.getItem('activeSessionId') || null;
+let sessions = [];
 
 function toggleSwarm() {
   swarmEnabled = !swarmEnabled;
@@ -335,6 +337,127 @@ function setLoading(loading) {
   btn.textContent = loading ? "..." : "Send";
 }
 
+// Session management
+async function loadSessions() {
+  try {
+    const resp = await fetch('/api/sessions');
+    sessions = await resp.json();
+    renderSessionList();
+    if (sessions.length > 0 && !activeSessionId) {
+      switchSession(sessions[0].id);
+    } else if (activeSessionId) {
+      const exists = sessions.find(s => s.id === activeSessionId);
+      if (exists) {
+        switchSession(activeSessionId);
+      } else if (sessions.length > 0) {
+        switchSession(sessions[0].id);
+      }
+    }
+  } catch {
+    // ignore
+  }
+}
+
+function renderSessionList() {
+  const list = document.getElementById('sessionList');
+  if (!list) return;
+  if (sessions.length === 0) {
+    list.innerHTML = '<p class="text-xs text-gray-600 italic">No sessions yet</p>';
+    return;
+  }
+  list.innerHTML = sessions.map(s => `
+    <div class="flex items-center group rounded-lg px-2 py-1.5 text-sm cursor-pointer transition-colors ${s.id === activeSessionId ? 'bg-gray-800 text-white' : 'text-gray-400 hover:bg-gray-800/50 hover:text-gray-200'}"
+         onclick="switchSession('${s.id}')">
+      <span class="truncate flex-1" ondblclick="event.stopPropagation(); renameSession('${s.id}')">${escapeHtml(s.title)}</span>
+      <button onclick="event.stopPropagation(); deleteSession('${s.id}')" class="hidden group-hover:block text-gray-500 hover:text-red-400 ml-1 text-xs shrink-0">&times;</button>
+    </div>
+  `).join('');
+}
+
+async function createSession() {
+  try {
+    const resp = await fetch('/api/sessions', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ title: 'New Chat' }),
+    });
+    const session = await resp.json();
+    activeSessionId = session.id;
+    localStorage.setItem('activeSessionId', activeSessionId);
+    messages = [];
+    clearChatUI();
+    await loadSessions();
+  } catch {
+    // ignore
+  }
+}
+
+async function switchSession(id) {
+  if (isStreaming) return;
+  activeSessionId = id;
+  localStorage.setItem('activeSessionId', id);
+  renderSessionList();
+  try {
+    const resp = await fetch(`/api/sessions/${id}`);
+    const session = await resp.json();
+    messages = session.messages || [];
+    clearChatUI();
+    for (const m of messages) {
+      if (m.role === 'user') {
+        addMessage('user', escapeHtml(m.content));
+      } else {
+        addMessage('assistant', marked.parse(m.content));
+      }
+    }
+  } catch {
+    messages = [];
+    clearChatUI();
+  }
+}
+
+async function deleteSession(id) {
+  try {
+    await fetch(`/api/sessions/${id}`, { method: 'DELETE' });
+    if (activeSessionId === id) {
+      activeSessionId = null;
+      localStorage.removeItem('activeSessionId');
+      messages = [];
+      clearChatUI();
+    }
+    await loadSessions();
+  } catch {
+    // ignore
+  }
+}
+
+async function renameSession(id) {
+  const newTitle = prompt('Rename session:');
+  if (!newTitle) return;
+  try {
+    await fetch(`/api/sessions/${id}`, {
+      method: 'PATCH',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ title: newTitle }),
+    });
+    await loadSessions();
+  } catch {
+    // ignore
+  }
+}
+
+function clearChatUI() {
+  const container = document.getElementById('chatMessages');
+  container.innerHTML = `
+    <div class="text-center text-gray-500 mt-20">
+      <p class="text-lg">Ask about your COBOL programs</p>
+      <p class="text-sm mt-1">I'll use the graph database to understand and translate them</p>
+    </div>
+  `;
+}
+
+// Load sessions on startup
+loadSessions();
+
 async function sendMessage(e) {
   e.preventDefault();
   const input = document.getElementById("chatInput");
@@ -359,6 +482,7 @@ async function sendMessage(e) {
         messages: messages,
         targetLanguage: langSelect.value,
         framework: fwSelect.value,
+        sessionId: activeSessionId || '',
       }),
     });
 
@@ -453,6 +577,12 @@ async function sendMessage(e) {
           addMessage("assistant", '<span class="text-indigo-400 text-sm">Compiling results from all agents...</span>');
           break;
 
+        case "session_created":
+          activeSessionId = data.id;
+          localStorage.setItem('activeSessionId', data.id);
+          loadSessions();
+          break;
+
         case "done":
           if (assistantText) {
             messages.push({ role: "assistant", content: assistantText });
@@ -479,12 +609,5 @@ async function sendMessage(e) {
 }
 
 function clearChat() {
-  messages = [];
-  const container = document.getElementById("chatMessages");
-  container.innerHTML = `
-    <div class="text-center text-gray-500 mt-20">
-      <p class="text-lg">Ask about your COBOL programs</p>
-      <p class="text-sm mt-1">I'll use the graph database to understand and translate them</p>
-    </div>
-  `;
+  createSession();
 }

@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"net/http"
 	"os"
+	"path/filepath"
 
 	"cobol-ingestor/internal/config"
 	"cobol-ingestor/internal/modernize"
@@ -70,6 +71,18 @@ func main() {
 		zap.String("transport", cfg.Modernize.MCPTransport),
 		zap.String("model", chatModel))
 
+	// Create session store
+	if err := os.MkdirAll(cfg.DataDir, 0700); err != nil {
+		logger.Fatal("creating data dir", zap.Error(err))
+	}
+	sessionsDB := filepath.Join(cfg.DataDir, "sessions.db")
+	sessionStore, err := modernize.NewSQLiteSessionStore(sessionsDB, 50)
+	if err != nil {
+		logger.Fatal("creating session store", zap.Error(err))
+	}
+	defer sessionStore.Close()
+	logger.Info("session store ready", zap.String("path", sessionsDB))
+
 	// Set up Gin router
 	gin.SetMode(gin.ReleaseMode)
 	r := gin.New()
@@ -97,9 +110,16 @@ func main() {
 	r.GET("/api/models", modernize.ModelsHandler(ps))
 	r.POST("/api/models/select", modernize.SelectModelHandler(ps))
 
+	// Session endpoints
+	r.GET("/api/sessions", modernize.ListSessionsHandler(sessionStore))
+	r.GET("/api/sessions/:id", modernize.GetSessionHandler(sessionStore))
+	r.POST("/api/sessions", modernize.CreateSessionHandler(sessionStore))
+	r.PATCH("/api/sessions/:id", modernize.UpdateSessionHandler(sessionStore))
+	r.DELETE("/api/sessions/:id", modernize.DeleteSessionHandler(sessionStore))
+
 	// API endpoints
-	r.POST("/api/chat", modernize.ChatHandler(ps, mcpClient, chatModel, chatMaxTokens))
-	r.POST("/api/swarm", modernize.SwarmHandler(ps, mcpClient, chatModel, chatMaxTokens))
+	r.POST("/api/chat", modernize.ChatHandler(ps, mcpClient, chatModel, chatMaxTokens, sessionStore))
+	r.POST("/api/swarm", modernize.SwarmHandler(ps, mcpClient, chatModel, chatMaxTokens, sessionStore))
 
 	r.GET("/health", func(c *gin.Context) {
 		c.JSON(http.StatusOK, gin.H{
