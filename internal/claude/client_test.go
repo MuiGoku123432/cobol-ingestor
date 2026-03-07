@@ -21,7 +21,7 @@ func newTestClient(t *testing.T, mock *llm.MockProvider) *claude.Client {
 	t.Helper()
 	cfg := config.ClaudeConfig{
 		OpusModel:      "claude-opus-4-6",
-		SonnetModel:    "claude-sonnet-4-5-20250929",
+		SonnetModel:    "claude-sonnet-4-6",
 		MaxRetries:     3,
 		RequestTimeout: 10 * time.Minute,
 	}
@@ -42,7 +42,7 @@ func TestAnalyzeStructural_UsesSonnetModel(t *testing.T) {
 	assert.Contains(t, resp, "TESTPROG")
 
 	require.Len(t, mock.Calls, 1)
-	assert.Equal(t, "claude-sonnet-4-5-20250929", mock.Calls[0].Model)
+	assert.Equal(t, "claude-sonnet-4-6", mock.Calls[0].Model)
 }
 
 func TestAnalyzeDeep_UsesOpusModel(t *testing.T) {
@@ -98,7 +98,7 @@ func TestRetryOnError(t *testing.T) {
 
 	cfg := config.ClaudeConfig{
 		OpusModel:      "claude-opus-4-6",
-		SonnetModel:    "claude-sonnet-4-5-20250929",
+		SonnetModel:    "claude-sonnet-4-6",
 		MaxRetries:     3,
 		RequestTimeout: 10 * time.Minute,
 	}
@@ -144,7 +144,7 @@ func TestTruncation_RetriesWithDoubledMaxTokens(t *testing.T) {
 
 	cfg := config.ClaudeConfig{
 		OpusModel:      "claude-opus-4-6",
-		SonnetModel:    "claude-sonnet-4-5-20250929",
+		SonnetModel:    "claude-sonnet-4-6",
 		MaxRetries:     3,
 		Pass1MaxTokens: 4096,
 	}
@@ -169,7 +169,7 @@ func TestTruncation_ReturnsErrorAfterRetryExhaustion(t *testing.T) {
 
 	cfg := config.ClaudeConfig{
 		OpusModel:      "claude-opus-4-6",
-		SonnetModel:    "claude-sonnet-4-5-20250929",
+		SonnetModel:    "claude-sonnet-4-6",
 		MaxRetries:     3,
 		Pass1MaxTokens: 4096,
 	}

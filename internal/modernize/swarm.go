@@ -29,7 +29,7 @@ var agentRoles = []agentRole{
 }
 
 // SwarmHandler creates a Gin handler for the agent swarm endpoint.
-func SwarmHandler(ps *ProviderState, mcpClient *MCPClient, defaultModel string, defaultMaxTokens int) gin.HandlerFunc {
+func SwarmHandler(ps *ProviderState, mcpClient *MCPClient, defaultModel string, defaultMaxTokens int, sessionStore SessionStore) gin.HandlerFunc {
 	tools := GetToolDefinitions()
 
 	return func(c *gin.Context) {
@@ -52,6 +52,7 @@ func SwarmHandler(ps *ProviderState, mcpClient *MCPClient, defaultModel string, 
 			Messages       []chatInputMessage `json:"messages"`
 			TargetLanguage string             `json:"targetLanguage"`
 			Framework      string             `json:"framework"`
+			SessionID      string             `json:"sessionId"`
 		}
 		if err := c.ShouldBindJSON(&req); err != nil {
 			c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
@@ -156,10 +157,36 @@ func SwarmHandler(ps *ProviderState, mcpClient *MCPClient, defaultModel string, 
 			return
 		}
 
-		if text := resp.TextContent(); text != "" {
+		coordText := resp.TextContent()
+		if coordText != "" {
 			mu.Lock()
-			SendSSEJSON(w, "text", map[string]string{"content": text})
+			SendSSEJSON(w, "text", map[string]string{"content": coordText})
 			mu.Unlock()
+		}
+
+		// Persist session
+		if sessionStore != nil {
+			allMessages := make([]chatInputMessage, len(req.Messages))
+			copy(allMessages, req.Messages)
+			if coordText != "" {
+				allMessages = append(allMessages, chatInputMessage{Role: "assistant", Content: coordText})
+			}
+
+			if req.SessionID == "" {
+				title := userQuery
+				if len(title) > 50 {
+					title = title[:50]
+				}
+				session, err := sessionStore.Create(title)
+				if err == nil {
+					_ = sessionStore.Update(session.ID, allMessages, "")
+					mu.Lock()
+					SendSSEJSON(w, "session_created", map[string]string{"id": session.ID, "title": session.Title})
+					mu.Unlock()
+				}
+			} else {
+				_ = sessionStore.Update(req.SessionID, allMessages, "")
+			}
 		}
 
 		mu.Lock()

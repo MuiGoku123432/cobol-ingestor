@@ -76,6 +76,14 @@
     </h1>
 
     <div class="space-y-4">
+      <div class="mb-2">
+        <div class="flex items-center justify-between mb-2">
+          <label class="text-sm font-medium text-gray-400">Sessions</label>
+          <button onclick="createSession()" class="text-xs text-indigo-400 hover:text-indigo-300">+ New</button>
+        </div>
+        <div id="sessionList" class="space-y-1 max-h-48 overflow-y-auto"></div>
+      </div>
+
       <div>
         <label class="block text-sm font-medium text-gray-400 mb-1">Target Language</label>
         <select id="targetLanguage" class="w-full bg-gray-800 border border-gray-700 rounded-lg px-3 py-2 text-sm focus:ring-2 focus:ring-indigo-500 focus:border-transparent">

@@ -321,7 +321,7 @@ GET    /swagger/index.html          — Swagger UI
 # Claude
 ANTHROPIC_API_KEY=sk-ant-...
 CLAUDE_OPUS_MODEL=claude-opus-4-6
-CLAUDE_SONNET_MODEL=claude-sonnet-4-5-20250929
+CLAUDE_SONNET_MODEL=claude-sonnet-4-6
 CLAUDE_MAX_WORKERS=5
 CLAUDE_MAX_RETRIES=3
 

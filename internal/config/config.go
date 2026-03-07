@@ -2,6 +2,8 @@ package config
 
 import (
 	"fmt"
+	"os"
+	"path/filepath"
 	"time"
 
 	"github.com/joho/godotenv"
@@ -9,6 +11,7 @@ import (
 )
 
 type Config struct {
+	DataDir   string // COBOL_GRAPH_DATA_DIR — base directory for persistent data (default ~/.cobol-graph)
 	LLM       LLMConfig
 	Claude    ClaudeConfig
 	Neo4j     Neo4jConfig
@@ -67,9 +70,31 @@ type IngestConfig struct {
 	CacheDB         string
 	TokenLimit      int
 	MaxWorkers      int
+	Pass1MaxWorkers int // PASS1_MAX_WORKERS — defaults to MaxWorkers if 0
+	Pass2MaxWorkers int // PASS2_MAX_WORKERS — defaults to MaxWorkers if 0
+	Pass5MaxWorkers int // PASS5_MAX_WORKERS — defaults to MaxWorkers if 0
 	Pass2TokenLimit int
 	OverlapLines    int
 	Pass3BatchSize  int
+}
+
+// WorkersForPass returns the worker count for a specific pass, falling back to MaxWorkers.
+func (c *IngestConfig) WorkersForPass(pass int) int {
+	switch pass {
+	case 1:
+		if c.Pass1MaxWorkers > 0 {
+			return c.Pass1MaxWorkers
+		}
+	case 2:
+		if c.Pass2MaxWorkers > 0 {
+			return c.Pass2MaxWorkers
+		}
+	case 5:
+		if c.Pass5MaxWorkers > 0 {
+			return c.Pass5MaxWorkers
+		}
+	}
+	return c.MaxWorkers
 }
 
 type APIConfig struct {
@@ -91,7 +116,7 @@ func Load() (*Config, error) {
 
 	// Claude model defaults (used by both providers)
 	viper.SetDefault("CLAUDE_OPUS_MODEL", "claude-opus-4-6")
-	viper.SetDefault("CLAUDE_SONNET_MODEL", "claude-sonnet-4-5-20250929")
+	viper.SetDefault("CLAUDE_SONNET_MODEL", "claude-sonnet-4-6")
 	viper.SetDefault("CLAUDE_MAX_RETRIES", 3)
 	viper.SetDefault("CLAUDE_PASS1_MAX_TOKENS", 8192)
 	viper.SetDefault("CLAUDE_PASS2_MAX_TOKENS", 16000)
@@ -110,6 +135,9 @@ func Load() (*Config, error) {
 	viper.SetDefault("INGEST_CACHE_DB", "./cache.sqlite")
 	viper.SetDefault("INGEST_TOKEN_LIMIT", 30000)
 	viper.SetDefault("MAX_WORKERS", 15)
+	viper.SetDefault("PASS1_MAX_WORKERS", 0)
+	viper.SetDefault("PASS2_MAX_WORKERS", 0)
+	viper.SetDefault("PASS5_MAX_WORKERS", 0)
 	viper.SetDefault("PASS2_TOKEN_LIMIT", 20000)
 	viper.SetDefault("PASS2_OVERLAP_LINES", 20)
 	viper.SetDefault("PASS3_BATCH_SIZE", 50)
@@ -120,6 +148,10 @@ func Load() (*Config, error) {
 
 	// MCP defaults
 	viper.SetDefault("MCP_HTTP_PORT", "")
+
+	// Data directory default
+	defaultDataDir := filepath.Join(func() string { h, _ := os.UserHomeDir(); return h }(), ".cobol-graph")
+	viper.SetDefault("COBOL_GRAPH_DATA_DIR", defaultDataDir)
 
 	// Modernize defaults
 	viper.SetDefault("MODERNIZE_PORT", "8081")
@@ -139,6 +171,7 @@ func Load() (*Config, error) {
 	}
 
 	cfg := &Config{
+		DataDir: viper.GetString("COBOL_GRAPH_DATA_DIR"),
 		LLM: LLMConfig{
 			Provider:              viper.GetString("LLM_PROVIDER"),
 			APIKey:                viper.GetString("ANTHROPIC_API_KEY"),
@@ -170,6 +203,9 @@ func Load() (*Config, error) {
 			CacheDB:         viper.GetString("INGEST_CACHE_DB"),
 			TokenLimit:      viper.GetInt("INGEST_TOKEN_LIMIT"),
 			MaxWorkers:      viper.GetInt("MAX_WORKERS"),
+			Pass1MaxWorkers: viper.GetInt("PASS1_MAX_WORKERS"),
+			Pass2MaxWorkers: viper.GetInt("PASS2_MAX_WORKERS"),
+			Pass5MaxWorkers: viper.GetInt("PASS5_MAX_WORKERS"),
 			Pass2TokenLimit: viper.GetInt("PASS2_TOKEN_LIMIT"),
 			OverlapLines:    viper.GetInt("PASS2_OVERLAP_LINES"),
 			Pass3BatchSize:  viper.GetInt("PASS3_BATCH_SIZE"),

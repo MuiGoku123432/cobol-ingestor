@@ -45,9 +45,13 @@ func ResolveCopilotModels(ctx context.Context, provider Provider, defaultOpus, d
 		resolved.AllModels = append(resolved.AllModels, m)
 
 		if strings.Contains(idLower, "opus") {
-			resolved.OpusModel = m.ID
+			if m.ID > resolved.OpusModel {
+				resolved.OpusModel = m.ID
+			}
 		} else if strings.Contains(idLower, "sonnet") {
-			resolved.SonnetModel = m.ID
+			if m.ID > resolved.SonnetModel {
+				resolved.SonnetModel = m.ID
+			}
 		}
 	}
 

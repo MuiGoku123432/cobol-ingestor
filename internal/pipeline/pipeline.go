@@ -82,18 +82,25 @@ func (p *Pipeline) Run(ctx context.Context, scanResult *scanner.ScanResult, pass
 // multi-chunk file complete). This ensures partial progress is persisted even
 // if the pipeline is interrupted.
 func (p *Pipeline) RunPass1(ctx context.Context, scanResult *scanner.ScanResult) error {
-	var changed []graph.FileInfo
+	// Collect all COBOL files and batch-check cache
+	cobolFiles := make(map[string]graph.FileInfo)
+	pathHashes := make(map[string]string)
 	for _, f := range scanResult.Files {
 		if f.Type != graph.FileTypeCOBOL {
 			continue
 		}
-		isChanged, err := p.Cache.IsChanged(f.Path, f.Hash)
-		if err != nil {
-			return fmt.Errorf("checking cache: %w", err)
-		}
-		if isChanged {
-			changed = append(changed, f)
-		}
+		cobolFiles[f.Path] = f
+		pathHashes[f.Path] = f.Hash
+	}
+
+	changedPaths, err := p.Cache.BatchIsChanged(pathHashes)
+	if err != nil {
+		return fmt.Errorf("batch checking cache: %w", err)
+	}
+
+	changed := make([]graph.FileInfo, 0, len(changedPaths))
+	for _, path := range changedPaths {
+		changed = append(changed, cobolFiles[path])
 	}
 
 	if len(changed) == 0 {
@@ -129,7 +136,7 @@ func (p *Pipeline) RunPass1(ctx context.Context, scanResult *scanner.ScanResult)
 		return parser.ParsePass1Response(jsonResp, chunk.FileName)
 	}
 
-	resultsCh := pool.RunPass1(ctx, chunks, processFn, p.Config.Ingest.MaxWorkers, p.Logger)
+	resultsCh := pool.RunPass1(ctx, chunks, processFn, p.Config.Ingest.WorkersForPass(1), p.Logger)
 
 	// Accumulate multi-chunk results per file, write as soon as all chunks arrive.
 	// Single-chunk files (the common case) are written immediately.
@@ -195,18 +202,25 @@ func (p *Pipeline) RunPass2(ctx context.Context, scanResult *scanner.ScanResult)
 	copybookIndex := chunker.BuildCopybookIndex(scanResult.Files)
 	p.Logger.Info("pass 2: built copybook index", zap.Int("copybooks", len(copybookIndex)))
 
-	var changed []graph.FileInfo
+	// Collect all COBOL files and batch-check pass 2 cache
+	cobolFiles := make(map[string]graph.FileInfo)
+	pathHashes := make(map[string]string)
 	for _, f := range scanResult.Files {
 		if f.Type != graph.FileTypeCOBOL {
 			continue
 		}
-		isChanged, err := p.Cache.IsChangedForPass(f.Path, f.Hash, 2)
-		if err != nil {
-			return fmt.Errorf("checking pass 2 cache: %w", err)
-		}
-		if isChanged {
-			changed = append(changed, f)
-		}
+		cobolFiles[f.Path] = f
+		pathHashes[f.Path] = f.Hash
+	}
+
+	changedPaths, err := p.Cache.BatchIsChangedForPass(pathHashes, 2)
+	if err != nil {
+		return fmt.Errorf("batch checking pass 2 cache: %w", err)
+	}
+
+	changed := make([]graph.FileInfo, 0, len(changedPaths))
+	for _, path := range changedPaths {
+		changed = append(changed, cobolFiles[path])
 	}
 
 	if len(changed) == 0 {
@@ -224,6 +238,7 @@ func (p *Pipeline) RunPass2(ctx context.Context, scanResult *scanner.ScanResult)
 		TokenLimit:    p.Config.Ingest.Pass2TokenLimit,
 		OverlapLines:  p.Config.Ingest.OverlapLines,
 		CopybookIndex: copybookIndex,
+		CopybookCache: chunker.NewCopybookCache(),
 	}
 
 	chunksPerFile := make(map[string]int)
@@ -290,7 +305,7 @@ func (p *Pipeline) RunPass2(ctx context.Context, scanResult *scanner.ScanResult)
 		return parser.ParsePass2Response(jsonResp, chunk.FileName, programID)
 	}
 
-	resultsCh := pool.RunPass2(ctx, allChunks, pass2Fn, p.Config.Ingest.MaxWorkers, p.Logger)
+	resultsCh := pool.RunPass2(ctx, allChunks, pass2Fn, p.Config.Ingest.WorkersForPass(2), p.Logger)
 
 	// Stream results to Neo4j, merging multi-chunk files as they complete
 	pendingChunks := make(map[string][]*graph.Pass2Result)
@@ -468,18 +483,24 @@ func (p *Pipeline) refreshDomainNames(ctx context.Context, fallback []string) []
 
 // RunPass1JCL analyzes JCL files using Sonnet (cheap/fast).
 func (p *Pipeline) RunPass1JCL(ctx context.Context, scanResult *scanner.ScanResult) error {
-	var jclFiles []graph.FileInfo
+	jclFileMap := make(map[string]graph.FileInfo)
+	jclPathHashes := make(map[string]string)
 	for _, f := range scanResult.Files {
 		if f.Type != graph.FileTypeJCL {
 			continue
 		}
-		isChanged, err := p.Cache.IsChanged(f.Path, f.Hash)
-		if err != nil {
-			return fmt.Errorf("checking JCL cache: %w", err)
-		}
-		if isChanged {
-			jclFiles = append(jclFiles, f)
-		}
+		jclFileMap[f.Path] = f
+		jclPathHashes[f.Path] = f.Hash
+	}
+
+	changedJCLPaths, err := p.Cache.BatchIsChanged(jclPathHashes)
+	if err != nil {
+		return fmt.Errorf("batch checking JCL cache: %w", err)
+	}
+
+	jclFiles := make([]graph.FileInfo, 0, len(changedJCLPaths))
+	for _, path := range changedJCLPaths {
+		jclFiles = append(jclFiles, jclFileMap[path])
 	}
 
 	if len(jclFiles) == 0 {
@@ -488,43 +509,71 @@ func (p *Pipeline) RunPass1JCL(ctx context.Context, scanResult *scanner.ScanResu
 	}
 	p.Logger.Info("pass 1 JCL: files to process", zap.Int("count", len(jclFiles)))
 
-	successCount := 0
-	errorCount := 0
+	var (
+		successCount int
+		errorCount   int
+		mu           sync.Mutex
+	)
+
+	sem := make(chan struct{}, p.Config.Ingest.WorkersForPass(1))
+	var wg sync.WaitGroup
 
 	for _, f := range jclFiles {
-		data, err := os.ReadFile(f.Path)
-		content := string(data)
-		if err != nil {
-			p.Logger.Error("pass 1 JCL: failed to read file", zap.String("file", f.Path), zap.Error(err))
-			errorCount++
-			continue
-		}
+		wg.Add(1)
+		go func(f graph.FileInfo) {
+			defer wg.Done()
+			sem <- struct{}{}
+			defer func() { <-sem }()
 
-		jsonResp, err := p.Claude.AnalyzeJCL(ctx, f.Path, content)
-		if err != nil {
-			p.Logger.Error("pass 1 JCL: claude analysis failed", zap.String("file", f.Path), zap.Error(err))
-			errorCount++
-			continue
-		}
+			if ctx.Err() != nil {
+				return
+			}
 
-		result, err := parser.ParseJCLResponse(jsonResp, f.Path)
-		if err != nil {
-			p.Logger.Error("pass 1 JCL: parse failed", zap.String("file", f.Path), zap.Error(err))
-			errorCount++
-			continue
-		}
+			data, err := os.ReadFile(f.Path)
+			if err != nil {
+				p.Logger.Error("pass 1 JCL: failed to read file", zap.String("file", f.Path), zap.Error(err))
+				mu.Lock()
+				errorCount++
+				mu.Unlock()
+				return
+			}
 
-		if err := p.Writer.WriteJCLResult(ctx, result); err != nil {
-			p.Logger.Error("pass 1 JCL: write failed", zap.String("file", f.Path), zap.Error(err))
-			errorCount++
-			continue
-		}
+			jsonResp, err := p.Claude.AnalyzeJCL(ctx, f.Path, string(data))
+			if err != nil {
+				p.Logger.Error("pass 1 JCL: claude analysis failed", zap.String("file", f.Path), zap.Error(err))
+				mu.Lock()
+				errorCount++
+				mu.Unlock()
+				return
+			}
 
-		if err := p.Cache.MarkProcessed(f.Path, f.Hash); err != nil {
-			p.Logger.Error("pass 1 JCL: cache update failed", zap.String("file", f.Path), zap.Error(err))
-		}
-		successCount++
+			result, err := parser.ParseJCLResponse(jsonResp, f.Path)
+			if err != nil {
+				p.Logger.Error("pass 1 JCL: parse failed", zap.String("file", f.Path), zap.Error(err))
+				mu.Lock()
+				errorCount++
+				mu.Unlock()
+				return
+			}
+
+			if err := p.Writer.WriteJCLResult(ctx, result); err != nil {
+				p.Logger.Error("pass 1 JCL: write failed", zap.String("file", f.Path), zap.Error(err))
+				mu.Lock()
+				errorCount++
+				mu.Unlock()
+				return
+			}
+
+			if err := p.Cache.MarkProcessed(f.Path, f.Hash); err != nil {
+				p.Logger.Error("pass 1 JCL: cache update failed", zap.String("file", f.Path), zap.Error(err))
+			}
+			mu.Lock()
+			successCount++
+			mu.Unlock()
+		}(f)
 	}
+
+	wg.Wait()
 
 	p.Logger.Info("pass 1 JCL complete",
 		zap.Int("success", successCount),
@@ -563,42 +612,67 @@ func (p *Pipeline) RunPass4(ctx context.Context) error {
 	p.Logger.Info("pass 4: analyzing LINKAGE mappings", zap.Int("callPairs", len(callPairs)))
 
 	pass4Result := &graph.Pass4Result{}
-	successCount := 0
-	errorCount := 0
+	var (
+		successCount int
+		errorCount   int
+		pass4Mu      sync.Mutex
+	)
+
+	pass4Sem := make(chan struct{}, p.Config.Ingest.WorkersForPass(2))
+	var pass4Wg sync.WaitGroup
 
 	for _, pair := range callPairs {
-		fieldContext := formatFieldContext(pair)
+		pass4Wg.Add(1)
+		go func(pair n4j.CallPairContext) {
+			defer pass4Wg.Done()
+			pass4Sem <- struct{}{}
+			defer func() { <-pass4Sem }()
 
-		jsonResp, err := p.Claude.AnalyzeCrossProgramFlow(ctx, pair.CallerID, pair.CalleeID, fieldContext)
-		if err != nil {
-			p.Logger.Warn("pass 4: LINKAGE analysis failed",
-				zap.String("caller", pair.CallerID),
-				zap.String("callee", pair.CalleeID),
-				zap.Error(err))
-			errorCount++
-			continue
-		}
+			if ctx.Err() != nil {
+				return
+			}
 
-		fields, err := parser.ParsePass4Response(jsonResp)
-		if err != nil {
-			p.Logger.Warn("pass 4: parse failed",
-				zap.String("caller", pair.CallerID),
-				zap.String("callee", pair.CalleeID),
-				zap.Error(err))
-			errorCount++
-			continue
-		}
+			fieldContext := formatFieldContext(pair)
 
-		if len(fields) > 0 {
-			pass4Result.Flows = append(pass4Result.Flows, graph.CrossProgramFlow{
-				FromProgram: pair.CallerID,
-				ToProgram:   pair.CalleeID,
-				Channel:     "LINKAGE",
-				Fields:      fields,
-			})
-		}
-		successCount++
+			jsonResp, err := p.Claude.AnalyzeCrossProgramFlow(ctx, pair.CallerID, pair.CalleeID, fieldContext)
+			if err != nil {
+				p.Logger.Warn("pass 4: LINKAGE analysis failed",
+					zap.String("caller", pair.CallerID),
+					zap.String("callee", pair.CalleeID),
+					zap.Error(err))
+				pass4Mu.Lock()
+				errorCount++
+				pass4Mu.Unlock()
+				return
+			}
+
+			fields, err := parser.ParsePass4Response(jsonResp)
+			if err != nil {
+				p.Logger.Warn("pass 4: parse failed",
+					zap.String("caller", pair.CallerID),
+					zap.String("callee", pair.CalleeID),
+					zap.Error(err))
+				pass4Mu.Lock()
+				errorCount++
+				pass4Mu.Unlock()
+				return
+			}
+
+			pass4Mu.Lock()
+			if len(fields) > 0 {
+				pass4Result.Flows = append(pass4Result.Flows, graph.CrossProgramFlow{
+					FromProgram: pair.CallerID,
+					ToProgram:   pair.CalleeID,
+					Channel:     "LINKAGE",
+					Fields:      fields,
+				})
+			}
+			successCount++
+			pass4Mu.Unlock()
+		}(pair)
 	}
+
+	pass4Wg.Wait()
 
 	if len(pass4Result.Flows) > 0 {
 		if err := p.Writer.WritePass4Result(ctx, pass4Result); err != nil {
@@ -789,7 +863,7 @@ func (p *Pipeline) rerunPass3ForPrograms(ctx context.Context, programIDs []strin
 
 // pass5Workers returns the worker count for Pass 5 LLM calls.
 func (p *Pipeline) pass5Workers() int {
-	return p.Config.Ingest.MaxWorkers
+	return p.Config.Ingest.WorkersForPass(5)
 }
 
 // repairRelationshipGap sends repair prompts to Opus for a gap type and writes results.

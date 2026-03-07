@@ -6,11 +6,45 @@ import (
 	"path/filepath"
 	"regexp"
 	"strings"
+	"sync"
 
 	"cobol-ingestor/internal/graph"
 
 	"go.uber.org/zap"
 )
+
+// CopybookCache caches copybook file contents to avoid redundant disk reads.
+type CopybookCache struct {
+	mu    sync.RWMutex
+	cache map[string]string
+}
+
+// NewCopybookCache creates a new copybook content cache.
+func NewCopybookCache() *CopybookCache {
+	return &CopybookCache{cache: make(map[string]string)}
+}
+
+// Read returns the file contents, reading from disk only on first access.
+func (cc *CopybookCache) Read(path string) (string, error) {
+	cc.mu.RLock()
+	if content, ok := cc.cache[path]; ok {
+		cc.mu.RUnlock()
+		return content, nil
+	}
+	cc.mu.RUnlock()
+
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return "", err
+	}
+	content := string(data)
+
+	cc.mu.Lock()
+	cc.cache[path] = content
+	cc.mu.Unlock()
+
+	return content, nil
+}
 
 // Chunk represents a piece of a source file ready for analysis.
 type Chunk struct {
@@ -308,9 +342,14 @@ var replacingRegex = regexp.MustCompile(`==\s*([^=]+?)\s*==\s+BY\s+==\s*([^=]+?)
 // InlineCopybooks replaces COPY statements with copybook content.
 // Tracks visited set to prevent circular references. maxDepth prevents runaway recursion.
 // Normalizes continuation lines before regex matching to handle multi-line COPY statements.
-func InlineCopybooks(content string, index CopybookIndex, maxDepth int) (string, error) {
+// If cache is nil, reads from disk directly (backward compatible).
+func InlineCopybooks(content string, index CopybookIndex, maxDepth int, cache ...*CopybookCache) (string, error) {
 	content = normalizeContinuations(content)
-	return inlineCopybooksRecurse(content, index, maxDepth, make(map[string]bool))
+	var cc *CopybookCache
+	if len(cache) > 0 {
+		cc = cache[0]
+	}
+	return inlineCopybooksRecurse(content, index, maxDepth, make(map[string]bool), cc)
 }
 
 // parseReplacingClause extracts replacement pairs from a REPLACING clause.
@@ -333,7 +372,7 @@ func applyReplacements(content string, pairs [][2]string) string {
 	return content
 }
 
-func inlineCopybooksRecurse(content string, index CopybookIndex, depth int, visited map[string]bool) (string, error) {
+func inlineCopybooksRecurse(content string, index CopybookIndex, depth int, visited map[string]bool, cache *CopybookCache) (string, error) {
 	if depth <= 0 {
 		return content, nil
 	}
@@ -354,12 +393,20 @@ func inlineCopybooksRecurse(content string, index CopybookIndex, depth int, visi
 			return match // copybook not found, leave as-is
 		}
 
-		data, err := os.ReadFile(path)
-		if err != nil {
-			return match
+		var copybookContent string
+		if cache != nil {
+			var err error
+			copybookContent, err = cache.Read(path)
+			if err != nil {
+				return match
+			}
+		} else {
+			data, err := os.ReadFile(path)
+			if err != nil {
+				return match
+			}
+			copybookContent = string(data)
 		}
-
-		copybookContent := string(data)
 
 		// Apply REPLACING substitutions if present
 		if len(subs) >= 3 && strings.Contains(strings.ToUpper(subs[2]), "REPLACING") {
@@ -368,7 +415,7 @@ func inlineCopybooksRecurse(content string, index CopybookIndex, depth int, visi
 		}
 
 		visited[name] = true
-		inlined, _ := inlineCopybooksRecurse(copybookContent, index, depth-1, visited)
+		inlined, _ := inlineCopybooksRecurse(copybookContent, index, depth-1, visited, cache)
 		delete(visited, name) // allow same copybook in different branches
 
 		return fmt.Sprintf("      *>> COPY %s INLINED BEGIN\n%s\n      *>> COPY %s INLINED END", name, inlined, name)
@@ -380,6 +427,7 @@ type Pass2ChunkOptions struct {
 	TokenLimit    int
 	OverlapLines  int // lines of overlap between chunks (default 20)
 	CopybookIndex CopybookIndex
+	CopybookCache *CopybookCache // optional cache for copybook file contents
 }
 
 // ChunkFilePass2 reads a file, inlines copybooks, splits divisions, and chunks
@@ -394,7 +442,7 @@ func ChunkFilePass2(fi graph.FileInfo, opts Pass2ChunkOptions, logger *zap.Logge
 
 	// Inline copybooks
 	if opts.CopybookIndex != nil {
-		content, err = InlineCopybooks(content, opts.CopybookIndex, 10)
+		content, err = InlineCopybooks(content, opts.CopybookIndex, 10, opts.CopybookCache)
 		if err != nil {
 			return nil, fmt.Errorf("inlining copybooks for %s: %w", fi.Path, err)
 		}
