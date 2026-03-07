@@ -1,40 +1,22 @@
 Business Source License 1.1
 
-**License**: BSL 1.1
-
 **Licensor**: Sentinovo (Connor Fancher — cfanch@sentinovo.ai)
 
-**Licensed Work**: cobol-ingestor
+**Licensed Work**: cobol-graph
 The Licensed Work is © 2026 Sentinovo. All Rights Reserved.
 
-**Additional Use Grant**: You may make use of the Licensed Work,
-provided that you may not use the Licensed Work as a commercial hosted
-service that competes with Sentinovo’s paid offerings. A “Competing
-Service” is a commercial offering that allows third parties (other than
-your employees and individual contractors) to access the functionality
-of the Licensed Work as part of a managed or hosted service. For
-clarity, this restriction applies to providers of infrastructure
-services, cloud services, hosting services, and similarly situated third
-parties (including affiliates of such entities) that would offer the
-Licensed Work in connection with a broader service offering. Internal
-use, development, testing, and non-commercial use are always permitted.
-
-**Named Entity Grant — Uniti Group Inc.**
-Notwithstanding any other provision of this License, the Licensor grants
-Uniti Group Inc. and its wholly owned subsidiaries (including Windstream
-Holdings and its operating entities) a perpetual, royalty-free,
-non-exclusive, non-transferable, non-sublicensable right to use, copy,
-and modify the Licensed Work (including all current and future versions)
-solely for their own internal COBOL modernization and related development
-purposes. This grant expressly excludes the right to (a) redistribute,
-sublicense, or otherwise make the Licensed Work or any derivative work
-available to any third party, (b) sell, lease, or commercially exploit
-the Licensed Work or any derivative work as a standalone product or
-service, or (c) offer the Licensed Work as part of a managed, hosted, or
-cloud service to third parties. This Named Entity Grant survives any
-termination of rights under the general License terms above, provided
-that Uniti Group Inc. continues to comply with the restrictions in this
-paragraph.
+**Additional Use Grant**: You may make production use of the Licensed
+Work for your own internal business operations, provided that you may
+not use the Licensed Work as a commercial hosted service that competes
+with Sentinovo's paid offerings. A "Competing Service" is a commercial
+offering that allows third parties (other than your employees and
+individual contractors) to access the functionality of the Licensed Work
+as part of a managed or hosted service. For clarity, this restriction
+applies to providers of infrastructure services, cloud services, hosting
+services, and similarly situated third parties (including affiliates of
+such entities) that would offer the Licensed Work in connection with a
+broader service offering. Internal use, development, testing, and
+non-commercial use are always permitted.
 
 **Change Date**: 2032-03-05
 
@@ -49,7 +31,7 @@ derivative works, redistribute, and make non-production use of the
 Licensed Work. The Licensor may make an Additional Use Grant, above,
 permitting limited production use.
 
-Effective on the Change Date, or the sixth anniversary of the first
+Effective on the Change Date, or the fourth anniversary of the first
 publicly available distribution of a specific version of the Licensed
 Work under this License, whichever comes first, the Licensor hereby
 grants you rights under the terms of the Change License, and the rights
@@ -80,7 +62,7 @@ Licensor or its affiliates (provided that you may use a trademark or
 logo of Licensor as expressly required by this License).
 
 TO THE EXTENT PERMITTED BY APPLICABLE LAW, THE LICENSED WORK IS PROVIDED
-ON AN “AS IS” BASIS. LICENSOR HEREBY DISCLAIMS ALL WARRANTIES AND
+ON AN "AS IS" BASIS. LICENSOR HEREBY DISCLAIMS ALL WARRANTIES AND
 CONDITIONS, EXPRESS OR IMPLIED, INCLUDING (WITHOUT LIMITATION) WARRANTIES
 OF MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE, NON-INFRINGEMENT,
 AND TITLE.

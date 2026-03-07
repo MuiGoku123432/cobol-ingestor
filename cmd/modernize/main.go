@@ -85,10 +85,17 @@ func main() {
 		c.Data(http.StatusOK, "application/javascript; charset=utf-8", data)
 	})
 
+	// Set default model on ProviderState so chat works before model selection
+	ps.SetModel(chatModel, chatMaxTokens)
+
 	// Auth endpoints
 	r.GET("/api/auth/status", modernize.AuthStatusHandler(ps))
 	r.POST("/api/auth/device-code", modernize.DeviceCodeHandler(ps))
 	r.POST("/api/auth/logout", modernize.LogoutHandler(ps))
+
+	// Model endpoints
+	r.GET("/api/models", modernize.ModelsHandler(ps))
+	r.POST("/api/models/select", modernize.SelectModelHandler(ps))
 
 	// API endpoints
 	r.POST("/api/chat", modernize.ChatHandler(ps, mcpClient, chatModel, chatMaxTokens))

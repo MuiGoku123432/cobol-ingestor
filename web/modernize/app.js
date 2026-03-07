@@ -32,6 +32,7 @@ function showAuthOverlay() {
 function hideAuthOverlay() {
   document.getElementById("authOverlay").classList.add("hidden");
   stopAuthPolling();
+  loadModels();
 }
 
 async function startLogin() {
@@ -109,6 +110,47 @@ async function logout() {
     // ignore
   }
 }
+
+// Model picker
+async function loadModels() {
+  const container = document.getElementById("modelSelectContainer");
+  const select = document.getElementById("modelSelect");
+
+  try {
+    const resp = await fetch("/api/models");
+    if (!resp.ok) return;
+
+    const models = await resp.json();
+    if (!models || models.length === 0) return;
+
+    select.innerHTML = models
+      .map((m) => `<option value="${m.id}">${m.name || m.id}</option>`)
+      .join("");
+    select.disabled = false;
+    container.classList.remove("hidden");
+
+    // Auto-select first model
+    selectModel(models[0].id);
+  } catch {
+    // ignore — models not available
+  }
+}
+
+async function selectModel(modelId) {
+  try {
+    await fetch("/api/models/select", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ model: modelId }),
+    });
+  } catch {
+    // ignore
+  }
+}
+
+document.getElementById("modelSelect").addEventListener("change", (e) => {
+  selectModel(e.target.value);
+});
 
 // Check auth on load
 checkAuth();

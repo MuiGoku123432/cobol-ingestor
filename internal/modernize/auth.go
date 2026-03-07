@@ -22,11 +22,13 @@ import (
 
 // ProviderState holds the LLM provider with thread-safe deferred init.
 type ProviderState struct {
-	mu       sync.RWMutex
-	provider llm.ChatProvider
-	cfg      *config.Config
-	logger   *zap.Logger
-	pending  atomic.Bool
+	mu        sync.RWMutex
+	provider  llm.ChatProvider
+	cfg       *config.Config
+	logger    *zap.Logger
+	pending   atomic.Bool
+	model     string // selected model ID
+	maxTokens int    // max tokens for selected model
 }
 
 // NewProviderState creates a new ProviderState.
@@ -51,6 +53,28 @@ func (ps *ProviderState) Set(p llm.ChatProvider) {
 // IsReady returns true if a provider is available.
 func (ps *ProviderState) IsReady() bool {
 	return ps.Get() != nil
+}
+
+// GetModel returns the selected model ID.
+func (ps *ProviderState) GetModel() string {
+	ps.mu.RLock()
+	defer ps.mu.RUnlock()
+	return ps.model
+}
+
+// GetMaxTokens returns the max tokens for the selected model.
+func (ps *ProviderState) GetMaxTokens() int {
+	ps.mu.RLock()
+	defer ps.mu.RUnlock()
+	return ps.maxTokens
+}
+
+// SetModel sets the selected model and max tokens.
+func (ps *ProviderState) SetModel(model string, maxTokens int) {
+	ps.mu.Lock()
+	defer ps.mu.Unlock()
+	ps.model = model
+	ps.maxTokens = maxTokens
 }
 
 // TryInit attempts provider creation using env var or cached token.
@@ -202,6 +226,93 @@ func pollForToken(ctx context.Context, ps *ProviderState, deviceCode string, int
 			ps.logger.Error("failed to create provider after obtaining token")
 			return
 		}
+	}
+}
+
+// ModelsHandler returns a handler for GET /api/models.
+func ModelsHandler(ps *ProviderState) gin.HandlerFunc {
+	return func(c *gin.Context) {
+		provider := ps.Get()
+		if provider == nil {
+			c.JSON(http.StatusUnauthorized, gin.H{"error": "not authenticated"})
+			return
+		}
+
+		cp, ok := provider.(*llm.CopilotProvider)
+		if !ok {
+			// Non-copilot provider: return single entry with current model
+			model := ps.GetModel()
+			if model == "" {
+				c.JSON(http.StatusOK, []gin.H{})
+				return
+			}
+			c.JSON(http.StatusOK, []gin.H{{
+				"id":   model,
+				"name": model,
+			}})
+			return
+		}
+
+		models, err := cp.GetCopilotProvider().GetModels(c.Request.Context())
+		if err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": fmt.Sprintf("fetching models: %v", err)})
+			return
+		}
+
+		result := make([]gin.H, 0, len(models))
+		for _, m := range models {
+			result = append(result, gin.H{
+				"id":                     m.ID,
+				"name":                   m.Name,
+				"description":            m.Description,
+				"max_tokens":             m.MaxTokens,
+				"supports_tool_calling":  m.SupportsToolCalling,
+			})
+		}
+		c.JSON(http.StatusOK, result)
+	}
+}
+
+// SelectModelHandler returns a handler for POST /api/models/select.
+func SelectModelHandler(ps *ProviderState) gin.HandlerFunc {
+	return func(c *gin.Context) {
+		var req struct {
+			Model string `json:"model"`
+		}
+		if err := c.ShouldBindJSON(&req); err != nil || req.Model == "" {
+			c.JSON(http.StatusBadRequest, gin.H{"error": "model is required"})
+			return
+		}
+
+		provider := ps.Get()
+		if provider == nil {
+			c.JSON(http.StatusUnauthorized, gin.H{"error": "not authenticated"})
+			return
+		}
+
+		// Try to find max_tokens from the copilot models list
+		maxTokens := 0
+		if cp, ok := provider.(*llm.CopilotProvider); ok {
+			if models, err := cp.GetCopilotProvider().GetModels(c.Request.Context()); err == nil {
+				for _, m := range models {
+					if m.ID == req.Model {
+						maxTokens = m.MaxTokens
+						break
+					}
+				}
+			}
+		}
+		if maxTokens == 0 {
+			maxTokens = 16384 // reasonable default
+		}
+
+		ps.SetModel(req.Model, maxTokens)
+		ps.logger.Info("model selected", zap.String("model", req.Model), zap.Int("maxTokens", maxTokens))
+
+		c.JSON(http.StatusOK, gin.H{
+			"model":      req.Model,
+			"max_tokens": maxTokens,
+		})
 	}
 }
 

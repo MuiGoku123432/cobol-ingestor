@@ -14,7 +14,8 @@ const maxToolIterations = 10
 
 // ChatHandler creates a Gin handler for the chat endpoint.
 // Accepts *ProviderState for deferred provider initialization (Copilot auth flow).
-func ChatHandler(ps *ProviderState, mcpClient *MCPClient, model string, maxTokens int) gin.HandlerFunc {
+// The defaultModel and defaultMaxTokens are used as fallbacks when no model has been selected via the model picker.
+func ChatHandler(ps *ProviderState, mcpClient *MCPClient, defaultModel string, defaultMaxTokens int) gin.HandlerFunc {
 	tools := GetToolDefinitions()
 
 	return func(c *gin.Context) {
@@ -22,6 +23,16 @@ func ChatHandler(ps *ProviderState, mcpClient *MCPClient, model string, maxToken
 		if provider == nil {
 			c.JSON(http.StatusUnauthorized, gin.H{"error": "not authenticated"})
 			return
+		}
+
+		// Use model from ProviderState if selected, otherwise fall back to defaults
+		model := ps.GetModel()
+		if model == "" {
+			model = defaultModel
+		}
+		maxTokens := ps.GetMaxTokens()
+		if maxTokens == 0 {
+			maxTokens = defaultMaxTokens
 		}
 		var req struct {
 			Messages       []chatInputMessage `json:"messages"`
