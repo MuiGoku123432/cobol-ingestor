@@ -93,7 +93,7 @@ PROCEDURE DIVISION.
     DISPLAY "HELLO".
     STOP RUN.`
 
-	divs := splitDivisions(content)
+	divs := SplitDivisions(content)
 
 	assert.Contains(t, divs, "IDENTIFICATION")
 	assert.Contains(t, divs, "DATA")
@@ -131,7 +131,7 @@ func TestSplitDivisions(t *testing.T) {
            DISPLAY "HELLO".
            STOP RUN.`
 
-	divs := splitDivisions(content)
+	divs := SplitDivisions(content)
 
 	assert.Contains(t, divs, "IDENTIFICATION")
 	assert.Contains(t, divs, "ENVIRONMENT")

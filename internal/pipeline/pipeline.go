@@ -649,7 +649,41 @@ func (p *Pipeline) RunPass5(ctx context.Context, scanResult *scanner.ScanResult)
 		}
 	}
 
-	// Step 2: Fix Gap #1 — Programs missing Pass 3 (re-run Pass 3 for them)
+	// Step 2: Fix Gap — Missing CALLS (repair before Pass 3 which needs call graph)
+	missingCalls, err := p.Neo4jClient.QueryProgramsMissingCalls(ctx)
+	if err != nil {
+		p.Logger.Warn("pass 5: failed to query missing CALLS", zap.Error(err))
+	} else if len(missingCalls) > 0 {
+		p.Logger.Info("pass 5: repairing CALLS gaps", zap.Int("count", len(missingCalls)))
+		p.repairRelationshipGap(ctx, missingCalls, "MISSING_CALLS")
+	}
+
+	// Step 3: Fix Gap — Missing CHILD_OF
+	missingChildOf, err := p.Neo4jClient.QueryProgramsMissingChildOf(ctx)
+	if err != nil {
+		p.Logger.Warn("pass 5: failed to query missing CHILD_OF", zap.Error(err))
+	} else if len(missingChildOf) > 0 {
+		p.Logger.Info("pass 5: repairing CHILD_OF gaps", zap.Int("count", len(missingChildOf)))
+		p.repairRelationshipGap(ctx, missingChildOf, "CHILD_OF")
+	}
+
+	// Step 4: Fix Gap — Missing MOVES_TO
+	missingMovesTo, err := p.Neo4jClient.QueryProgramsMissingMovesTo(ctx)
+	if err != nil {
+		p.Logger.Warn("pass 5: failed to query missing MOVES_TO", zap.Error(err))
+	} else if len(missingMovesTo) > 0 {
+		p.Logger.Info("pass 5: repairing MOVES_TO gaps", zap.Int("count", len(missingMovesTo)))
+		p.repairRelationshipGap(ctx, missingMovesTo, "MOVES_TO")
+	}
+
+	// Step 5: Fix Gap — Dangling CALLS targets (graph-only, creates stub Programs)
+	if fixed, err := p.Writer.FixDanglingCalls(ctx); err != nil {
+		p.Logger.Warn("pass 5: dangling calls fix failed", zap.Error(err))
+	} else if fixed > 0 {
+		p.Logger.Info("pass 5: marked external programs", zap.Int("fixed", fixed))
+	}
+
+	// Step 6: Re-run Pass 3 for programs missing riskScore (needs relationships from steps 2-5)
 	missingPass3, err := p.Neo4jClient.QueryProgramsMissingPass3(ctx)
 	if err != nil {
 		p.Logger.Warn("pass 5: failed to query missing Pass 3 programs", zap.Error(err))
@@ -660,41 +694,14 @@ func (p *Pipeline) RunPass5(ctx context.Context, scanResult *scanner.ScanResult)
 		}
 	}
 
-	// Step 2.5: Merge duplicate domains (safety net after Pass 3 reruns)
+	// Step 7: Merge duplicate domains (safety net after Pass 3 reruns)
 	if merged, err := p.Writer.MergeDuplicateDomains(ctx); err != nil {
 		p.Logger.Warn("pass 5: domain merge failed", zap.Error(err))
 	} else if merged > 0 {
 		p.Logger.Info("pass 5: merged duplicate domains", zap.Int("merged", merged))
 	}
 
-	// Step 3: Fix Gap #2 — Missing CHILD_OF
-	missingChildOf, err := p.Neo4jClient.QueryProgramsMissingChildOf(ctx)
-	if err != nil {
-		p.Logger.Warn("pass 5: failed to query missing CHILD_OF", zap.Error(err))
-	} else if len(missingChildOf) > 0 {
-		p.Logger.Info("pass 5: repairing CHILD_OF gaps", zap.Int("count", len(missingChildOf)))
-		p.repairRelationshipGap(ctx, missingChildOf, "CHILD_OF")
-	}
-
-	// Step 4: Fix Gap #3 — Missing MOVES_TO
-	missingMovesTo, err := p.Neo4jClient.QueryProgramsMissingMovesTo(ctx)
-	if err != nil {
-		p.Logger.Warn("pass 5: failed to query missing MOVES_TO", zap.Error(err))
-	} else if len(missingMovesTo) > 0 {
-		p.Logger.Info("pass 5: repairing MOVES_TO gaps", zap.Int("count", len(missingMovesTo)))
-		p.repairRelationshipGap(ctx, missingMovesTo, "MOVES_TO")
-	}
-
-	// Step 5: Fix Gap #4 — Missing CALLS
-	missingCalls, err := p.Neo4jClient.QueryProgramsMissingCalls(ctx)
-	if err != nil {
-		p.Logger.Warn("pass 5: failed to query missing CALLS", zap.Error(err))
-	} else if len(missingCalls) > 0 {
-		p.Logger.Info("pass 5: repairing CALLS gaps", zap.Int("count", len(missingCalls)))
-		p.repairRelationshipGap(ctx, missingCalls, "MISSING_CALLS")
-	}
-
-	// Step 6: Fix Gap #5 — Unannotated paragraphs
+	// Step 8: Fix Gap — Unannotated paragraphs
 	unannotated, err := p.Neo4jClient.QueryUnannotatedParagraphs(ctx)
 	if err != nil {
 		p.Logger.Warn("pass 5: failed to query unannotated paragraphs", zap.Error(err))
@@ -703,21 +710,14 @@ func (p *Pipeline) RunPass5(ctx context.Context, scanResult *scanner.ScanResult)
 		p.repairAnnotations(ctx, unannotated)
 	}
 
-	// Step 7: Fix Gap #6 — Unlinked DDCards (graph-only)
+	// Step 9: Fix Gap — Unlinked DDCards (graph-only)
 	if fixed, err := p.Writer.FixUnlinkedDDCards(ctx); err != nil {
 		p.Logger.Warn("pass 5: DD card fix failed", zap.Error(err))
 	} else if fixed > 0 {
 		p.Logger.Info("pass 5: linked DD cards to files", zap.Int("fixed", fixed))
 	}
 
-	// Step 8: Fix Gap #7 — Dangling CALLS targets (graph-only)
-	if fixed, err := p.Writer.FixDanglingCalls(ctx); err != nil {
-		p.Logger.Warn("pass 5: dangling calls fix failed", zap.Error(err))
-	} else if fixed > 0 {
-		p.Logger.Info("pass 5: marked external programs", zap.Int("fixed", fixed))
-	}
-
-	// Step 9: Re-run validation and log final summary
+	// Step 10: Re-run validation and log final summary
 	finalResult, err := p.Writer.RunValidation(ctx)
 	if err != nil {
 		p.Logger.Warn("pass 5: final validation failed", zap.Error(err))
@@ -820,7 +820,13 @@ func (p *Pipeline) repairRelationshipGap(ctx context.Context, programIDs []strin
 				return
 			}
 
-			jsonResp, err := p.Claude.AnalyzeRepair(ctx, repairType, pid, "", string(sourceCode), "")
+			tokenBudget := p.Config.Ingest.Pass2TokenLimit
+			if tokenBudget <= 0 {
+				tokenBudget = p.Config.Ingest.TokenLimit
+			}
+			trimmedSource := truncateForRepair(string(sourceCode), tokenBudget, repairType)
+
+			jsonResp, err := p.Claude.AnalyzeRepair(ctx, repairType, pid, "", trimmedSource, "")
 			if err != nil {
 				p.Logger.Warn("pass 5: repair LLM call failed",
 					zap.String("program", pid),
@@ -893,6 +899,12 @@ func (p *Pipeline) repairAnnotations(ctx context.Context, unannotated map[string
 				return
 			}
 
+			tokenBudget := p.Config.Ingest.Pass2TokenLimit
+			if tokenBudget <= 0 {
+				tokenBudget = p.Config.Ingest.TokenLimit
+			}
+			trimmedSource := truncateForRepair(string(sourceCode), tokenBudget, "ANNOTATIONS")
+
 			missingList := ""
 			for i, n := range paraNames {
 				if i > 0 {
@@ -901,7 +913,7 @@ func (p *Pipeline) repairAnnotations(ctx context.Context, unannotated map[string
 				missingList += n
 			}
 
-			jsonResp, err := p.Claude.AnalyzeRepair(ctx, "ANNOTATIONS", pid, "", string(sourceCode), missingList)
+			jsonResp, err := p.Claude.AnalyzeRepair(ctx, "ANNOTATIONS", pid, "", trimmedSource, missingList)
 			if err != nil {
 				p.Logger.Warn("pass 5: annotation repair LLM failed", zap.String("program", pid), zap.Error(err))
 				return
@@ -935,6 +947,42 @@ func (p *Pipeline) repairAnnotations(ctx context.Context, unannotated map[string
 	}
 
 	wg.Wait()
+}
+
+// truncateForRepair trims source code to fit within a token budget for Pass 5 LLM calls.
+// For CHILD_OF and MOVES_TO repairs it keeps DATA + PROCEDURE divisions; for CALLS it keeps
+// only PROCEDURE. If the result still exceeds the budget it hard-truncates.
+func truncateForRepair(sourceCode string, tokenBudget int, repairType string) string {
+	if chunker.EstimateTokens(sourceCode) <= tokenBudget {
+		return sourceCode
+	}
+
+	divs := chunker.SplitDivisions(sourceCode)
+
+	var trimmed string
+	switch repairType {
+	case "CHILD_OF", "MOVES_TO", "ANNOTATIONS":
+		// These need DATA DIVISION context too
+		trimmed = divs["DATA"] + "\n" + divs["PROCEDURE"]
+	default:
+		// MISSING_CALLS only needs PROCEDURE
+		trimmed = divs["PROCEDURE"]
+	}
+
+	if trimmed == "" {
+		trimmed = sourceCode
+	}
+
+	if chunker.EstimateTokens(trimmed) <= tokenBudget {
+		return trimmed
+	}
+
+	// Hard truncation as last resort
+	maxChars := tokenBudget * 4
+	if maxChars > len(trimmed) {
+		return trimmed
+	}
+	return trimmed[:maxChars]
 }
 
 // writeRepairRelationships converts graph.Relationship slice to map rows and writes to Neo4j.
