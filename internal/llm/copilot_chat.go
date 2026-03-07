@@ -1,34 +1,37 @@
 package llm
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
 	"io"
+	"net/http"
 	"strings"
 
-	"github.com/cecil-the-coder/ai-provider-kit/pkg/types"
+	"github.com/cecil-the-coder/ai-provider-kit/pkg/providers/copilot"
+	"github.com/google/uuid"
 )
 
 // CompleteChat implements ChatProvider for the Copilot backend.
-// Copilot uses OpenAI-compatible tool_calls format.
+// We bypass the library's GenerateChatCompletion because its prepareRequest()
+// drops ToolCalls and ToolCallID fields, causing 400 errors from the OpenAI-compatible API.
 func (p *CopilotProvider) CompleteChat(ctx context.Context, req ChatRequest) (*ChatResponse, error) {
 	model := req.Model
 	if model == "" {
 		model = p.model
 	}
 
-	// Convert messages
-	msgs := make([]types.ChatMessage, 0, len(req.Messages))
+	// Build copilot.ChatMessage structs directly (preserves ToolCalls/ToolCallID)
+	msgs := make([]copilot.ChatMessage, 0, len(req.Messages))
 	for _, m := range req.Messages {
 		switch {
 		case m.Role == RoleSystem:
-			msgs = append(msgs, types.ChatMessage{Role: "system", Content: contentBlocksToText(m.Content)})
+			msgs = append(msgs, copilot.ChatMessage{Role: "system", Content: contentBlocksToText(m.Content)})
 		case hasToolResult(m.Content):
-			// Tool result messages: one per tool_result block with role "tool"
 			for _, b := range m.Content {
 				if b.Type == "tool_result" {
-					msgs = append(msgs, types.ChatMessage{
+					msgs = append(msgs, copilot.ChatMessage{
 						Role:       "tool",
 						ToolCallID: b.ToolUseID,
 						Content:    b.Content,
@@ -36,8 +39,7 @@ func (p *CopilotProvider) CompleteChat(ctx context.Context, req ChatRequest) (*C
 				}
 			}
 		case hasToolUse(m.Content):
-			// Assistant message with tool_calls
-			var toolCalls []types.ToolCall
+			var toolCalls []copilot.ToolCall
 			var textParts []string
 			for _, b := range m.Content {
 				switch b.Type {
@@ -46,58 +48,105 @@ func (p *CopilotProvider) CompleteChat(ctx context.Context, req ChatRequest) (*C
 						textParts = append(textParts, b.Text)
 					}
 				case "tool_use":
-					toolCalls = append(toolCalls, types.ToolCall{
+					toolCalls = append(toolCalls, copilot.ToolCall{
 						ID:   b.ID,
 						Type: "function",
-						Function: types.ToolCallFunction{
+						Function: copilot.ToolCallFunction{
 							Name:      b.Name,
 							Arguments: string(b.Input),
 						},
 					})
 				}
 			}
-			msgs = append(msgs, types.ChatMessage{
+			msgs = append(msgs, copilot.ChatMessage{
 				Role:      "assistant",
 				Content:   strings.Join(textParts, "\n"),
 				ToolCalls: toolCalls,
 			})
 		default:
-			msgs = append(msgs, types.ChatMessage{
+			msgs = append(msgs, copilot.ChatMessage{
 				Role:    m.Role,
 				Content: contentBlocksToText(m.Content),
 			})
 		}
 	}
 
-	// Convert tools
-	var toolDefs []types.Tool
+	// Convert tools to copilot format
+	var tools []copilot.Tool
 	for _, t := range req.Tools {
-		toolDefs = append(toolDefs, types.Tool{
-			Name:        t.Name,
-			Description: t.Description,
-			InputSchema: t.InputSchema,
+		tools = append(tools, copilot.Tool{
+			Type: "function",
+			Function: copilot.ToolFunction{
+				Name:        t.Name,
+				Description: t.Description,
+				Parameters:  t.InputSchema,
+			},
 		})
 	}
 
-	opts := types.GenerateOptions{
-		Model:     model,
-		Messages:  msgs,
-		MaxTokens: req.MaxTokens,
-		Stream:    true,
-		Tools:     toolDefs,
+	maxTokens := req.MaxTokens
+	if maxTokens == 0 {
+		maxTokens = copilot.DefaultMaxTokens
 	}
 
-	stream, err := p.provider.GenerateChatCompletion(ctx, opts)
-	if err != nil {
-		return nil, fmt.Errorf("copilot chat completion: %w", err)
+	apiReq := &copilot.ChatCompletionRequest{
+		Model:     model,
+		Messages:  msgs,
+		MaxTokens: maxTokens,
+		Stream:    true,
+		Tools:     tools,
 	}
-	defer stream.Close()
+
+	// Get auth token
+	token, err := p.provider.GetCopilotToken(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("copilot chat: get token: %w", err)
+	}
+
+	// Make streaming HTTP request directly
+	jsonBody, err := json.Marshal(apiReq)
+	if err != nil {
+		return nil, fmt.Errorf("copilot chat: marshal request: %w", err)
+	}
+
+	url := p.provider.GetBaseURL() + "/chat/completions"
+	httpReq, err := http.NewRequestWithContext(ctx, "POST", url, bytes.NewReader(jsonBody))
+	if err != nil {
+		return nil, fmt.Errorf("copilot chat: create request: %w", err)
+	}
+
+	// Set required headers (mirrors library's setCopilotHeaders)
+	httpReq.Header.Set("Authorization", "Bearer "+token)
+	httpReq.Header.Set("Content-Type", "application/json")
+	httpReq.Header.Set("copilot-integration-id", copilot.CopilotIntegrationID)
+	httpReq.Header.Set("editor-version", "vscode/"+copilot.VSCodeVersion)
+	httpReq.Header.Set("editor-plugin-version", copilot.EditorPluginVersion)
+	httpReq.Header.Set("user-agent", copilot.UserAgent)
+	httpReq.Header.Set("openai-intent", copilot.OpenAIIntent)
+	httpReq.Header.Set("x-github-api-version", copilot.GitHubAPIVersion)
+	httpReq.Header.Set("x-request-id", uuid.New().String())
+
+	resp, err := http.DefaultClient.Do(httpReq)
+	if err != nil {
+		return nil, fmt.Errorf("copilot chat: request failed: %w", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		body, _ := io.ReadAll(resp.Body)
+		return nil, fmt.Errorf("copilot chat: API error %d: %s", resp.StatusCode, string(body))
+	}
+
+	// Parse SSE stream using the library's exported stream parser
+	stream := copilot.NewCopilotStream(resp)
+	// Don't defer stream.Close() — it would close resp.Body which we already defer
 
 	var (
 		textContent  string
-		toolCalls    = map[int]*ContentBlock{} // indexed by choice delta index
+		toolCalls    = map[int]*ContentBlock{}
 		finishReason string
-		usage        types.Usage
+		promptTokens int
+		outputTokens int
 	)
 
 	for {
@@ -106,27 +155,28 @@ func (p *CopilotProvider) CompleteChat(ctx context.Context, req ChatRequest) (*C
 			break
 		}
 		if err != nil {
-			return nil, fmt.Errorf("reading copilot chat stream: %w", err)
+			return nil, fmt.Errorf("copilot chat: reading stream: %w", err)
+		}
+
+		if chunk.Done {
+			break
 		}
 
 		textContent += chunk.Content
-		usage = chunk.Usage
+
+		if chunk.Usage.PromptTokens > 0 {
+			promptTokens = chunk.Usage.PromptTokens
+		}
+		if chunk.Usage.CompletionTokens > 0 {
+			outputTokens = chunk.Usage.CompletionTokens
+		}
 
 		for _, choice := range chunk.Choices {
 			if choice.FinishReason != "" {
 				finishReason = choice.FinishReason
 			}
-			// Accumulate tool calls from delta
 			for _, tc := range choice.Delta.ToolCalls {
-				idx := 0 // Use tool call ID as key if available
-				for i, existing := range toolCalls {
-					if existing.ID == tc.ID && tc.ID != "" {
-						idx = i
-						break
-					}
-				}
 				if tc.ID != "" {
-					// First chunk for this tool call - has ID and name
 					toolCalls[len(toolCalls)] = &ContentBlock{
 						Type:  "tool_use",
 						ID:    tc.ID,
@@ -134,7 +184,8 @@ func (p *CopilotProvider) CompleteChat(ctx context.Context, req ChatRequest) (*C
 						Input: json.RawMessage(tc.Function.Arguments),
 					}
 				} else if tc.Function.Arguments != "" {
-					// Subsequent chunks - append arguments
+					// Find the last tool call to append arguments
+					idx := len(toolCalls) - 1
 					if existing, ok := toolCalls[idx]; ok {
 						existing.Input = json.RawMessage(string(existing.Input) + tc.Function.Arguments)
 					}
@@ -171,8 +222,8 @@ func (p *CopilotProvider) CompleteChat(ctx context.Context, req ChatRequest) (*C
 	return &ChatResponse{
 		Content:      blocks,
 		StopReason:   stopReason,
-		PromptTokens: usage.PromptTokens,
-		OutputTokens: usage.CompletionTokens,
+		PromptTokens: promptTokens,
+		OutputTokens: outputTokens,
 	}, nil
 }
 
