@@ -56,7 +56,7 @@ func ChunkFile(fi graph.FileInfo, tokenLimit int, logger *zap.Logger) ([]Chunk, 
 	)
 
 	// Split at division boundaries
-	divs := splitDivisions(content)
+	divs := SplitDivisions(content)
 
 	// Build full preamble from IDENTIFICATION + ENVIRONMENT (for first chunk / single-chunk)
 	fullPreamble := ""
@@ -401,7 +401,7 @@ func ChunkFilePass2(fi graph.FileInfo, opts Pass2ChunkOptions, logger *zap.Logge
 	}
 
 	// Split into divisions
-	divs := splitDivisions(content)
+	divs := SplitDivisions(content)
 
 	// Build full preamble from non-PROCEDURE divisions
 	fullPreamble := ""
@@ -526,9 +526,9 @@ func ChunkFilePass2(fi graph.FileInfo, opts Pass2ChunkOptions, logger *zap.Logge
 
 var divisionRegex = regexp.MustCompile(`(?im)^\s*(IDENTIFICATION|ENVIRONMENT|DATA|PROCEDURE)\s+DIVISION`)
 
-// splitDivisions splits COBOL content into its four divisions.
+// SplitDivisions splits COBOL content into its four divisions.
 // Normalizes continuation lines before matching division headers.
-func splitDivisions(content string) map[string]string {
+func SplitDivisions(content string) map[string]string {
 	content = normalizeContinuations(content)
 	divs := make(map[string]string)
 	locs := divisionRegex.FindAllStringSubmatchIndex(content, -1)

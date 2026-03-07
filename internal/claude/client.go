@@ -78,8 +78,14 @@ func NewClient(provider llm.Provider, cfg config.ClaudeConfig, logger *zap.Logge
 		return nil, fmt.Errorf("parsing pass5 template: %w", err)
 	}
 
-	// Rate limit: ~50 requests per minute to stay within API limits
-	limiter := rate.NewLimiter(rate.Every(time.Second), 2)
+	// Rate limit: ~120 requests per minute to stay within API limits.
+	// DISABLE_RATE_LIMIT=true removes the limit entirely.
+	var limiter *rate.Limiter
+	if cfg.DisableRateLimit {
+		limiter = rate.NewLimiter(rate.Inf, 0)
+	} else {
+		limiter = rate.NewLimiter(rate.Every(time.Second), 2)
+	}
 
 	requestTimeout := cfg.RequestTimeout
 	if requestTimeout == 0 {
@@ -156,9 +162,12 @@ func (c *Client) AnalyzeDeep(ctx context.Context, chunk chunker.Chunk, contextPr
 }
 
 // AnalyzeCrossCutting sends a graph data slice to Claude Opus for Pass 3 cross-cutting analysis.
-func (c *Client) AnalyzeCrossCutting(ctx context.Context, graphSlice string) (string, error) {
+// existingDomains is a formatted list of already-assigned domain names to prevent duplication.
+func (c *Client) AnalyzeCrossCutting(ctx context.Context, graphSlice, existingDomains string) (string, error) {
 	var userMsg bytes.Buffer
-	if err := c.pass3Tmpl.Execute(&userMsg, nil); err != nil {
+	if err := c.pass3Tmpl.Execute(&userMsg, map[string]string{
+		"ExistingDomains": existingDomains,
+	}); err != nil {
 		return "", fmt.Errorf("rendering pass3 template: %w", err)
 	}
 

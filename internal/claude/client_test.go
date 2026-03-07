@@ -73,7 +73,7 @@ func TestAnalyzeCrossCutting_UsesOpusModel(t *testing.T) {
 	}
 	client := newTestClient(t, mock)
 
-	resp, err := client.AnalyzeCrossCutting(context.Background(), "graph data here")
+	resp, err := client.AnalyzeCrossCutting(context.Background(), "graph data here", "")
 	require.NoError(t, err)
 	assert.Contains(t, resp, "domains")
 
