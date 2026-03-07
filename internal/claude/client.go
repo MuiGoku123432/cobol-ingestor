@@ -317,7 +317,19 @@ func (c *Client) completeWithRetry(ctx context.Context, req llm.CompletionReques
 		retryResp, retryErr := c.provider.Complete(retryCtx, retryReq)
 		retryCancel()
 			if retryErr != nil {
-				return "", fmt.Errorf("truncation retry failed: %w", retryErr)
+				lastErr = fmt.Errorf("truncation retry failed: %w", retryErr)
+				c.logger.Warn("truncation retry failed, falling back to outer retry loop",
+					zap.String("model", retryReq.Model),
+					zap.Int("attempt", attempt+1),
+					zap.Error(retryErr),
+				)
+				backoff := time.Duration(math.Pow(2, float64(attempt))) * time.Second
+				select {
+				case <-time.After(backoff):
+				case <-ctx.Done():
+					return "", ctx.Err()
+				}
+				continue
 			}
 			if retryResp.Content == "" {
 				return "", fmt.Errorf("no text content in truncation retry response")

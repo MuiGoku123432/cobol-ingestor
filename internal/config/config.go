@@ -2,6 +2,8 @@ package config
 
 import (
 	"fmt"
+	"os"
+	"path/filepath"
 	"time"
 
 	"github.com/joho/godotenv"
@@ -9,6 +11,7 @@ import (
 )
 
 type Config struct {
+	DataDir   string // COBOL_GRAPH_DATA_DIR — base directory for persistent data (default ~/.cobol-graph)
 	LLM       LLMConfig
 	Claude    ClaudeConfig
 	Neo4j     Neo4jConfig
@@ -91,7 +94,7 @@ func Load() (*Config, error) {
 
 	// Claude model defaults (used by both providers)
 	viper.SetDefault("CLAUDE_OPUS_MODEL", "claude-opus-4-6")
-	viper.SetDefault("CLAUDE_SONNET_MODEL", "claude-sonnet-4-5-20250929")
+	viper.SetDefault("CLAUDE_SONNET_MODEL", "claude-sonnet-4-6")
 	viper.SetDefault("CLAUDE_MAX_RETRIES", 3)
 	viper.SetDefault("CLAUDE_PASS1_MAX_TOKENS", 8192)
 	viper.SetDefault("CLAUDE_PASS2_MAX_TOKENS", 16000)
@@ -121,6 +124,10 @@ func Load() (*Config, error) {
 	// MCP defaults
 	viper.SetDefault("MCP_HTTP_PORT", "")
 
+	// Data directory default
+	defaultDataDir := filepath.Join(func() string { h, _ := os.UserHomeDir(); return h }(), ".cobol-graph")
+	viper.SetDefault("COBOL_GRAPH_DATA_DIR", defaultDataDir)
+
 	// Modernize defaults
 	viper.SetDefault("MODERNIZE_PORT", "8081")
 	viper.SetDefault("MCP_TRANSPORT", "command")
@@ -139,6 +146,7 @@ func Load() (*Config, error) {
 	}
 
 	cfg := &Config{
+		DataDir: viper.GetString("COBOL_GRAPH_DATA_DIR"),
 		LLM: LLMConfig{
 			Provider:              viper.GetString("LLM_PROVIDER"),
 			APIKey:                viper.GetString("ANTHROPIC_API_KEY"),
