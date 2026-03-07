@@ -1,3 +1,118 @@
+// Auth state
+let authPollingInterval = null;
+
+async function checkAuth() {
+  try {
+    const resp = await fetch("/api/auth/status");
+    const data = await resp.json();
+    if (data.authenticated) {
+      hideAuthOverlay();
+      if (data.provider === "copilot") {
+        document.getElementById("logoutBtn").classList.remove("hidden");
+      }
+    } else if (data.provider === "copilot") {
+      showAuthOverlay();
+      if (data.pending) {
+        // Already polling, just show pending state and start status polling
+        document.getElementById("authLogin").classList.add("hidden");
+        document.getElementById("authPending").classList.remove("hidden");
+        startAuthPolling();
+      }
+    }
+  } catch {
+    // Server not ready, retry
+    setTimeout(checkAuth, 2000);
+  }
+}
+
+function showAuthOverlay() {
+  document.getElementById("authOverlay").classList.remove("hidden");
+}
+
+function hideAuthOverlay() {
+  document.getElementById("authOverlay").classList.add("hidden");
+  stopAuthPolling();
+}
+
+async function startLogin() {
+  const loginBtn = document.getElementById("authLogin");
+  const pendingEl = document.getElementById("authPending");
+  const errorEl = document.getElementById("authError");
+
+  errorEl.classList.add("hidden");
+
+  try {
+    const resp = await fetch("/api/auth/device-code", { method: "POST" });
+    const data = await resp.json();
+
+    if (data.authenticated) {
+      hideAuthOverlay();
+      return;
+    }
+
+    if (data.error) {
+      errorEl.textContent = data.error;
+      errorEl.classList.remove("hidden");
+      return;
+    }
+
+    // Show code and link
+    document.getElementById("authCode").textContent = data.user_code;
+    const link = document.getElementById("authLink");
+    link.href = data.verification_uri;
+
+    loginBtn.classList.add("hidden");
+    pendingEl.classList.remove("hidden");
+
+    startAuthPolling();
+  } catch (err) {
+    errorEl.textContent = "Failed to start login: " + err.message;
+    errorEl.classList.remove("hidden");
+  }
+}
+
+function startAuthPolling() {
+  stopAuthPolling();
+  authPollingInterval = setInterval(async () => {
+    try {
+      const resp = await fetch("/api/auth/status");
+      const data = await resp.json();
+      if (data.authenticated) {
+        hideAuthOverlay();
+        if (data.provider === "copilot") {
+          document.getElementById("logoutBtn").classList.remove("hidden");
+        }
+      }
+    } catch {
+      // ignore
+    }
+  }, 2000);
+}
+
+function stopAuthPolling() {
+  if (authPollingInterval) {
+    clearInterval(authPollingInterval);
+    authPollingInterval = null;
+  }
+}
+
+async function logout() {
+  try {
+    await fetch("/api/auth/logout", { method: "POST" });
+    document.getElementById("logoutBtn").classList.add("hidden");
+    // Reset auth overlay state
+    document.getElementById("authLogin").classList.remove("hidden");
+    document.getElementById("authPending").classList.add("hidden");
+    document.getElementById("authError").classList.add("hidden");
+    showAuthOverlay();
+  } catch {
+    // ignore
+  }
+}
+
+// Check auth on load
+checkAuth();
+
 // Client-side message history sent with each request
 let messages = [];
 let isStreaming = false;

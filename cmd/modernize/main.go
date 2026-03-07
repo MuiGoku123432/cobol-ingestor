@@ -7,7 +7,6 @@ import (
 	"os"
 
 	"cobol-ingestor/internal/config"
-	"cobol-ingestor/internal/llm"
 	"cobol-ingestor/internal/modernize"
 	webmod "cobol-ingestor/web/modernize"
 
@@ -24,17 +23,14 @@ func main() {
 		logger.Fatal("loading config", zap.Error(err))
 	}
 
-	// Create LLM provider
-	provider, err := llm.NewProvider(cfg)
-	if err != nil {
-		logger.Fatal("creating LLM provider", zap.Error(err))
-	}
-	defer provider.Close()
-
-	chatProvider, ok := provider.(llm.ChatProvider)
-	if !ok {
-		logger.Fatal("LLM provider does not support ChatProvider interface",
-			zap.String("provider", provider.Name()))
+	// Create provider state with deferred init for Copilot auth flow
+	ps := modernize.NewProviderState(cfg, logger)
+	if ps.TryInit() {
+		logger.Info("LLM provider ready at startup")
+	} else if cfg.LLM.Provider != "copilot" {
+		logger.Fatal("LLM provider init failed (API key required for non-copilot providers)")
+	} else {
+		logger.Info("copilot provider deferred, browser auth required")
 	}
 
 	// Resolve chat model
@@ -63,7 +59,6 @@ func main() {
 		if serverBin == "" {
 			serverBin = "./bin/cobol-graph-mcp"
 		}
-		// Pass current environment to the subprocess
 		mcpClient, err = modernize.NewMCPClient(ctx, serverBin, os.Environ())
 	}
 	if err != nil {
@@ -90,11 +85,21 @@ func main() {
 		c.Data(http.StatusOK, "application/javascript; charset=utf-8", data)
 	})
 
+	// Auth endpoints
+	r.GET("/api/auth/status", modernize.AuthStatusHandler(ps))
+	r.POST("/api/auth/device-code", modernize.DeviceCodeHandler(ps))
+	r.POST("/api/auth/logout", modernize.LogoutHandler(ps))
+
 	// API endpoints
-	r.POST("/api/chat", modernize.ChatHandler(chatProvider, mcpClient, chatModel, chatMaxTokens))
+	r.POST("/api/chat", modernize.ChatHandler(ps, mcpClient, chatModel, chatMaxTokens))
 
 	r.GET("/health", func(c *gin.Context) {
-		c.JSON(http.StatusOK, gin.H{"status": "ok", "provider": provider.Name(), "model": chatModel})
+		c.JSON(http.StatusOK, gin.H{
+			"status":        "ok",
+			"provider":      cfg.LLM.Provider,
+			"authenticated": ps.IsReady(),
+			"model":         chatModel,
+		})
 	})
 
 	port := cfg.Modernize.Port

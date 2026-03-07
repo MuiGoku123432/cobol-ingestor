@@ -13,10 +13,16 @@ import (
 const maxToolIterations = 10
 
 // ChatHandler creates a Gin handler for the chat endpoint.
-func ChatHandler(provider llm.ChatProvider, mcpClient *MCPClient, model string, maxTokens int) gin.HandlerFunc {
+// Accepts *ProviderState for deferred provider initialization (Copilot auth flow).
+func ChatHandler(ps *ProviderState, mcpClient *MCPClient, model string, maxTokens int) gin.HandlerFunc {
 	tools := GetToolDefinitions()
 
 	return func(c *gin.Context) {
+		provider := ps.Get()
+		if provider == nil {
+			c.JSON(http.StatusUnauthorized, gin.H{"error": "not authenticated"})
+			return
+		}
 		var req struct {
 			Messages       []chatInputMessage `json:"messages"`
 			TargetLanguage string             `json:"targetLanguage"`
