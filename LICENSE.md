@@ -6,17 +6,18 @@ Business Source License 1.1
 The Licensed Work is © 2026 Sentinovo. All Rights Reserved.
 
 **Additional Use Grant**: You may make production use of the Licensed
-Work for your own internal business operations, provided that you may
-not use the Licensed Work as a commercial hosted service that competes
-with Sentinovo's paid offerings. A "Competing Service" is a commercial
-offering that allows third parties (other than your employees and
-individual contractors) to access the functionality of the Licensed Work
-as part of a managed or hosted service. For clarity, this restriction
-applies to providers of infrastructure services, cloud services, hosting
-services, and similarly situated third parties (including affiliates of
-such entities) that would offer the Licensed Work in connection with a
-broader service offering. Internal use, development, testing, and
-non-commercial use are always permitted.
+Work for your own internal business operations, including development,
+testing, staging, and production environments operated by or on behalf of
+your organization. You may not use the Licensed Work to provide a
+Competing Service. A "Competing Service" is a commercial offering that
+allows third parties (other than your employees and individual
+contractors) to access the functionality of the Licensed Work as part of
+a managed or hosted service. For clarity, this restriction applies to
+providers of infrastructure services, cloud services, hosting services,
+and similarly situated third parties (including affiliates of such
+entities) that would offer the Licensed Work in connection with a broader
+service offering. Internal use, development, testing, and non-commercial
+use are always permitted.
 
 **Change Date**: 2032-03-05
 
