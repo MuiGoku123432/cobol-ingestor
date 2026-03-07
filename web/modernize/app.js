@@ -158,6 +158,21 @@ checkAuth();
 // Client-side message history sent with each request
 let messages = [];
 let isStreaming = false;
+let swarmEnabled = false;
+
+function toggleSwarm() {
+  swarmEnabled = !swarmEnabled;
+  const toggle = document.getElementById("swarmToggle");
+  const thumb = document.getElementById("swarmToggleThumb");
+  toggle.setAttribute("aria-checked", swarmEnabled);
+  if (swarmEnabled) {
+    toggle.classList.add("swarm-active");
+    thumb.classList.add("swarm-thumb");
+  } else {
+    toggle.classList.remove("swarm-active");
+    thumb.classList.remove("swarm-thumb");
+  }
+}
 
 // Framework options per language
 const frameworks = {
@@ -247,6 +262,64 @@ function updateToolIndicator(id, result, isError) {
   }
 }
 
+function addAgentCard(id, name) {
+  const container = document.getElementById("chatMessages");
+  // Remove placeholder if present
+  const placeholder = container.querySelector(".text-center");
+  if (placeholder) placeholder.remove();
+
+  const card = document.createElement("div");
+  card.id = `agent-${id}`;
+  card.className = "agent-card";
+  card.innerHTML = `
+    <div class="agent-card-header" onclick="toggleAgentDetail('${id}')">
+      <span class="pulse-dot inline-block w-2.5 h-2.5 rounded-full bg-amber-400 shrink-0"></span>
+      <span class="text-sm font-medium text-gray-200">${escapeHtml(name)}</span>
+      <span class="agent-status text-xs text-gray-500 ml-auto">Investigating...</span>
+      <svg class="w-4 h-4 text-gray-500 transition-transform agent-chevron" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 9l-7 7-7-7"/>
+      </svg>
+    </div>
+    <div class="agent-card-detail mt-2 text-xs text-gray-400 space-y-1"></div>
+  `;
+  container.appendChild(card);
+  container.scrollTop = container.scrollHeight;
+}
+
+function toggleAgentDetail(id) {
+  const card = document.getElementById(`agent-${id}`);
+  if (!card) return;
+  const detail = card.querySelector(".agent-card-detail");
+  detail.classList.toggle("expanded");
+  const chevron = card.querySelector(".agent-chevron");
+  if (detail.classList.contains("expanded")) {
+    chevron.style.transform = "rotate(180deg)";
+  } else {
+    chevron.style.transform = "";
+  }
+}
+
+function updateAgentCard(id, status, isDone, isError) {
+  const card = document.getElementById(`agent-${id}`);
+  if (!card) return;
+  const dot = card.querySelector(".pulse-dot");
+  const statusEl = card.querySelector(".agent-status");
+  if (isDone) {
+    dot.classList.remove("pulse-dot", "bg-amber-400");
+    dot.classList.add(isError ? "bg-red-400" : "bg-green-400");
+  }
+  if (statusEl) statusEl.textContent = status;
+}
+
+function appendAgentDetail(id, html) {
+  const card = document.getElementById(`agent-${id}`);
+  if (!card) return;
+  const detail = card.querySelector(".agent-card-detail");
+  const entry = document.createElement("div");
+  entry.innerHTML = html;
+  detail.appendChild(entry);
+}
+
 function escapeHtml(text) {
   const div = document.createElement("div");
   div.textContent = text;
@@ -278,7 +351,8 @@ async function sendMessage(e) {
   let assistantText = "";
 
   try {
-    const response = await fetch("/api/chat", {
+    const endpoint = swarmEnabled ? "/api/swarm" : "/api/chat";
+    const response = await fetch(endpoint, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
@@ -351,6 +425,32 @@ async function sendMessage(e) {
             data.result || data.error,
             !!data.error
           );
+          break;
+
+        case "agent_start":
+          addAgentCard(data.id, data.name);
+          break;
+
+        case "agent_tool_start":
+          updateAgentCard(data.id, `Calling ${data.toolName}...`, false, false);
+          appendAgentDetail(data.id, `<span class="text-amber-300">&#9654;</span> <code class="bg-gray-800 px-1 rounded text-amber-300">${escapeHtml(data.toolName)}</code>`);
+          break;
+
+        case "agent_tool_result":
+          updateAgentCard(data.id, "Analyzing...", false, false);
+          appendAgentDetail(data.id, `<span class="text-green-400">&#10003;</span> Result: <span class="text-gray-500">${escapeHtml((data.result || "").substring(0, 120))}</span>`);
+          break;
+
+        case "agent_progress":
+          updateAgentCard(data.id, "Writing summary...", false, false);
+          break;
+
+        case "agent_complete":
+          updateAgentCard(data.id, "Complete", true, (data.summary || "").startsWith("Error:"));
+          break;
+
+        case "synthesis_start":
+          addMessage("assistant", '<span class="text-indigo-400 text-sm">Compiling results from all agents...</span>');
           break;
 
         case "done":

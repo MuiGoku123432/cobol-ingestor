@@ -20,6 +20,12 @@
     .tool-indicator { transition: all 0.3s ease; }
     @keyframes pulse-dot { 0%, 100% { opacity: 1; } 50% { opacity: 0.4; } }
     .pulse-dot { animation: pulse-dot 1.5s ease-in-out infinite; }
+    .swarm-active { background-color: rgb(79 70 229); }
+    .swarm-active .swarm-thumb { background-color: white; transform: translateX(1.25rem); }
+    .agent-card { border: 1px solid rgb(55 65 81); border-radius: 0.75rem; padding: 0.75rem; margin: 0.25rem 0; background: rgb(17 24 39); }
+    .agent-card-header { display: flex; align-items: center; gap: 0.5rem; cursor: pointer; }
+    .agent-card-detail { max-height: 0; overflow: hidden; transition: max-height 0.3s ease; }
+    .agent-card-detail.expanded { max-height: 500px; overflow-y: auto; }
   </style>
 </head>
 <body class="h-full bg-gray-950 text-gray-100 flex">
@@ -93,6 +99,14 @@
         <select id="modelSelect" class="w-full bg-gray-800 border border-gray-700 rounded-lg px-3 py-2 text-sm focus:ring-2 focus:ring-indigo-500 focus:border-transparent" disabled>
           <option value="">Loading models...</option>
         </select>
+      </div>
+
+      <div class="flex items-center justify-between">
+        <label class="text-sm font-medium text-gray-400">Agent Swarm</label>
+        <button id="swarmToggle" onclick="toggleSwarm()" role="switch" aria-checked="false"
+          class="relative w-11 h-6 bg-gray-700 rounded-full transition-colors focus:ring-2 focus:ring-indigo-500">
+          <span id="swarmToggleThumb" class="absolute left-0.5 top-0.5 w-5 h-5 bg-gray-400 rounded-full transition-transform"></span>
+        </button>
       </div>
     </div>
 

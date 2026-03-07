@@ -99,6 +99,7 @@ func main() {
 
 	// API endpoints
 	r.POST("/api/chat", modernize.ChatHandler(ps, mcpClient, chatModel, chatMaxTokens))
+	r.POST("/api/swarm", modernize.SwarmHandler(ps, mcpClient, chatModel, chatMaxTokens))
 
 	r.GET("/health", func(c *gin.Context) {
 		c.JSON(http.StatusOK, gin.H{
