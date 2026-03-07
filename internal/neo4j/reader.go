@@ -5,6 +5,7 @@ import (
 	"fmt"
 
 	"github.com/neo4j/neo4j-go-driver/v5/neo4j"
+	"go.uber.org/zap"
 )
 
 // Reader defines read-only Neo4j queries for the API layer.
@@ -35,6 +36,24 @@ type Reader interface {
 	GetParagraphFlow(ctx context.Context, programID string) ([]ParagraphFlowInfo, error)
 	GetDataFlow(ctx context.Context, programID string) ([]DataFlowInfo, error)
 	GetDataHierarchy(ctx context.Context, programID string) ([]DataHierarchyInfo, error)
+	// Phase 1: Dead paragraph detection
+	GetDeadParagraphs(ctx context.Context, programID string) ([]DeadParagraphInfo, error)
+	GetDeadCodeSummary(ctx context.Context) ([]DeadCodeSummaryInfo, error)
+	// Phase 2: JCL analysis
+	ListJCLJobs(ctx context.Context) ([]JCLJobInfo, error)
+	GetJCLJob(ctx context.Context, jobName string) (*JCLJobDetail, error)
+	GetProgramJCL(ctx context.Context, programID string) (*ProgramJCLInfo, error)
+	GetDatasetUsage(ctx context.Context, dsname string) ([]DatasetUsageInfo, error)
+	// Phase 3: DB table access
+	ListDBTables(ctx context.Context) ([]DBTableInfo, error)
+	GetTableUsage(ctx context.Context, tableName string) (*TableUsageInfo, error)
+	GetProgramTableAccess(ctx context.Context, programID string) (*ProgramTableAccessInfo, error)
+	// Phase 4: Cross-program data flow
+	GetCrossProgramDataFlow(ctx context.Context, programID string) ([]CrossProgramFlowInfo, error)
+	TraceFieldImpact(ctx context.Context, programID, fieldName string) ([]FieldImpactInfo, error)
+	GetSharedDataChannels(ctx context.Context) ([]SharedDataChannelInfo, error)
+	// Phase 5: Validation report
+	GetValidationReport(ctx context.Context) (*ValidationResult, error)
 }
 
 // Ensure Client implements Reader.
@@ -374,6 +393,8 @@ func (c *Client) GetDashboardStats(ctx context.Context) (*DashboardStats, error)
 		{"MATCH ()-[r]->() RETURN count(r) AS c", &stats.RelationshipCount},
 		{"MATCH (p:Program) WHERE NOT ()-[:CALLS]->(p) RETURN count(p) AS c", &stats.OrphanCount},
 		{"MATCH (d:BusinessDomain) RETURN count(d) AS c", &stats.DomainCount},
+		{"MATCH (dd:DDCard) RETURN count(dd) AS c", &stats.DDCardCount},
+		{"MATCH (t:DBTable) RETURN count(t) AS c", &stats.DBTableCount},
 	}
 
 	for _, q := range queries {
@@ -902,6 +923,11 @@ func (c *Client) GetDataHierarchy(ctx context.Context, programID string) ([]Data
 	}
 
 	return items, nil
+}
+
+func (c *Client) GetValidationReport(ctx context.Context) (*ValidationResult, error) {
+	w := NewBatchWriter(c, 500, zap.NewNop())
+	return w.RunValidation(ctx)
 }
 
 // Helper methods

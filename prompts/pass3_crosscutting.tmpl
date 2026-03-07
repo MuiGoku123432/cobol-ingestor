@@ -69,5 +69,12 @@ Rules:
 - Modernization scores range from 0.0 (poor candidate) to 1.0 (ideal candidate)
 - Volume estimates should cover all programs in the input
 - Volume estimate values must be exactly HIGH, MEDIUM, or LOW
+{{if .ExistingDomains}}
+IMPORTANT: The following business domains have already been assigned to other programs.
+You MUST reuse these exact domain names when they apply, rather than inventing synonyms.
+Only create a new domain if none of the existing ones fit.
 
+Existing domains:
+{{.ExistingDomains}}
+{{end}}
 Analyze the following programs:

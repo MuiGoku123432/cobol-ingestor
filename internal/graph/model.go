@@ -39,6 +39,11 @@ const (
 	RelExecutesSQL  RelType = "EXECUTES_SQL"
 	RelExecutesCICS        RelType = "EXECUTES_CICS"
 	RelExternalInterface   RelType = "HAS_INTERFACE"
+	RelStepOf              RelType = "STEP_OF"
+	RelUsesDataset         RelType = "USES_DATASET"
+	RelMapsToFile          RelType = "MAPS_TO_FILE"
+	RelAccesses            RelType = "ACCESSES"
+	RelDataFlowsTo         RelType = "DATA_FLOWS_TO"
 )
 
 // Relationship is a generic edge in the graph.
@@ -140,8 +145,12 @@ type CICSTransaction struct {
 
 // JCLJob represents a JCL job definition.
 type JCLJob struct {
-	ID      string
-	JobName string
+	ID       string
+	JobName  string
+	Class    string
+	MsgClass string
+	Region   string
+	Cond     string
 }
 
 // JCLStep represents a JCL step.
@@ -149,7 +158,10 @@ type JCLStep struct {
 	ID       string
 	StepName string
 	Program  string
-	JobID    string
+	Proc     string
+	Cond     string
+	JobName  string
+	Order    int
 }
 
 // BusinessDomain represents a business domain cluster (Pass 3).
@@ -189,6 +201,7 @@ type Pass1Result struct {
 	SQLStatements      []SQLStatement
 	CICSTxns           []CICSTransaction
 	ExternalInterfaces []ExternalInterface
+	DBTables           []DBTable
 	Relationships      []Relationship
 }
 
@@ -337,4 +350,55 @@ type RiskFlag struct {
 	RiskType  string
 	Details   string
 	Score     float64
+}
+
+// DDCard represents a JCL DD card (dataset definition).
+type DDCard struct {
+	ID       string
+	DDName   string
+	DSName   string
+	Disp     string
+	IsInput  bool
+	IsOutput bool
+	JobName  string
+	StepName string
+}
+
+// JCLAnalysisResult aggregates JCL extraction results.
+type JCLAnalysisResult struct {
+	SourceFile string
+	Jobs       []JCLJob
+	Steps      []JCLStep
+	DDCards    []DDCard
+	Relationships []Relationship
+}
+
+// DBTable represents a database table accessed by COBOL programs.
+type DBTable struct {
+	ID         string
+	Name       string
+	Schema     string
+	Columns    []string
+	Operations []string
+}
+
+// CrossProgramFlow represents a data flow between programs.
+type CrossProgramFlow struct {
+	FromProgram string
+	ToProgram   string
+	Channel     string // FILE, DB2, LINKAGE, CICS_COMMAREA
+	Fields      []FieldPair
+	SharedResource string // file name, table name, etc.
+}
+
+// FieldPair maps a source field to a target field.
+type FieldPair struct {
+	SourceField string
+	TargetField string
+	Transform   string // DIRECT_MOVE, COMPUTE, etc.
+}
+
+// Pass4Result aggregates cross-program data flow analysis.
+type Pass4Result struct {
+	Flows []CrossProgramFlow
 }

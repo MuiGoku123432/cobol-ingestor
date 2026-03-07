@@ -44,3 +44,20 @@ type GetBusinessDomainInput struct {
 type ListRiskProgramsInput struct {
 	MinScore float64 `json:"minScore,omitempty" jsonschema:"Minimum risk score threshold (default 0.5)"`
 }
+
+type GetJCLJobInput struct {
+	JobName string `json:"jobName" jsonschema:"The JCL job name"`
+}
+
+type GetDatasetUsageInput struct {
+	DSName string `json:"dsname" jsonschema:"Dataset name or substring to search"`
+}
+
+type GetTableUsageInput struct {
+	TableName string `json:"tableName" jsonschema:"The database table name"`
+}
+
+type TraceFieldImpactInput struct {
+	ProgramID string `json:"programId" jsonschema:"The program ID"`
+	FieldName string `json:"fieldName" jsonschema:"The field name to trace"`
+}

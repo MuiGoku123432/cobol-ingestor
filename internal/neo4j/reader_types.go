@@ -84,6 +84,8 @@ type DashboardStats struct {
 	RelationshipCount     int `json:"relationshipCount"`
 	OrphanCount           int `json:"orphanCount"`
 	DomainCount           int `json:"domainCount"`
+	DDCardCount           int `json:"ddCardCount"`
+	DBTableCount          int `json:"dbTableCount"`
 }
 
 // SearchResult holds a single full-text search match.
@@ -268,6 +270,139 @@ type DataHierarchyInfo struct {
 	ParentLevel int    `json:"parentLevel,omitempty"`
 	Redefines   string `json:"redefines,omitempty"`
 	Relation    string `json:"relation"`
+}
+
+// DeadParagraphInfo holds dead paragraph details.
+type DeadParagraphInfo struct {
+	Name        string `json:"name"`
+	ProgramID   string `json:"programId"`
+	Reason      string `json:"reason"`
+	Description string `json:"description,omitempty"`
+	Category    string `json:"category,omitempty"`
+}
+
+// DeadCodeSummaryInfo holds aggregate dead paragraph counts per program.
+type DeadCodeSummaryInfo struct {
+	ProgramID       string `json:"programId"`
+	TotalParagraphs int    `json:"totalParagraphs"`
+	DeadParagraphs  int    `json:"deadParagraphs"`
+}
+
+// JCLJobInfo holds JCL job details for API responses.
+type JCLJobInfo struct {
+	JobName   string `json:"jobName"`
+	Class     string `json:"class,omitempty"`
+	MsgClass  string `json:"msgclass,omitempty"`
+	StepCount int    `json:"stepCount"`
+}
+
+// JCLJobDetail holds full JCL job detail.
+type JCLJobDetail struct {
+	JobName  string         `json:"jobName"`
+	Class    string         `json:"class,omitempty"`
+	MsgClass string         `json:"msgclass,omitempty"`
+	Steps    []JCLStepInfo  `json:"steps"`
+}
+
+// JCLStepInfo holds JCL step details.
+type JCLStepInfo struct {
+	StepName string       `json:"stepName"`
+	Program  string       `json:"program,omitempty"`
+	Proc     string       `json:"proc,omitempty"`
+	Cond     string       `json:"cond,omitempty"`
+	Order    int          `json:"order"`
+	DDCards  []DDCardInfo `json:"ddCards,omitempty"`
+}
+
+// DDCardInfo holds DD card details.
+type DDCardInfo struct {
+	DDName   string `json:"ddName"`
+	DSName   string `json:"dsname,omitempty"`
+	Disp     string `json:"disp,omitempty"`
+	IsInput  bool   `json:"isInput"`
+	IsOutput bool   `json:"isOutput"`
+}
+
+// ProgramJCLInfo holds reverse JCL lookup results.
+type ProgramJCLInfo struct {
+	ProgramID string   `json:"programId"`
+	Jobs      []string `json:"jobs"`
+	Steps     []string `json:"steps"`
+}
+
+// DatasetUsageInfo holds dataset usage details.
+type DatasetUsageInfo struct {
+	DSName   string   `json:"dsname"`
+	Jobs     []string `json:"jobs"`
+	Steps    []string `json:"steps"`
+	IsInput  bool     `json:"isInput"`
+	IsOutput bool     `json:"isOutput"`
+}
+
+// DBTableInfo holds database table details.
+type DBTableInfo struct {
+	Name       string `json:"name"`
+	Schema     string `json:"schema,omitempty"`
+	AccessCount int   `json:"accessCount"`
+}
+
+// TableUsageInfo holds table usage details.
+type TableUsageInfo struct {
+	TableName  string              `json:"tableName"`
+	Programs   []TableAccessInfo   `json:"programs"`
+}
+
+// TableAccessInfo holds per-program table access info.
+type TableAccessInfo struct {
+	ProgramID  string   `json:"programId"`
+	Operations []string `json:"operations"`
+	Columns    []string `json:"columns,omitempty"`
+}
+
+// ProgramTableAccessInfo holds tables accessed by a program.
+type ProgramTableAccessInfo struct {
+	ProgramID string          `json:"programId"`
+	Tables    []TableAccessDetail `json:"tables"`
+}
+
+// TableAccessDetail holds table access details for a program.
+type TableAccessDetail struct {
+	Name       string   `json:"name"`
+	Operations []string `json:"operations"`
+	Columns    []string `json:"columns,omitempty"`
+}
+
+// CrossProgramFlowInfo holds cross-program data flow details.
+type CrossProgramFlowInfo struct {
+	ProgramID      string `json:"programId"`
+	OtherProgram   string `json:"otherProgram"`
+	Channel        string `json:"channel"`
+	Direction      string `json:"direction"`
+	Fields         string `json:"fields,omitempty"`
+	SharedResource string `json:"sharedResource,omitempty"`
+}
+
+// FieldImpactInfo holds field impact trace results.
+type FieldImpactInfo struct {
+	ProgramID    string            `json:"programId"`
+	FieldName    string            `json:"fieldName"`
+	IntraTargets []string          `json:"intraTargets,omitempty"`
+	CrossFlows   []CrossFlowTarget `json:"crossFlows,omitempty"`
+}
+
+// CrossFlowTarget holds a cross-program flow target.
+type CrossFlowTarget struct {
+	Callee  string `json:"callee"`
+	Channel string `json:"channel"`
+	Fields  string `json:"fields,omitempty"`
+}
+
+// SharedDataChannelInfo holds shared data channel details.
+type SharedDataChannelInfo struct {
+	Resource string   `json:"resource"`
+	Channel  string   `json:"channel"`
+	Writers  []string `json:"writers"`
+	Readers  []string `json:"readers"`
 }
 
 // Filter holds common query filters.

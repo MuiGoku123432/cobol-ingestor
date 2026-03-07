@@ -1,0 +1,156 @@
+<!DOCTYPE html>
+<html lang="en" class="h-full">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>COBOL Modernization Chat</title>
+  <script src="https://cdn.tailwindcss.com"></script>
+  <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/styles/github-dark.min.css">
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/highlight.min.js"></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/marked/12.0.1/marked.min.js"></script>
+  <style>
+    .message-content pre { margin: 0.5rem 0; border-radius: 0.5rem; overflow-x: auto; }
+    .message-content code { font-size: 0.875rem; }
+    .message-content p { margin: 0.25rem 0; }
+    .message-content ul, .message-content ol { margin: 0.25rem 0; padding-left: 1.5rem; }
+    .message-content h1, .message-content h2, .message-content h3 { margin-top: 0.75rem; margin-bottom: 0.25rem; font-weight: 600; }
+    .message-content h1 { font-size: 1.25rem; }
+    .message-content h2 { font-size: 1.125rem; }
+    .message-content h3 { font-size: 1rem; }
+    .tool-indicator { transition: all 0.3s ease; }
+    @keyframes pulse-dot { 0%, 100% { opacity: 1; } 50% { opacity: 0.4; } }
+    .pulse-dot { animation: pulse-dot 1.5s ease-in-out infinite; }
+    .swarm-active { background-color: rgb(79 70 229); }
+    .swarm-active .swarm-thumb { background-color: white; transform: translateX(1.25rem); }
+    .agent-card { border: 1px solid rgb(55 65 81); border-radius: 0.75rem; padding: 0.75rem; margin: 0.25rem 0; background: rgb(17 24 39); }
+    .agent-card-header { display: flex; align-items: center; gap: 0.5rem; cursor: pointer; }
+    .agent-card-detail { max-height: 0; overflow: hidden; transition: max-height 0.3s ease; }
+    .agent-card-detail.expanded { max-height: 500px; overflow-y: auto; }
+  </style>
+</head>
+<body class="h-full bg-gray-950 text-gray-100 flex">
+
+  <!-- Auth Overlay -->
+  <div id="authOverlay" class="hidden fixed inset-0 z-50 bg-gray-950/90 flex items-center justify-center">
+    <div class="bg-gray-900 border border-gray-700 rounded-2xl p-8 max-w-md w-full mx-4 text-center space-y-6">
+      <div>
+        <svg class="w-12 h-12 mx-auto text-indigo-400 mb-4" fill="currentColor" viewBox="0 0 24 24">
+          <path d="M12 0c-6.626 0-12 5.373-12 12 0 5.302 3.438 9.8 8.207 11.387.599.111.793-.261.793-.577v-2.234c-3.338.726-4.033-1.416-4.033-1.416-.546-1.387-1.333-1.756-1.333-1.756-1.089-.745.083-.729.083-.729 1.205.084 1.839 1.237 1.839 1.237 1.07 1.834 2.807 1.304 3.492.997.107-.775.418-1.305.762-1.604-2.665-.305-5.467-1.334-5.467-5.931 0-1.311.469-2.381 1.236-3.221-.124-.303-.535-1.524.117-3.176 0 0 1.008-.322 3.301 1.23.957-.266 1.983-.399 3.003-.404 1.02.005 2.047.138 3.006.404 2.291-1.552 3.297-1.23 3.297-1.23.653 1.653.242 2.874.118 3.176.77.84 1.235 1.911 1.235 3.221 0 4.609-2.807 5.624-5.479 5.921.43.372.823 1.102.823 2.222v3.293c0 .319.192.694.801.576 4.765-1.589 8.199-6.086 8.199-11.386 0-6.627-5.373-12-12-12z"/>
+        </svg>
+        <h2 class="text-xl font-bold text-white">Login with GitHub Copilot</h2>
+        <p class="text-gray-400 text-sm mt-2">Authenticate to start using the COBOL Modernizer</p>
+      </div>
+
+      <div id="authLogin">
+        <button onclick="startLogin()" class="w-full bg-indigo-600 hover:bg-indigo-500 text-white font-medium py-3 px-6 rounded-xl transition-colors">
+          Login with GitHub
+        </button>
+      </div>
+
+      <div id="authPending" class="hidden space-y-4">
+        <p class="text-gray-300 text-sm">Enter this code on GitHub:</p>
+        <div id="authCode" class="text-3xl font-mono font-bold text-indigo-400 tracking-widest"></div>
+        <a id="authLink" href="#" target="_blank" rel="noopener" class="inline-block bg-gray-800 hover:bg-gray-700 text-indigo-400 text-sm py-2 px-4 rounded-lg transition-colors">
+          Open GitHub
+        </a>
+        <div class="flex items-center justify-center gap-2 text-gray-500 text-sm">
+          <svg class="w-4 h-4 animate-spin" fill="none" viewBox="0 0 24 24">
+            <circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"></circle>
+            <path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z"></path>
+          </svg>
+          Waiting for authorization...
+        </div>
+      </div>
+
+      <div id="authError" class="hidden text-red-400 text-sm"></div>
+    </div>
+  </div>
+
+  <!-- Sidebar -->
+  <aside class="w-72 bg-gray-900 border-r border-gray-800 flex flex-col p-4 shrink-0">
+    <h1 class="text-lg font-bold text-white mb-6 flex items-center gap-2">
+      <svg class="w-6 h-6 text-indigo-400" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M8 9l3 3-3 3m5 0h3M5 20h14a2 2 0 002-2V6a2 2 0 00-2-2H5a2 2 0 00-2 2v12a2 2 0 002 2z"/>
+      </svg>
+      COBOL Modernizer
+    </h1>
+
+    <div class="space-y-4">
+      <div>
+        <label class="block text-sm font-medium text-gray-400 mb-1">Target Language</label>
+        <select id="targetLanguage" class="w-full bg-gray-800 border border-gray-700 rounded-lg px-3 py-2 text-sm focus:ring-2 focus:ring-indigo-500 focus:border-transparent">
+          <option value="Java">Java</option>
+          <option value="C#">C#</option>
+          <option value="Python">Python</option>
+          <option value="Go">Go</option>
+          <option value="TypeScript">TypeScript</option>
+          <option value="Kotlin">Kotlin</option>
+        </select>
+      </div>
+
+      <div>
+        <label class="block text-sm font-medium text-gray-400 mb-1">Framework</label>
+        <select id="framework" class="w-full bg-gray-800 border border-gray-700 rounded-lg px-3 py-2 text-sm focus:ring-2 focus:ring-indigo-500 focus:border-transparent">
+        </select>
+      </div>
+
+      <div id="modelSelectContainer" class="hidden">
+        <label class="block text-sm font-medium text-gray-400 mb-1">Model</label>
+        <select id="modelSelect" class="w-full bg-gray-800 border border-gray-700 rounded-lg px-3 py-2 text-sm focus:ring-2 focus:ring-indigo-500 focus:border-transparent" disabled>
+          <option value="">Loading models...</option>
+        </select>
+      </div>
+
+      <div class="flex items-center justify-between">
+        <label class="text-sm font-medium text-gray-400">Agent Swarm</label>
+        <button id="swarmToggle" onclick="toggleSwarm()" role="switch" aria-checked="false"
+          class="relative w-11 h-6 bg-gray-700 rounded-full transition-colors focus:ring-2 focus:ring-indigo-500">
+          <span id="swarmToggleThumb" class="absolute left-0.5 top-0.5 w-5 h-5 bg-gray-400 rounded-full transition-transform"></span>
+        </button>
+      </div>
+    </div>
+
+    <div class="mt-auto pt-4 border-t border-gray-800 space-y-2">
+      <button onclick="clearChat()" class="w-full bg-gray-800 hover:bg-gray-700 text-gray-300 text-sm py-2 px-3 rounded-lg transition-colors">
+        Clear Chat
+      </button>
+      <button id="logoutBtn" onclick="logout()" class="hidden w-full bg-gray-800 hover:bg-red-900/50 text-gray-400 hover:text-red-300 text-sm py-2 px-3 rounded-lg transition-colors">
+        Logout
+      </button>
+    </div>
+  </aside>
+
+  <!-- Main Chat Area -->
+  <main class="flex-1 flex flex-col min-w-0">
+    <!-- Messages -->
+    <div id="chatMessages" class="flex-1 overflow-y-auto p-6 space-y-4">
+      <div class="text-center text-gray-500 mt-20">
+        <p class="text-lg">Ask about your COBOL programs</p>
+        <p class="text-sm mt-1">I'll use the graph database to understand and translate them</p>
+      </div>
+    </div>
+
+    <!-- Input -->
+    <div class="border-t border-gray-800 p-4">
+      <form id="chatForm" onsubmit="sendMessage(event)" class="flex gap-3 max-w-4xl mx-auto">
+        <input
+          id="chatInput"
+          type="text"
+          placeholder="Ask about a COBOL program..."
+          class="flex-1 bg-gray-800 border border-gray-700 rounded-xl px-4 py-3 text-sm focus:ring-2 focus:ring-indigo-500 focus:border-transparent placeholder-gray-500"
+          autocomplete="off"
+        >
+        <button
+          type="submit"
+          id="sendBtn"
+          class="bg-indigo-600 hover:bg-indigo-500 text-white px-5 py-3 rounded-xl text-sm font-medium transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
+        >
+          Send
+        </button>
+      </form>
+    </div>
+  </main>
+
+  <script src="app.js"></script>
+</body>
+</html>
