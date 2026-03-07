@@ -3,6 +3,7 @@ package cache
 import (
 	"database/sql"
 	"fmt"
+	"strings"
 	"sync"
 	"time"
 
@@ -118,6 +119,106 @@ func (c *Cache) MarkProcessedForPass(path, hash string, pass int) error {
 		return fmt.Errorf("updating pass cache: %w", err)
 	}
 	return nil
+}
+
+// BatchIsChanged returns the file paths whose hash differs from the cache (or are absent).
+func (c *Cache) BatchIsChanged(pathHashes map[string]string) ([]string, error) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	if len(pathHashes) == 0 {
+		return nil, nil
+	}
+
+	// Build query with placeholders
+	paths := make([]string, 0, len(pathHashes))
+	for p := range pathHashes {
+		paths = append(paths, p)
+	}
+
+	placeholders := make([]string, len(paths))
+	args := make([]any, len(paths))
+	for i, p := range paths {
+		placeholders[i] = "?"
+		args[i] = p
+	}
+
+	query := "SELECT file_path, content_hash FROM file_cache WHERE file_path IN (" +
+		strings.Join(placeholders, ",") + ")"
+	rows, err := c.db.Query(query, args...)
+	if err != nil {
+		return nil, fmt.Errorf("batch cache query: %w", err)
+	}
+	defer rows.Close()
+
+	cached := make(map[string]string)
+	for rows.Next() {
+		var path, hash string
+		if err := rows.Scan(&path, &hash); err != nil {
+			return nil, fmt.Errorf("scanning cache row: %w", err)
+		}
+		cached[path] = hash
+	}
+
+	var changed []string
+	for _, p := range paths {
+		storedHash, ok := cached[p]
+		if !ok || storedHash != pathHashes[p] {
+			changed = append(changed, p)
+		}
+	}
+
+	return changed, nil
+}
+
+// BatchIsChangedForPass returns file paths whose hash differs from the pass cache (or are absent).
+func (c *Cache) BatchIsChangedForPass(pathHashes map[string]string, pass int) ([]string, error) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	if len(pathHashes) == 0 {
+		return nil, nil
+	}
+
+	paths := make([]string, 0, len(pathHashes))
+	for p := range pathHashes {
+		paths = append(paths, p)
+	}
+
+	placeholders := make([]string, len(paths))
+	args := make([]any, len(paths))
+	for i, p := range paths {
+		placeholders[i] = "?"
+		args[i] = p
+	}
+	args = append(args, pass)
+
+	query := "SELECT file_path, content_hash FROM pass_cache WHERE file_path IN (" +
+		strings.Join(placeholders, ",") + ") AND pass = ?"
+	rows, err := c.db.Query(query, args...)
+	if err != nil {
+		return nil, fmt.Errorf("batch pass cache query: %w", err)
+	}
+	defer rows.Close()
+
+	cached := make(map[string]string)
+	for rows.Next() {
+		var path, hash string
+		if err := rows.Scan(&path, &hash); err != nil {
+			return nil, fmt.Errorf("scanning pass cache row: %w", err)
+		}
+		cached[path] = hash
+	}
+
+	var changed []string
+	for _, p := range paths {
+		storedHash, ok := cached[p]
+		if !ok || storedHash != pathHashes[p] {
+			changed = append(changed, p)
+		}
+	}
+
+	return changed, nil
 }
 
 // Close closes the underlying database connection.
