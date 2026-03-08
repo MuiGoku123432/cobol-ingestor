@@ -44,6 +44,7 @@ const (
 	RelMapsToFile          RelType = "MAPS_TO_FILE"
 	RelAccesses            RelType = "ACCESSES"
 	RelDataFlowsTo         RelType = "DATA_FLOWS_TO"
+	RelLinkageMapsTo       RelType = "LINKAGE_MAPS_TO"
 )
 
 // Relationship is a generic edge in the graph.

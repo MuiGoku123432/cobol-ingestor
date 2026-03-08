@@ -679,6 +679,9 @@ func (p *Pipeline) RunPass4(ctx context.Context) error {
 		if err := p.Writer.WritePass4Result(ctx, pass4Result); err != nil {
 			return fmt.Errorf("writing pass 4 results: %w", err)
 		}
+		if err := p.Writer.WritePass4FieldMappings(ctx, pass4Result); err != nil {
+			p.Logger.Warn("pass 4: field mapping write failed", zap.Error(err))
+		}
 	}
 
 	p.Logger.Info("pass 4 complete",
@@ -756,6 +759,13 @@ func (p *Pipeline) RunPass5(ctx context.Context, scanResult *scanner.ScanResult)
 		p.Logger.Warn("pass 5: dangling calls fix failed", zap.Error(err))
 	} else if fixed > 0 {
 		p.Logger.Info("pass 5: marked external programs", zap.Int("fixed", fixed))
+	}
+
+	// Step 5b: Fix false-positive dead code flags
+	if fixed, err := p.Writer.FixFalseDeadCode(ctx); err != nil {
+		p.Logger.Warn("pass 5: dead code false positive fix failed", zap.Error(err))
+	} else if fixed > 0 {
+		p.Logger.Info("pass 5: cleared false dead code flags", zap.Int("fixed", fixed))
 	}
 
 	// Step 6: Re-run Pass 3 for programs missing riskScore (needs relationships from steps 2-5)

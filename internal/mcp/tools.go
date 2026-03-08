@@ -54,6 +54,14 @@ func registerAllTools(s *mcp.Server, reader n4j.Reader) {
 	registerGetSharedDataChannels(s, reader)
 	// Phase 5: Validation report
 	registerGetValidationReport(s, reader)
+	// Copybook structure & type mappings
+	registerGetCopybookStructure(s, reader)
+	registerGetTypeMappings(s, reader)
+	// Source retrieval, migration, file accessors, effort estimates
+	registerGetProgramSource(s, reader)
+	registerGetMigrationSequence(s, reader)
+	registerGetFileAccessors(s, reader)
+	registerGetEffortEstimates(s, reader)
 }
 
 func toolError(msg string) *mcp.CallToolResult {

@@ -69,7 +69,7 @@ func (w *BatchWriter) RunValidation(ctx context.Context) (*ValidationResult, err
 			description: "Programs expected to have CALLS but have none",
 			severity:    "WARN",
 			fixMethod:   "LLM_REPAIR",
-			cypher:      "MATCH (p:Program) WHERE p.callCount > 0 AND NOT (p)-[:CALLS]->() RETURN p.programId AS id",
+			cypher:      "MATCH (p:Program) WHERE p.callTargetCount > 0 AND NOT (p)-[:CALLS]->() RETURN p.programId AS id",
 			idField:     "id",
 		},
 		{
@@ -256,6 +256,45 @@ func (w *BatchWriter) MergeDuplicateDomains(ctx context.Context) (int, error) {
 	return merged, nil
 }
 
+// FixFalseDeadCode clears deadCode=true on programs that are invoked by JCL or have COBOL callers.
+func (w *BatchWriter) FixFalseDeadCode(ctx context.Context) (int, error) {
+	session := w.client.NewSession(ctx)
+	defer session.Close(ctx)
+
+	res, err := session.ExecuteWrite(ctx, func(tx neo4j.ManagedTransaction) (any, error) {
+		result, err := tx.Run(ctx,
+			"MATCH (p:Program) "+
+				"WHERE p.deadCode = true "+
+				"AND ( "+
+				"  EXISTS { MATCH (step:JCLStep)-[:RUNS]->(p) } "+
+				"  OR EXISTS { MATCH (caller:Program)-[:CALLS]->(p) WHERE caller.filePath IS NOT NULL } "+
+				") "+
+				"SET p.deadCode = false, p.deadCodeReason = 'Cleared: invoked by JCL or has callers' "+
+				"RETURN count(p) AS cnt",
+			nil)
+		if err != nil {
+			return int64(0), err
+		}
+		if result.Next(ctx) {
+			if val, ok := result.Record().Get("cnt"); ok {
+				if n, ok := val.(int64); ok {
+					return n, nil
+				}
+			}
+		}
+		return int64(0), nil
+	})
+	if err != nil {
+		return 0, fmt.Errorf("fixing false dead code: %w", err)
+	}
+
+	count := int(res.(int64))
+	if count > 0 {
+		w.logger.Info("cleared false dead code flags", zap.Int("count", count))
+	}
+	return count, nil
+}
+
 // QueryProgramsMissingPass3 returns program IDs that lack riskScore (never processed by Pass 3).
 // All programs processed by Pass 3 receive a riskScore (even low-risk ones),
 // so riskScore IS NULL reliably indicates programs that were skipped or failed.
@@ -282,7 +321,7 @@ func (c *Client) QueryProgramsMissingMovesTo(ctx context.Context) ([]string, err
 // QueryProgramsMissingCalls returns program IDs expected to have CALLS but have none.
 func (c *Client) QueryProgramsMissingCalls(ctx context.Context) ([]string, error) {
 	return c.queryIDList(ctx,
-		"MATCH (p:Program) WHERE p.callCount > 0 AND NOT (p)-[:CALLS]->() RETURN p.programId AS id")
+		"MATCH (p:Program) WHERE p.callTargetCount > 0 AND NOT (p)-[:CALLS]->() RETURN p.programId AS id")
 }
 
 // QueryUnannotatedParagraphs returns a map of programID → paragraph names that lack descriptions.

@@ -189,6 +189,42 @@ func (w *BatchWriter) WritePass4Result(ctx context.Context, result *graph.Pass4R
 	return nil
 }
 
+// WritePass4FieldMappings creates LINKAGE_MAPS_TO edges between DataItem and Parameter nodes.
+func (w *BatchWriter) WritePass4FieldMappings(ctx context.Context, result *graph.Pass4Result) error {
+	var rows []map[string]any
+	for _, flow := range result.Flows {
+		if flow.Channel != "LINKAGE" {
+			continue
+		}
+		for _, fp := range flow.Fields {
+			rows = append(rows, map[string]any{
+				"callerPid":   flow.FromProgram,
+				"calleePid":   flow.ToProgram,
+				"sourceField": fp.SourceField,
+				"targetField": fp.TargetField,
+				"transform":   fp.Transform,
+			})
+		}
+	}
+
+	if len(rows) == 0 {
+		return nil
+	}
+
+	if err := w.batchUpdate(ctx,
+		"UNWIND $rows AS row "+
+			"MATCH (src:DataItem {programId: row.callerPid, name: row.sourceField}) "+
+			"MATCH (tgt:Parameter {programId: row.calleePid, name: row.targetField}) "+
+			"MERGE (src)-[r:LINKAGE_MAPS_TO]->(tgt) "+
+			"SET r.transform = row.transform",
+		rows); err != nil {
+		return fmt.Errorf("writing pass4 field mappings: %w", err)
+	}
+
+	w.logger.Info("wrote pass 4 field mappings", zap.Int("mappings", len(rows)))
+	return nil
+}
+
 // GetCrossProgramDataFlow returns all cross-program data flows for a program.
 func (c *Client) GetCrossProgramDataFlow(ctx context.Context, programID string) ([]CrossProgramFlowInfo, error) {
 	session := c.NewSession(ctx)

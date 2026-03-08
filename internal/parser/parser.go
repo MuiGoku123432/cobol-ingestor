@@ -133,7 +133,7 @@ func ParsePass1Response(jsonStr, sourceFile string) (*graph.Pass1Result, error) 
 			FromLabel: "Program",
 			FromKey:   programID,
 			ToLabel:   "Program",
-			ToKey:     ct.Target,
+			ToKey:     strings.ToUpper(ct.Target),
 			Properties: map[string]any{
 				"isDynamic": ct.IsDynamic,
 			},

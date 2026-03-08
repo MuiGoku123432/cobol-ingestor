@@ -212,3 +212,23 @@ func (m *MockReader) GetSharedDataChannels(_ context.Context) ([]n4j.SharedDataC
 func (m *MockReader) GetValidationReport(_ context.Context) (*n4j.ValidationResult, error) {
 	return nil, m.Err
 }
+
+func (m *MockReader) GetCopybookStructure(_ context.Context, _ string) ([]n4j.DataItemInfo, error) {
+	return nil, m.Err
+}
+
+func (m *MockReader) GetProgramSource(_ context.Context, _ string) (*n4j.ProgramSourceInfo, error) {
+	return nil, m.Err
+}
+
+func (m *MockReader) GetMigrationSequence(_ context.Context) ([]n4j.MigrationStep, error) {
+	return nil, m.Err
+}
+
+func (m *MockReader) GetFileAccessors(_ context.Context, _ string) (*n4j.FileAccessInfo, error) {
+	return nil, m.Err
+}
+
+func (m *MockReader) GetEffortEstimates(_ context.Context) ([]n4j.EffortEstimate, error) {
+	return nil, m.Err
+}

@@ -177,17 +177,26 @@ func mergeKeyForLabel(label string) string {
 
 // WritePass1Result converts a Pass1Result to maps and writes nodes then relationships.
 func (w *BatchWriter) WritePass1Result(ctx context.Context, result *graph.Pass1Result) error {
+	// Count CALLS targets per program for callTargetCount property
+	callTargetCounts := make(map[string]int)
+	for _, r := range result.Relationships {
+		if r.Type == graph.RelCalls {
+			callTargetCounts[r.FromKey]++
+		}
+	}
+
 	// Write Programs
 	if len(result.Programs) > 0 {
 		nodes := make([]map[string]any, len(result.Programs))
 		for i, p := range result.Programs {
 			nodes[i] = map[string]any{
-				"id":            p.ID,
-				"programId":     p.ProgramID,
-				"filePath":      p.FilePath,
-				"language":      p.Language,
-				"lineCount":     p.LineCount,
-				"executionMode": p.ExecutionMode,
+				"id":               p.ID,
+				"programId":        p.ProgramID,
+				"filePath":         p.FilePath,
+				"language":         p.Language,
+				"lineCount":        p.LineCount,
+				"executionMode":    p.ExecutionMode,
+				"callTargetCount":  callTargetCounts[p.ProgramID],
 			}
 		}
 		if err := w.WriteNodes(ctx, "Program", "programId", nodes); err != nil {
@@ -400,6 +409,31 @@ func (w *BatchWriter) WritePass1Result(ctx context.Context, result *graph.Pass1R
 		}
 	}
 
+	// Create stub Program nodes for CALLS targets not in the scan set
+	knownPrograms := make(map[string]bool, len(result.Programs))
+	for _, p := range result.Programs {
+		knownPrograms[p.ProgramID] = true
+	}
+	var stubNodes []map[string]any
+	seen := make(map[string]bool)
+	for _, r := range result.Relationships {
+		if r.Type == graph.RelCalls && r.ToLabel == "Program" {
+			if !knownPrograms[r.ToKey] && !seen[r.ToKey] {
+				seen[r.ToKey] = true
+				stubNodes = append(stubNodes, map[string]any{
+					"programId": r.ToKey,
+					"id":        r.ToKey,
+					"language":  "UNKNOWN",
+				})
+			}
+		}
+	}
+	if len(stubNodes) > 0 {
+		if err := w.WriteNodes(ctx, "Program", "programId", stubNodes); err != nil {
+			w.logger.Warn("failed to write stub Program nodes for CALLS targets", zap.Error(err))
+		}
+	}
+
 	// Write Relationships
 	grouped := groupRelationships(result.Relationships)
 	for key, rels := range grouped {
@@ -543,6 +577,7 @@ func (w *BatchWriter) WritePass2Result(ctx context.Context, result *graph.Pass2R
 				"programId": programID,
 				"fqn":       fqn,
 				"picture":   d.Picture,
+				"copybook":  d.Copybook,
 			}
 		}
 		if err := w.WriteNodes(ctx, "DataItem", "fqn", nodes); err != nil {

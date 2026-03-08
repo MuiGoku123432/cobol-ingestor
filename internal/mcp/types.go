@@ -61,3 +61,16 @@ type TraceFieldImpactInput struct {
 	ProgramID string `json:"programId" jsonschema:"The program ID"`
 	FieldName string `json:"fieldName" jsonschema:"The field name to trace"`
 }
+
+type GetCopybookStructureInput struct {
+	Name string `json:"name" jsonschema:"The copybook name"`
+}
+
+type GetFileAccessorsInput struct {
+	FileName string `json:"fileName" jsonschema:"The file name to look up"`
+}
+
+type GetTypeMappingsInput struct {
+	ProgramID    string `json:"programId,omitempty" jsonschema:"Program ID to get type mappings for"`
+	CopybookName string `json:"copybookName,omitempty" jsonschema:"Copybook name to get type mappings for"`
+}
