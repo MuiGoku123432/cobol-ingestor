@@ -715,7 +715,7 @@ func (c *Client) ListModernizationCandidates(ctx context.Context) ([]Modernizati
 	defer session.Close(ctx)
 
 	result, err := session.Run(ctx,
-		"MATCH (p:Program) WHERE p.modernizationScore IS NOT NULL RETURN p.programId AS programId, p.modernizationScore AS score, p.modernizationReason AS reason, p.modernizationApproach AS approach ORDER BY p.modernizationScore DESC", nil)
+		"MATCH (p:Program) WHERE p.modernizationScore IS NOT NULL AND p.filePath IS NOT NULL RETURN p.programId AS programId, p.modernizationScore AS score, p.modernizationReason AS reason, p.modernizationApproach AS approach ORDER BY p.modernizationScore DESC", nil)
 	if err != nil {
 		return nil, fmt.Errorf("modernization candidates query: %w", err)
 	}
@@ -738,7 +738,7 @@ func (c *Client) ListRiskPrograms(ctx context.Context, minScore float64) ([]Risk
 	defer session.Close(ctx)
 
 	result, err := session.Run(ctx,
-		"MATCH (p:Program) WHERE p.riskScore >= $min RETURN p.programId AS programId, p.riskScore AS riskScore, p.riskType AS riskType, p.riskDetails AS riskDetails ORDER BY p.riskScore DESC",
+		"MATCH (p:Program) WHERE p.riskScore >= $min AND p.filePath IS NOT NULL RETURN p.programId AS programId, p.riskScore AS riskScore, p.riskType AS riskType, p.riskDetails AS riskDetails ORDER BY p.riskScore DESC",
 		map[string]any{"min": minScore})
 	if err != nil {
 		return nil, fmt.Errorf("risk programs query: %w", err)

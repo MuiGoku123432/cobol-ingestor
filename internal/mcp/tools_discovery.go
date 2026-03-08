@@ -204,6 +204,32 @@ func registerGetSharedDataChannels(s *mcp.Server, reader n4j.Reader) {
 	})
 }
 
+// Domain reassignment write tool
+
+func registerReassignProgramDomain(s *mcp.Server, writer *n4j.BatchWriter) {
+	type output struct {
+		Success   bool   `json:"success"`
+		ProgramID string `json:"programId"`
+		Domain    string `json:"domain"`
+	}
+	mcp.AddTool(s, &mcp.Tool{
+		Name:        "reassign_program_domain",
+		Description: "Move a program to a different business domain. Deletes existing BELONGS_TO edges and creates a new one with confidence 1.0 and source 'manual_override'.",
+	}, func(ctx context.Context, req *mcp.CallToolRequest, input ReassignDomainInput) (*mcp.CallToolResult, *output, error) {
+		if input.ProgramID == "" || input.Domain == "" {
+			return toolError("both programId and domain are required"), nil, nil
+		}
+		if err := writer.ReassignProgramDomain(ctx, input.ProgramID, input.Domain); err != nil {
+			return nil, nil, err
+		}
+		return nil, &output{
+			Success:   true,
+			ProgramID: input.ProgramID,
+			Domain:    input.Domain,
+		}, nil
+	})
+}
+
 // Copybook structure tool
 
 func registerGetCopybookStructure(s *mcp.Server, reader n4j.Reader) {

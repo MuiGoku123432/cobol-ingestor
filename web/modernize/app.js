@@ -159,6 +159,7 @@ checkAuth();
 let messages = [];
 let isStreaming = false;
 let swarmEnabled = false;
+let multiRoundEnabled = false;
 let activeSessionId = localStorage.getItem('activeSessionId') || null;
 let sessions = [];
 
@@ -168,6 +169,24 @@ function toggleSwarm() {
   const thumb = document.getElementById("swarmToggleThumb");
   toggle.setAttribute("aria-checked", swarmEnabled);
   if (swarmEnabled) {
+    toggle.classList.add("swarm-active");
+    thumb.classList.add("swarm-thumb");
+    document.getElementById("multiRoundContainer").classList.remove("hidden");
+  } else {
+    toggle.classList.remove("swarm-active");
+    thumb.classList.remove("swarm-thumb");
+    document.getElementById("multiRoundContainer").classList.add("hidden");
+    // Disable multi-round when swarm is disabled
+    if (multiRoundEnabled) toggleMultiRound();
+  }
+}
+
+function toggleMultiRound() {
+  multiRoundEnabled = !multiRoundEnabled;
+  const toggle = document.getElementById("multiRoundToggle");
+  const thumb = document.getElementById("multiRoundThumb");
+  toggle.setAttribute("aria-checked", multiRoundEnabled);
+  if (multiRoundEnabled) {
     toggle.classList.add("swarm-active");
     thumb.classList.add("swarm-thumb");
   } else {
@@ -484,6 +503,7 @@ async function sendMessage(e) {
         framework: fwSelect.value,
         integrations: document.getElementById("integrations").value.trim(),
         sessionId: activeSessionId || '',
+        multiRound: swarmEnabled && multiRoundEnabled,
       }),
     });
 
@@ -561,10 +581,12 @@ async function sendMessage(e) {
           appendAgentDetail(data.id, `<span class="text-amber-300">&#9654;</span> <code class="bg-gray-800 px-1 rounded text-amber-300">${escapeHtml(data.toolName)}</code>`);
           break;
 
-        case "agent_tool_result":
+        case "agent_tool_result": {
           updateAgentCard(data.id, "Analyzing...", false, false);
-          appendAgentDetail(data.id, `<span class="text-green-400">&#10003;</span> Result: <span class="text-gray-500">${escapeHtml((data.result || "").substring(0, 120))}</span>`);
+          const cachedBadge = data.cached === "true" ? ' <span class="text-cyan-400 text-[10px] font-medium">(cached)</span>' : '';
+          appendAgentDetail(data.id, `<span class="text-green-400">&#10003;</span> Result${cachedBadge}: <span class="text-gray-500">${escapeHtml((data.result || "").substring(0, 120))}</span>`);
           break;
+        }
 
         case "agent_progress":
           updateAgentCard(data.id, "Writing summary...", false, false);
@@ -572,6 +594,26 @@ async function sendMessage(e) {
 
         case "agent_complete":
           updateAgentCard(data.id, "Complete", true, (data.summary || "").startsWith("Error:"));
+          break;
+
+        case "round_start":
+          addRoundDivider(data.round, data.maxRounds);
+          break;
+
+        case "round_complete":
+          updateRoundDivider(data.round);
+          break;
+
+        case "coordinator_decision":
+          addCoordinatorDecision(data.round, data.satisfied, data.reasoning, data.followUps);
+          break;
+
+        case "coordinator_tool_start":
+          addToolIndicator(data.toolName, data.toolId);
+          break;
+
+        case "coordinator_tool_result":
+          updateToolIndicator(data.toolId, data.result, false);
           break;
 
         case "synthesis_start":
@@ -611,4 +653,58 @@ async function sendMessage(e) {
 
 function clearChat() {
   createSession();
+}
+
+function addRoundDivider(round, maxRounds) {
+  const container = document.getElementById("chatMessages");
+  const placeholder = container.querySelector(".text-center");
+  if (placeholder) placeholder.remove();
+
+  const divider = document.createElement("div");
+  divider.id = `round-divider-${round}`;
+  divider.className = "flex items-center gap-3 my-4";
+  divider.innerHTML = `
+    <div class="flex-1 h-px bg-gray-700"></div>
+    <div class="flex items-center gap-2 text-xs font-medium text-gray-400 bg-gray-900 px-3 py-1 rounded-full border border-gray-700">
+      <span class="pulse-dot inline-block w-2 h-2 rounded-full bg-indigo-400"></span>
+      Round ${round} of ${maxRounds}
+    </div>
+    <div class="flex-1 h-px bg-gray-700"></div>
+  `;
+  container.appendChild(divider);
+  container.scrollTop = container.scrollHeight;
+}
+
+function updateRoundDivider(round) {
+  const divider = document.getElementById(`round-divider-${round}`);
+  if (!divider) return;
+  const dot = divider.querySelector(".pulse-dot");
+  if (dot) {
+    dot.classList.remove("pulse-dot", "bg-indigo-400");
+    dot.classList.add("bg-green-400");
+  }
+}
+
+function addCoordinatorDecision(round, satisfied, reasoning, followUps) {
+  const container = document.getElementById("chatMessages");
+  const card = document.createElement("div");
+  card.className = "agent-card border-indigo-800 bg-gray-900/50 my-3";
+  let followUpHtml = "";
+  if (followUps && Object.keys(followUps).length > 0) {
+    const items = Object.entries(followUps).map(([id, q]) =>
+      `<div class="text-xs text-gray-400"><span class="text-indigo-300 font-medium">${escapeHtml(id)}</span>: ${escapeHtml(q)}</div>`
+    ).join("");
+    followUpHtml = `<div class="mt-2 space-y-1">${items}</div>`;
+  }
+  const statusIcon = satisfied
+    ? '<span class="text-green-400">&#10003;</span> Sufficient'
+    : '<span class="text-amber-400">&#9654;</span> Needs follow-up';
+  card.innerHTML = `
+    <div class="text-xs font-medium text-indigo-300 mb-1">Coordinator Assessment (Round ${round})</div>
+    <div class="text-xs text-gray-300">${escapeHtml(reasoning || "")}</div>
+    <div class="text-xs mt-1">${statusIcon}</div>
+    ${followUpHtml}
+  `;
+  container.appendChild(card);
+  container.scrollTop = container.scrollHeight;
 }

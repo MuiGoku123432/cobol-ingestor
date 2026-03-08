@@ -9,7 +9,7 @@ import (
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 )
 
-func registerAllTools(s *mcp.Server, reader n4j.Reader) {
+func registerAllTools(s *mcp.Server, reader n4j.Reader, writer *n4j.BatchWriter) {
 	registerGetProgram(s, reader)
 	registerSearchPrograms(s, reader)
 	registerListPrograms(s, reader)
@@ -62,6 +62,10 @@ func registerAllTools(s *mcp.Server, reader n4j.Reader) {
 	registerGetMigrationSequence(s, reader)
 	registerGetFileAccessors(s, reader)
 	registerGetEffortEstimates(s, reader)
+	// Write tools (require writer)
+	if writer != nil {
+		registerReassignProgramDomain(s, writer)
+	}
 }
 
 func toolError(msg string) *mcp.CallToolResult {

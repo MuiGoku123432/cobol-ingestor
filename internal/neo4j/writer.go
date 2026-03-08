@@ -585,45 +585,114 @@ func (w *BatchWriter) WritePass2Result(ctx context.Context, result *graph.Pass2R
 		}
 	}
 
-	// Data hierarchy — CHILD_OF relationships — custom Cypher matching on {name, programId}
+	// Data hierarchy — CHILD_OF relationships — FQN-based matching for accuracy
 	if len(result.DataHierarchy) > 0 {
+		// Build a level lookup from the hierarchy for FQN construction
+		levelByName := make(map[string]int)
+		for _, d := range result.DataHierarchy {
+			levelByName[d.Name] = d.Level
+		}
+
 		var childRows []map[string]any
 		for _, d := range result.DataHierarchy {
 			if d.Parent != "" {
-				childRows = append(childRows, map[string]any{
-					"childName":  d.Name,
-					"parentName": d.Parent,
+				childFQN := fmt.Sprintf("%s.%02d.%s", programID, d.Level, d.Name)
+				parentLevel := findParentLevel(result.DataHierarchy, d.Parent, d.Name)
+				if parentLevel > 0 {
+					parentFQN := fmt.Sprintf("%s.%02d.%s", programID, parentLevel, d.Parent)
+					childRows = append(childRows, map[string]any{
+						"childFQN":  childFQN,
+						"parentFQN": parentFQN,
+					})
+				} else {
+					// Fallback to name-based matching if parent level unknown
+					childRows = append(childRows, map[string]any{
+						"childFQN":  childFQN,
+						"parentFQN": "",
+						"parentName": d.Parent,
+						"pid":        programID,
+					})
+				}
+			}
+		}
+
+		// Split into FQN-matched and fallback rows
+		var fqnRows, fallbackRows []map[string]any
+		for _, row := range childRows {
+			if row["parentFQN"] != "" {
+				fqnRows = append(fqnRows, row)
+			} else {
+				fallbackRows = append(fallbackRows, row)
+			}
+		}
+
+		if len(fqnRows) > 0 {
+			if err := w.batchUpdate(ctx,
+				"UNWIND $rows AS row "+
+					"MATCH (child:DataItem {fqn: row.childFQN}) "+
+					"MATCH (parent:DataItem {fqn: row.parentFQN}) "+
+					"MERGE (child)-[:CHILD_OF]->(parent)",
+				fqnRows); err != nil {
+				w.logger.Warn("failed to write CHILD_OF relationships (FQN)", zap.Error(err))
+			}
+		}
+		if len(fallbackRows) > 0 {
+			if err := w.batchUpdate(ctx,
+				"UNWIND $rows AS row "+
+					"MATCH (child:DataItem {fqn: row.childFQN}) "+
+					"MATCH (parent:DataItem {name: row.parentName, programId: row.pid}) "+
+					"MERGE (child)-[:CHILD_OF]->(parent)",
+				fallbackRows); err != nil {
+				w.logger.Warn("failed to write CHILD_OF relationships (fallback)", zap.Error(err))
+			}
+		}
+	}
+
+	// REDEFINES relationships — FQN-based matching where possible
+	if len(result.Redefines) > 0 {
+		// Build level lookup from hierarchy
+		levelByName := make(map[string]int)
+		for _, d := range result.DataHierarchy {
+			levelByName[d.Name] = d.Level
+		}
+
+		var fqnRows, fallbackRows []map[string]any
+		for _, r := range result.Redefines {
+			itemLevel, itemOk := levelByName[r.Item]
+			targetLevel, targetOk := levelByName[r.Redefines]
+			if itemOk && targetOk {
+				fqnRows = append(fqnRows, map[string]any{
+					"itemFQN":   fmt.Sprintf("%s.%02d.%s", programID, itemLevel, r.Item),
+					"targetFQN": fmt.Sprintf("%s.%02d.%s", programID, targetLevel, r.Redefines),
+				})
+			} else {
+				fallbackRows = append(fallbackRows, map[string]any{
+					"itemName":   r.Item,
+					"targetName": r.Redefines,
 					"pid":        programID,
 				})
 			}
 		}
-		if err := w.batchUpdate(ctx,
-			"UNWIND $rows AS row "+
-				"MATCH (child:DataItem {name: row.childName, programId: row.pid}) "+
-				"MATCH (parent:DataItem {name: row.parentName, programId: row.pid}) "+
-				"MERGE (child)-[:CHILD_OF]->(parent)",
-			childRows); err != nil {
-			w.logger.Warn("failed to write CHILD_OF relationships", zap.Error(err))
-		}
-	}
 
-	// REDEFINES relationships — custom Cypher matching on {name, programId}
-	if len(result.Redefines) > 0 {
-		var redefRows []map[string]any
-		for _, r := range result.Redefines {
-			redefRows = append(redefRows, map[string]any{
-				"itemName":   r.Item,
-				"targetName": r.Redefines,
-				"pid":        programID,
-			})
+		if len(fqnRows) > 0 {
+			if err := w.batchUpdate(ctx,
+				"UNWIND $rows AS row "+
+					"MATCH (item:DataItem {fqn: row.itemFQN}) "+
+					"MATCH (target:DataItem {fqn: row.targetFQN}) "+
+					"MERGE (item)-[:REDEFINES]->(target)",
+				fqnRows); err != nil {
+				w.logger.Warn("failed to write REDEFINES relationships (FQN)", zap.Error(err))
+			}
 		}
-		if err := w.batchUpdate(ctx,
-			"UNWIND $rows AS row "+
-				"MATCH (item:DataItem {name: row.itemName, programId: row.pid}) "+
-				"MATCH (target:DataItem {name: row.targetName, programId: row.pid}) "+
-				"MERGE (item)-[:REDEFINES]->(target)",
-			redefRows); err != nil {
-			w.logger.Warn("failed to write REDEFINES relationships", zap.Error(err))
+		if len(fallbackRows) > 0 {
+			if err := w.batchUpdate(ctx,
+				"UNWIND $rows AS row "+
+					"MATCH (item:DataItem {name: row.itemName, programId: row.pid}) "+
+					"MATCH (target:DataItem {name: row.targetName, programId: row.pid}) "+
+					"MERGE (item)-[:REDEFINES]->(target)",
+				fallbackRows); err != nil {
+				w.logger.Warn("failed to write REDEFINES relationships (fallback)", zap.Error(err))
+			}
 		}
 	}
 
@@ -971,5 +1040,57 @@ func (w *BatchWriter) WriteJCLResult(ctx context.Context, result *graph.JCLAnaly
 		zap.Int("ddCards", len(result.DDCards)),
 	)
 
+	return nil
+}
+
+// findParentLevel looks up the COBOL level number for a parent data item in the hierarchy.
+// Returns 0 if not found.
+func findParentLevel(hierarchy []graph.DataHierarchyItem, parentName, childName string) int {
+	for _, d := range hierarchy {
+		if d.Name == parentName {
+			return d.Level
+		}
+	}
+	return 0
+}
+
+// ReassignProgramDomain moves a program to a different business domain.
+func (w *BatchWriter) ReassignProgramDomain(ctx context.Context, programID, newDomain string) error {
+	session := w.client.NewSession(ctx)
+	defer session.Close(ctx)
+
+	_, err := session.ExecuteWrite(ctx, func(tx neo4j.ManagedTransaction) (any, error) {
+		// Delete existing BELONGS_TO edges for the program
+		_, err := tx.Run(ctx,
+			"MATCH (p:Program {programId: $pid})-[r:BELONGS_TO]->(:BusinessDomain) DELETE r",
+			map[string]any{"pid": programID})
+		if err != nil {
+			return nil, err
+		}
+
+		// Ensure the target BusinessDomain node exists
+		_, err = tx.Run(ctx,
+			"MERGE (d:BusinessDomain {name: $name})",
+			map[string]any{"name": newDomain})
+		if err != nil {
+			return nil, err
+		}
+
+		// Create new BELONGS_TO edge
+		_, err = tx.Run(ctx,
+			"MATCH (p:Program {programId: $pid}) "+
+				"MATCH (d:BusinessDomain {name: $name}) "+
+				"MERGE (p)-[r:BELONGS_TO]->(d) "+
+				"SET r.confidence = 1.0, r.source = 'manual_override'",
+			map[string]any{"pid": programID, "name": newDomain})
+		return nil, err
+	})
+	if err != nil {
+		return fmt.Errorf("reassigning program domain: %w", err)
+	}
+
+	w.logger.Info("reassigned program domain",
+		zap.String("program", programID),
+		zap.String("domain", newDomain))
 	return nil
 }

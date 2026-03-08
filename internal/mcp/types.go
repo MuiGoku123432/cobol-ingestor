@@ -74,3 +74,8 @@ type GetTypeMappingsInput struct {
 	ProgramID    string `json:"programId,omitempty" jsonschema:"Program ID to get type mappings for"`
 	CopybookName string `json:"copybookName,omitempty" jsonschema:"Copybook name to get type mappings for"`
 }
+
+type ReassignDomainInput struct {
+	ProgramID string `json:"programId" jsonschema:"The program ID to reassign"`
+	Domain    string `json:"domain" jsonschema:"The target business domain name"`
+}

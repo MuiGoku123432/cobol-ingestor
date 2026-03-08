@@ -99,6 +99,17 @@ func (w *BatchWriter) RunValidation(ctx context.Context) (*ValidationResult, err
 			idField:     "id",
 		},
 		{
+			name:        "cics_missing_child_of",
+			description: "CICS programs with DataItems but zero CHILD_OF relationships",
+			severity:    "WARN",
+			fixMethod:   "LLM_REPAIR",
+			cypher: "MATCH (p:Program) WHERE p.executionMode IN ['CICS', 'BATCH_AND_CICS'] " +
+				"AND EXISTS { MATCH (d:DataItem {programId: p.programId}) } " +
+				"AND NOT EXISTS { MATCH (d1:DataItem {programId: p.programId})-[:CHILD_OF]->(:DataItem) } " +
+				"RETURN p.programId AS id",
+			idField: "id",
+		},
+		{
 			name:        "orphan_data_items",
 			description: "DataItems with no programId",
 			severity:    "INFO",
@@ -254,6 +265,39 @@ func (w *BatchWriter) MergeDuplicateDomains(ctx context.Context) (int, error) {
 	}
 
 	return merged, nil
+}
+
+// ClearExternalScores removes risk/modernization/domain data from external programs.
+func (w *BatchWriter) ClearExternalScores(ctx context.Context) (int, error) {
+	session := w.client.NewSession(ctx)
+	defer session.Close(ctx)
+
+	res, err := session.ExecuteWrite(ctx, func(tx neo4j.ManagedTransaction) (any, error) {
+		result, err := tx.Run(ctx,
+			"MATCH (p:Program) WHERE p.isExternal = true "+
+				"OPTIONAL MATCH (p)-[r:BELONGS_TO]->(:BusinessDomain) "+
+				"DELETE r "+
+				"SET p.riskScore = null, p.riskType = null, p.riskDetails = null, "+
+				"p.modernizationScore = null, p.modernizationReason = null, p.modernizationApproach = null, "+
+				"p.deadCode = null, p.deadCodeReason = null "+
+				"RETURN count(p) AS cnt",
+			nil)
+		if err != nil {
+			return int64(0), err
+		}
+		if result.Next(ctx) {
+			if val, ok := result.Record().Get("cnt"); ok {
+				if n, ok := val.(int64); ok {
+					return n, nil
+				}
+			}
+		}
+		return int64(0), nil
+	})
+	if err != nil {
+		return 0, fmt.Errorf("clearing external scores: %w", err)
+	}
+	return int(res.(int64)), nil
 }
 
 // FixFalseDeadCode clears deadCode=true on programs that are invoked by JCL or have COBOL callers.
