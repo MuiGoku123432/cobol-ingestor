@@ -2,6 +2,8 @@ package modernize
 
 import (
 	"bytes"
+	"fmt"
+	"strings"
 	"text/template"
 )
 
@@ -49,17 +51,43 @@ When translating COBOL to {{.TargetLanguage}}:
 - Show the translated code with clear section headers
 - Explain any assumptions or design decisions
 - Note any COBOL patterns that don't have direct equivalents
-`))
+{{if .Integrations}}
+## Third-Party Integrations
 
-// BuildSystemPrompt renders the system prompt with the given target language and framework.
-func BuildSystemPrompt(targetLanguage, framework string) (string, error) {
+The modernized system should integrate with: {{.Integrations}}.
+When translating, map relevant COBOL I/O operations, batch processes, or data flows to appropriate integration points with these services.
+{{end}}`))
+
+// BuildSystemPrompt renders the system prompt with the given target language, framework, and integrations.
+func BuildSystemPrompt(targetLanguage, framework, integrations string) (string, error) {
 	var buf bytes.Buffer
 	err := systemPromptTmpl.Execute(&buf, map[string]string{
 		"TargetLanguage": targetLanguage,
 		"Framework":      framework,
+		"Integrations":   integrations,
 	})
 	if err != nil {
 		return "", err
 	}
 	return buf.String(), nil
+}
+
+// BuildContextPreamble generates a short context block to prepend to user messages,
+// reinforcing the migration target and integrations throughout the conversation.
+func BuildContextPreamble(targetLanguage, framework, integrations string) string {
+	var parts []string
+	target := targetLanguage
+	if framework != "" {
+		target += " with " + framework
+	}
+	if target != "" {
+		parts = append(parts, fmt.Sprintf("[Migration Target: %s]", target))
+	}
+	if integrations != "" {
+		parts = append(parts, fmt.Sprintf("[Third-Party Integrations: %s]", integrations))
+	}
+	if len(parts) == 0 {
+		return ""
+	}
+	return strings.Join(parts, "\n") + "\n\n"
 }

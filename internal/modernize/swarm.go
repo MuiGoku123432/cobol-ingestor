@@ -52,6 +52,7 @@ func SwarmHandler(ps *ProviderState, mcpClient *MCPClient, defaultModel string, 
 			Messages       []chatInputMessage `json:"messages"`
 			TargetLanguage string             `json:"targetLanguage"`
 			Framework      string             `json:"framework"`
+			Integrations   string             `json:"integrations"`
 			SessionID      string             `json:"sessionId"`
 		}
 		if err := c.ShouldBindJSON(&req); err != nil {
@@ -85,6 +86,7 @@ func SwarmHandler(ps *ProviderState, mcpClient *MCPClient, defaultModel string, 
 		promptData := swarmPromptData{
 			TargetLanguage: req.TargetLanguage,
 			Framework:      req.Framework,
+			Integrations:   req.Integrations,
 		}
 
 		// Run 4 agents in parallel
@@ -134,10 +136,11 @@ func SwarmHandler(ps *ProviderState, mcpClient *MCPClient, defaultModel string, 
 			return
 		}
 
+		coordPreamble := BuildContextPreamble(req.TargetLanguage, req.Framework, req.Integrations)
 		coordMessages := []llm.ChatMessage{
 			{
 				Role:    llm.RoleUser,
-				Content: []llm.ContentBlock{llm.NewTextContent(userQuery)},
+				Content: []llm.ContentBlock{llm.NewTextContent(coordPreamble + userQuery)},
 			},
 		}
 
@@ -221,10 +224,11 @@ func runAgent(
 		return "", fmt.Errorf("build prompt: %w", err)
 	}
 
+	preamble := BuildContextPreamble(promptData.TargetLanguage, promptData.Framework, promptData.Integrations)
 	messages := []llm.ChatMessage{
 		{
 			Role:    llm.RoleUser,
-			Content: []llm.ContentBlock{llm.NewTextContent(userQuery)},
+			Content: []llm.ContentBlock{llm.NewTextContent(preamble + userQuery)},
 		},
 	}
 

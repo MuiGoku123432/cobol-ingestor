@@ -482,6 +482,7 @@ async function sendMessage(e) {
         messages: messages,
         targetLanguage: langSelect.value,
         framework: fwSelect.value,
+        integrations: document.getElementById("integrations").value.trim(),
         sessionId: activeSessionId || '',
       }),
     });
