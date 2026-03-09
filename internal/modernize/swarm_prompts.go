@@ -60,7 +60,7 @@ Investigate thoroughly, then write a concise summary of your structural findings
 {{if .Integrations}}
 The modernized system should integrate with: {{.Integrations}}.
 {{end}}
-The user is interested in translating to {{.TargetLanguage}}{{if .Framework}} using {{.Framework}}{{end}}.` + crossPollinationBlock))
+{{if .TargetLanguage}}The user is interested in translating to {{.TargetLanguage}}{{if .Framework}} using {{.Framework}}{{end}}.{{end}}` + crossPollinationBlock))
 
 var dataFlowAnalystPrompt = template.Must(template.New("dataflow").Parse(`You are a COBOL Data Flow Analyst. Your job is to investigate data structures, data movement, and SQL usage relevant to the user's question.
 
@@ -76,7 +76,7 @@ Investigate thoroughly, then write a concise summary of your data flow findings 
 {{if .Integrations}}
 The modernized system should integrate with: {{.Integrations}}.
 {{end}}
-The user is interested in translating to {{.TargetLanguage}}{{if .Framework}} using {{.Framework}}{{end}}.` + crossPollinationBlock))
+{{if .TargetLanguage}}The user is interested in translating to {{.TargetLanguage}}{{if .Framework}} using {{.Framework}}{{end}}.{{end}}` + crossPollinationBlock))
 
 var dependencyMapperPrompt = template.Must(template.New("dependency").Parse(`You are a COBOL Dependency Mapper. Your job is to investigate call chains, copybook usage, CICS transactions, and blast radius relevant to the user's question.
 
@@ -92,7 +92,7 @@ Investigate thoroughly, then write a concise summary of your dependency findings
 {{if .Integrations}}
 The modernized system should integrate with: {{.Integrations}}.
 {{end}}
-The user is interested in translating to {{.TargetLanguage}}{{if .Framework}} using {{.Framework}}{{end}}.` + crossPollinationBlock))
+{{if .TargetLanguage}}The user is interested in translating to {{.TargetLanguage}}{{if .Framework}} using {{.Framework}}{{end}}.{{end}}` + crossPollinationBlock))
 
 var businessLogicExtractorPrompt = template.Must(template.New("business").Parse(`You are a COBOL Business Logic Extractor. Your job is to investigate business rules, domain classification, and modernization readiness relevant to the user's question.
 
@@ -107,7 +107,7 @@ Investigate thoroughly, then write a concise summary of your business logic find
 {{if .Integrations}}
 The modernized system should integrate with: {{.Integrations}}.
 {{end}}
-The user is interested in translating to {{.TargetLanguage}}{{if .Framework}} using {{.Framework}}{{end}}.` + crossPollinationBlock))
+{{if .TargetLanguage}}The user is interested in translating to {{.TargetLanguage}}{{if .Framework}} using {{.Framework}}{{end}}.{{end}}` + crossPollinationBlock))
 
 var coordinatorPrompt = template.Must(template.New("coordinator").Parse(`You are the Coordinator for a multi-agent COBOL analysis team. Four specialist agents have investigated different aspects of the user's question. Your job is to synthesize their findings into one cohesive, well-organized response.
 
@@ -131,8 +131,8 @@ Synthesize the above findings into a single, comprehensive response that:
 3. Highlights key insights that emerge from combining multiple analyses
 4. Uses markdown with clear section headers
 5. Includes specific COBOL artifact names (programs, paragraphs, copybooks, data items) — ground all claims in the data returned by the agents
-6. If the question involves translation to {{.TargetLanguage}}{{if .Framework}} using {{.Framework}}{{end}}, provide concrete modernization guidance
-{{if .Integrations}}7. Considers integration with: {{.Integrations}} — map relevant COBOL operations to appropriate integration points with these services{{end}}
+{{if .TargetLanguage}}6. If the question involves translation to {{.TargetLanguage}}{{if .Framework}} using {{.Framework}}{{end}}, provide concrete modernization guidance
+{{end}}{{if .Integrations}}7. Considers integration with: {{.Integrations}} — map relevant COBOL operations to appropriate integration points with these services{{end}}
 
 Do not mention the individual agents or that this was a multi-agent analysis. Present the information as a unified analysis.`))
 

@@ -84,29 +84,39 @@
         <div id="sessionList" class="space-y-1 max-h-48 overflow-y-auto"></div>
       </div>
 
-      <div>
-        <label class="block text-sm font-medium text-gray-400 mb-1">Target Language</label>
-        <select id="targetLanguage" class="w-full bg-gray-800 border border-gray-700 rounded-lg px-3 py-2 text-sm focus:ring-2 focus:ring-indigo-500 focus:border-transparent">
-          <option value="Java">Java</option>
-          <option value="C#">C#</option>
-          <option value="Python">Python</option>
-          <option value="Go">Go</option>
-          <option value="TypeScript">TypeScript</option>
-          <option value="Kotlin">Kotlin</option>
-        </select>
+      <div class="flex items-center justify-between">
+        <label class="text-sm font-medium text-gray-400">Migration Mode</label>
+        <button id="migrationToggle" onclick="toggleMigrationMode()" role="switch" aria-checked="true"
+          class="relative w-11 h-6 bg-gray-700 rounded-full transition-colors focus:ring-2 focus:ring-indigo-500 swarm-active">
+          <span id="migrationThumb" class="absolute left-0.5 top-0.5 w-5 h-5 bg-gray-400 rounded-full transition-transform swarm-thumb"></span>
+        </button>
       </div>
 
-      <div>
-        <label class="block text-sm font-medium text-gray-400 mb-1">Framework</label>
-        <select id="framework" class="w-full bg-gray-800 border border-gray-700 rounded-lg px-3 py-2 text-sm focus:ring-2 focus:ring-indigo-500 focus:border-transparent">
-        </select>
-      </div>
+      <div id="migrationSettings" class="space-y-4 transition-all duration-300 overflow-hidden">
+        <div>
+          <label class="block text-sm font-medium text-gray-400 mb-1">Target Language</label>
+          <select id="targetLanguage" class="w-full bg-gray-800 border border-gray-700 rounded-lg px-3 py-2 text-sm focus:ring-2 focus:ring-indigo-500 focus:border-transparent">
+            <option value="Java">Java</option>
+            <option value="C#">C#</option>
+            <option value="Python">Python</option>
+            <option value="Go">Go</option>
+            <option value="TypeScript">TypeScript</option>
+            <option value="Kotlin">Kotlin</option>
+          </select>
+        </div>
 
-      <div>
-        <label class="block text-sm font-medium text-gray-400 mb-1">Integrations</label>
-        <input id="integrations" type="text" placeholder="e.g. Salesforce, Stripe, Kafka"
-          class="w-full bg-gray-800 border border-gray-700 rounded-lg px-3 py-2 text-sm focus:ring-2 focus:ring-indigo-500 focus:border-transparent placeholder-gray-500">
-        <p class="text-xs text-gray-600 mt-1">Comma-separated services</p>
+        <div>
+          <label class="block text-sm font-medium text-gray-400 mb-1">Framework</label>
+          <select id="framework" class="w-full bg-gray-800 border border-gray-700 rounded-lg px-3 py-2 text-sm focus:ring-2 focus:ring-indigo-500 focus:border-transparent">
+          </select>
+        </div>
+
+        <div>
+          <label class="block text-sm font-medium text-gray-400 mb-1">Integrations</label>
+          <input id="integrations" type="text" placeholder="e.g. Salesforce, Stripe, Kafka"
+            class="w-full bg-gray-800 border border-gray-700 rounded-lg px-3 py-2 text-sm focus:ring-2 focus:ring-indigo-500 focus:border-transparent placeholder-gray-500">
+          <p class="text-xs text-gray-600 mt-1">Comma-separated services</p>
+        </div>
       </div>
 
       <div id="modelSelectContainer" class="hidden">
@@ -149,7 +159,7 @@
     <div id="chatMessages" class="flex-1 overflow-y-auto p-6 space-y-4">
       <div class="text-center text-gray-500 mt-20">
         <p class="text-lg">Ask about your COBOL programs</p>
-        <p class="text-sm mt-1">I'll use the graph database to understand and translate them</p>
+        <p id="chatPlaceholderSub" class="text-sm mt-1">I'll use the graph database to understand and translate them</p>
       </div>
     </div>
 

@@ -113,6 +113,7 @@ func SwarmHandler(ps *ProviderState, mcpClient *MCPClient, defaultModel string, 
 			TargetLanguage string             `json:"targetLanguage"`
 			Framework      string             `json:"framework"`
 			Integrations   string             `json:"integrations"`
+			DiscoveryMode  bool               `json:"discoveryMode"`
 			SessionID      string             `json:"sessionId"`
 			MultiRound     bool               `json:"multiRound"`
 		}
@@ -144,10 +145,19 @@ func SwarmHandler(ps *ProviderState, mcpClient *MCPClient, defaultModel string, 
 		w := c.Writer
 		var mu sync.Mutex
 
+		targetLanguage := req.TargetLanguage
+		framework := req.Framework
+		integrations := req.Integrations
+		if req.DiscoveryMode {
+			targetLanguage = ""
+			framework = ""
+			integrations = ""
+		}
+
 		promptData := swarmPromptData{
-			TargetLanguage: req.TargetLanguage,
-			Framework:      req.Framework,
-			Integrations:   req.Integrations,
+			TargetLanguage: targetLanguage,
+			Framework:      framework,
+			Integrations:   integrations,
 		}
 
 		maxRounds := 1

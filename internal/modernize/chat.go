@@ -39,6 +39,7 @@ func ChatHandler(ps *ProviderState, mcpClient *MCPClient, defaultModel string, d
 			TargetLanguage string             `json:"targetLanguage"`
 			Framework      string             `json:"framework"`
 			Integrations   string             `json:"integrations"`
+			DiscoveryMode  bool               `json:"discoveryMode"`
 			SessionID      string             `json:"sessionId"`
 		}
 		if err := c.ShouldBindJSON(&req); err != nil {
@@ -46,14 +47,23 @@ func ChatHandler(ps *ProviderState, mcpClient *MCPClient, defaultModel string, d
 			return
 		}
 
-		systemPrompt, err := BuildSystemPrompt(req.TargetLanguage, req.Framework, req.Integrations)
+		var systemPrompt string
+		var err error
+		if req.DiscoveryMode {
+			systemPrompt, err = BuildDiscoveryPrompt()
+		} else {
+			systemPrompt, err = BuildSystemPrompt(req.TargetLanguage, req.Framework, req.Integrations)
+		}
 		if err != nil {
 			c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to build system prompt"})
 			return
 		}
 
 		// Convert input messages to ChatMessage format
-		preamble := BuildContextPreamble(req.TargetLanguage, req.Framework, req.Integrations)
+		var preamble string
+		if !req.DiscoveryMode {
+			preamble = BuildContextPreamble(req.TargetLanguage, req.Framework, req.Integrations)
+		}
 		messages := make([]llm.ChatMessage, 0, len(req.Messages))
 		for i, m := range req.Messages {
 			text := m.Content

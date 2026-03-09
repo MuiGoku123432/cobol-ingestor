@@ -158,10 +158,40 @@ checkAuth();
 // Client-side message history sent with each request
 let messages = [];
 let isStreaming = false;
+let migrationMode = true;
 let swarmEnabled = false;
 let multiRoundEnabled = false;
 let activeSessionId = localStorage.getItem('activeSessionId') || null;
 let sessions = [];
+
+function toggleMigrationMode() {
+  migrationMode = !migrationMode;
+  const toggle = document.getElementById("migrationToggle");
+  const thumb = document.getElementById("migrationThumb");
+  const settings = document.getElementById("migrationSettings");
+  toggle.setAttribute("aria-checked", migrationMode);
+  if (migrationMode) {
+    toggle.classList.add("swarm-active");
+    thumb.classList.add("swarm-thumb");
+    settings.style.maxHeight = settings.scrollHeight + "px";
+    settings.style.opacity = "1";
+  } else {
+    toggle.classList.remove("swarm-active");
+    thumb.classList.remove("swarm-thumb");
+    settings.style.maxHeight = "0";
+    settings.style.opacity = "0";
+  }
+  updatePlaceholder();
+}
+
+function updatePlaceholder() {
+  const sub = document.getElementById("chatPlaceholderSub");
+  if (sub) {
+    sub.textContent = migrationMode
+      ? "I'll use the graph database to understand and translate them"
+      : "I'll use the graph database to explore and understand them";
+  }
+}
 
 function toggleSwarm() {
   swarmEnabled = !swarmEnabled;
@@ -466,10 +496,13 @@ async function renameSession(id) {
 
 function clearChatUI() {
   const container = document.getElementById('chatMessages');
+  const subText = migrationMode
+    ? "I'll use the graph database to understand and translate them"
+    : "I'll use the graph database to explore and understand them";
   container.innerHTML = `
     <div class="text-center text-gray-500 mt-20">
       <p class="text-lg">Ask about your COBOL programs</p>
-      <p class="text-sm mt-1">I'll use the graph database to understand and translate them</p>
+      <p id="chatPlaceholderSub" class="text-sm mt-1">${subText}</p>
     </div>
   `;
 }
@@ -499,9 +532,10 @@ async function sendMessage(e) {
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
         messages: messages,
-        targetLanguage: langSelect.value,
-        framework: fwSelect.value,
-        integrations: document.getElementById("integrations").value.trim(),
+        targetLanguage: migrationMode ? langSelect.value : "",
+        framework: migrationMode ? fwSelect.value : "",
+        integrations: migrationMode ? document.getElementById("integrations").value.trim() : "",
+        discoveryMode: !migrationMode,
         sessionId: activeSessionId || '',
         multiRound: swarmEnabled && multiRoundEnabled,
       }),
