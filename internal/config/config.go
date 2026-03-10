@@ -36,10 +36,14 @@ type ModernizeConfig struct {
 
 // LLMConfig selects which provider backend to use.
 type LLMConfig struct {
-	Provider              string        // "anthropic" or "copilot"
+	Provider              string        // "anthropic", "copilot", "vertex", or "bedrock"
 	APIKey                string        // ANTHROPIC_API_KEY or GitHub token depending on provider
 	CopilotGitHubToken    string        // GitHub personal access token for Copilot auth
 	CopilotAccountType    string        // "individual", "business", or "enterprise"
+	VertexProjectID       string        // Google Cloud project ID (for vertex provider)
+	VertexRegion          string        // Google Cloud region (for vertex provider, default "us-east5")
+	BedrockRegion         string        // AWS region (for bedrock provider, default "us-east-1")
+	BedrockModelID        string        // Optional Bedrock model ID override
 	Timeout               time.Duration // Overall HTTP client timeout (LLM_TIMEOUT)
 	ResponseHeaderTimeout time.Duration // Time to wait for first response byte (LLM_RESPONSE_HEADER_TIMEOUT)
 }
@@ -177,6 +181,10 @@ func Load() (*Config, error) {
 			APIKey:                viper.GetString("ANTHROPIC_API_KEY"),
 			CopilotGitHubToken:    viper.GetString("COPILOT_GITHUB_TOKEN"),
 			CopilotAccountType:    viper.GetString("COPILOT_ACCOUNT_TYPE"),
+			VertexProjectID:       viper.GetString("VERTEX_PROJECT_ID"),
+			VertexRegion:          viper.GetString("VERTEX_REGION"),
+			BedrockRegion:         viper.GetString("BEDROCK_REGION"),
+			BedrockModelID:        viper.GetString("BEDROCK_MODEL_ID"),
 			Timeout:               llmTimeout,
 			ResponseHeaderTimeout: llmResponseHeaderTimeout,
 		},
@@ -237,6 +245,11 @@ func (c *Config) Validate() error {
 	}
 	// Copilot token is resolved at runtime (env var → cached file → device flow),
 	// so we don't require it at config validation time.
+	if c.LLM.Provider == "vertex" && c.LLM.VertexProjectID == "" {
+		return fmt.Errorf("VERTEX_PROJECT_ID is required when LLM_PROVIDER=vertex")
+	}
+	// Bedrock uses the AWS credential chain, so no explicit key is required at
+	// config validation time.
 	if c.Neo4j.URI == "" {
 		return fmt.Errorf("NEO4J_URI is required")
 	}

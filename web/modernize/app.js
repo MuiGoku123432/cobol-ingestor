@@ -161,6 +161,7 @@ let isStreaming = false;
 let migrationMode = true;
 let swarmEnabled = false;
 let multiRoundEnabled = false;
+let messageCounter = 0;
 let activeSessionId = localStorage.getItem('activeSessionId') || null;
 let sessions = [];
 
@@ -341,6 +342,7 @@ function toggleAgentDetail(id) {
   const card = document.getElementById(`agent-${id}`);
   if (!card) return;
   const detail = card.querySelector(".agent-card-detail");
+  if (!detail) return;
   detail.classList.toggle("expanded");
   const chevron = card.querySelector(".agent-chevron");
   if (detail.classList.contains("expanded")) {
@@ -355,7 +357,7 @@ function updateAgentCard(id, status, isDone, isError) {
   if (!card) return;
   const dot = card.querySelector(".pulse-dot");
   const statusEl = card.querySelector(".agent-status");
-  if (isDone) {
+  if (isDone && dot) {
     dot.classList.remove("pulse-dot", "bg-amber-400");
     dot.classList.add(isError ? "bg-red-400" : "bg-green-400");
   }
@@ -516,6 +518,8 @@ async function sendMessage(e) {
   const text = input.value.trim();
   if (!text || isStreaming) return;
 
+  messageCounter++;
+
   // Add user message
   messages.push({ role: "user", content: text });
   addMessage("user", escapeHtml(text));
@@ -595,59 +599,59 @@ async function sendMessage(e) {
           break;
 
         case "tool_start":
-          addToolIndicator(data.name, data.id);
+          addToolIndicator(data.name, `${messageCounter}-${data.id}`);
           break;
 
         case "tool_result":
           updateToolIndicator(
-            data.id,
+            `${messageCounter}-${data.id}`,
             data.result || data.error,
             !!data.error
           );
           break;
 
         case "agent_start":
-          addAgentCard(data.id, data.name);
+          addAgentCard(`${messageCounter}-${data.id}`, data.name);
           break;
 
         case "agent_tool_start":
-          updateAgentCard(data.id, `Calling ${data.toolName}...`, false, false);
-          appendAgentDetail(data.id, `<span class="text-amber-300">&#9654;</span> <code class="bg-gray-800 px-1 rounded text-amber-300">${escapeHtml(data.toolName)}</code>`);
+          updateAgentCard(`${messageCounter}-${data.id}`, `Calling ${data.toolName}...`, false, false);
+          appendAgentDetail(`${messageCounter}-${data.id}`, `<span class="text-amber-300">&#9654;</span> <code class="bg-gray-800 px-1 rounded text-amber-300">${escapeHtml(data.toolName)}</code>`);
           break;
 
         case "agent_tool_result": {
-          updateAgentCard(data.id, "Analyzing...", false, false);
+          updateAgentCard(`${messageCounter}-${data.id}`, "Analyzing...", false, false);
           const cachedBadge = data.cached === "true" ? ' <span class="text-cyan-400 text-[10px] font-medium">(cached)</span>' : '';
-          appendAgentDetail(data.id, `<span class="text-green-400">&#10003;</span> Result${cachedBadge}: <span class="text-gray-500">${escapeHtml((data.result || "").substring(0, 120))}</span>`);
+          appendAgentDetail(`${messageCounter}-${data.id}`, `<span class="text-green-400">&#10003;</span> Result${cachedBadge}: <span class="text-gray-500">${escapeHtml((data.result || "").substring(0, 120))}</span>`);
           break;
         }
 
         case "agent_progress":
-          updateAgentCard(data.id, "Writing summary...", false, false);
+          updateAgentCard(`${messageCounter}-${data.id}`, "Writing summary...", false, false);
           break;
 
         case "agent_complete":
-          updateAgentCard(data.id, "Complete", true, (data.summary || "").startsWith("Error:"));
+          updateAgentCard(`${messageCounter}-${data.id}`, "Complete", true, (data.summary || "").startsWith("Error:"));
           break;
 
         case "round_start":
-          addRoundDivider(data.round, data.maxRounds);
+          addRoundDivider(`${messageCounter}-${data.round}`, data.maxRounds);
           break;
 
         case "round_complete":
-          updateRoundDivider(data.round);
+          updateRoundDivider(`${messageCounter}-${data.round}`);
           break;
 
         case "coordinator_decision":
-          addCoordinatorDecision(data.round, data.satisfied, data.reasoning, data.followUps);
+          addCoordinatorDecision(`${messageCounter}-${data.round}`, data.satisfied, data.reasoning, data.followUps);
           break;
 
         case "coordinator_tool_start":
-          addToolIndicator(data.toolName, data.toolId);
+          addToolIndicator(data.toolName, `${messageCounter}-${data.toolId}`);
           break;
 
         case "coordinator_tool_result":
-          updateToolIndicator(data.toolId, data.result, false);
+          updateToolIndicator(`${messageCounter}-${data.toolId}`, data.result, false);
           break;
 
         case "synthesis_start":

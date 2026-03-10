@@ -60,7 +60,11 @@ func NewProvider(cfg *config.Config) (Provider, error) {
 		return NewAnthropicProvider(cfg)
 	case "copilot":
 		return NewCopilotProvider(cfg)
+	case "vertex":
+		return NewVertexProvider(cfg)
+	case "bedrock":
+		return NewBedrockProvider(cfg)
 	default:
-		return nil, fmt.Errorf("unknown LLM provider: %q (expected \"anthropic\" or \"copilot\")", cfg.LLM.Provider)
+		return nil, fmt.Errorf("unknown LLM provider: %q (expected \"anthropic\", \"copilot\", \"vertex\", or \"bedrock\")", cfg.LLM.Provider)
 	}
 }
