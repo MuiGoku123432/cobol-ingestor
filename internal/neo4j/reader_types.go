@@ -463,6 +463,36 @@ type EffortEstimate struct {
 	Approach        string `json:"approach,omitempty"`
 }
 
+// IDMSRecordInfo holds IDMS record details for API responses.
+type IDMSRecordInfo struct {
+	Name      string `json:"name"`
+	Area      string `json:"area,omitempty"`
+	ProgramID string `json:"programId"`
+}
+
+// IDMSSchemaInfo holds IDMS schema details for API responses.
+type IDMSSchemaInfo struct {
+	SchemaName    string `json:"schemaName"`
+	SubschemaName string `json:"subschemaName"`
+	ProtocolMode  string `json:"protocolMode,omitempty"`
+	ProgramID     string `json:"programId"`
+}
+
+// IDMSAreaInfo holds IDMS area details for API responses.
+type IDMSAreaInfo struct {
+	Name      string `json:"name"`
+	UsageMode string `json:"usageMode,omitempty"`
+}
+
+// IDMSImpactInfo holds IDMS record impact analysis.
+type IDMSImpactInfo struct {
+	RecordName string   `json:"recordName"`
+	Navigators []string `json:"navigators"` // programs that OBTAIN/FIND/GET
+	Storers    []string `json:"storers"`    // programs that STORE
+	Modifiers  []string `json:"modifiers"`  // programs that MODIFY
+	Erasers    []string `json:"erasers"`    // programs that ERASE
+}
+
 // Filter holds common query filters.
 type Filter struct {
 	Search string

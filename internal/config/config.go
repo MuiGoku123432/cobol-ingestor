@@ -36,7 +36,7 @@ type ModernizeConfig struct {
 
 // LLMConfig selects which provider backend to use.
 type LLMConfig struct {
-	Provider              string        // "anthropic", "copilot", "vertex", or "bedrock"
+	Provider              string        // "anthropic", "copilot", "vertex", "bedrock", or "openai"
 	APIKey                string        // ANTHROPIC_API_KEY or GitHub token depending on provider
 	CopilotGitHubToken    string        // GitHub personal access token for Copilot auth
 	CopilotAccountType    string        // "individual", "business", or "enterprise"
@@ -44,6 +44,10 @@ type LLMConfig struct {
 	VertexRegion          string        // Google Cloud region (for vertex provider, default "us-east5")
 	BedrockRegion         string        // AWS region (for bedrock provider, default "us-east-1")
 	BedrockModelID        string        // Optional Bedrock model ID override
+	OpenAIAPIKey          string        // OPENAI_API_KEY
+	OpenAIBaseURL         string        // OPENAI_BASE_URL (for Azure or proxies)
+	OpenAIOrgID           string        // OPENAI_ORG_ID
+	OpenAIModel           string        // OPENAI_MODEL (default "gpt-4o")
 	Timeout               time.Duration // Overall HTTP client timeout (LLM_TIMEOUT)
 	ResponseHeaderTimeout time.Duration // Time to wait for first response byte (LLM_RESPONSE_HEADER_TIMEOUT)
 }
@@ -79,7 +83,8 @@ type IngestConfig struct {
 	Pass5MaxWorkers int // PASS5_MAX_WORKERS — defaults to MaxWorkers if 0
 	Pass2TokenLimit int
 	OverlapLines    int
-	Pass3BatchSize  int
+	Pass3BatchSize        int
+	StripSequenceColumns  bool // STRIP_SEQUENCE_COLUMNS — strip columns 1-6 and 73-80 from fixed-format COBOL
 }
 
 // WorkersForPass returns the worker count for a specific pass, falling back to MaxWorkers.
@@ -117,6 +122,7 @@ func Load() (*Config, error) {
 	viper.SetDefault("COPILOT_ACCOUNT_TYPE", "individual")
 	viper.SetDefault("LLM_TIMEOUT", "600s")
 	viper.SetDefault("LLM_RESPONSE_HEADER_TIMEOUT", "300s")
+	viper.SetDefault("OPENAI_MODEL", "gpt-4o")
 
 	// Claude model defaults (used by both providers)
 	viper.SetDefault("CLAUDE_OPUS_MODEL", "claude-opus-4-6")
@@ -145,6 +151,7 @@ func Load() (*Config, error) {
 	viper.SetDefault("PASS2_TOKEN_LIMIT", 20000)
 	viper.SetDefault("PASS2_OVERLAP_LINES", 20)
 	viper.SetDefault("PASS3_BATCH_SIZE", 50)
+	viper.SetDefault("STRIP_SEQUENCE_COLUMNS", true)
 
 	// API defaults
 	viper.SetDefault("API_PORT", "8080")
@@ -185,6 +192,10 @@ func Load() (*Config, error) {
 			VertexRegion:          viper.GetString("VERTEX_REGION"),
 			BedrockRegion:         viper.GetString("BEDROCK_REGION"),
 			BedrockModelID:        viper.GetString("BEDROCK_MODEL_ID"),
+			OpenAIAPIKey:          viper.GetString("OPENAI_API_KEY"),
+			OpenAIBaseURL:         viper.GetString("OPENAI_BASE_URL"),
+			OpenAIOrgID:           viper.GetString("OPENAI_ORG_ID"),
+			OpenAIModel:          viper.GetString("OPENAI_MODEL"),
 			Timeout:               llmTimeout,
 			ResponseHeaderTimeout: llmResponseHeaderTimeout,
 		},
@@ -216,7 +227,8 @@ func Load() (*Config, error) {
 			Pass5MaxWorkers: viper.GetInt("PASS5_MAX_WORKERS"),
 			Pass2TokenLimit: viper.GetInt("PASS2_TOKEN_LIMIT"),
 			OverlapLines:    viper.GetInt("PASS2_OVERLAP_LINES"),
-			Pass3BatchSize:  viper.GetInt("PASS3_BATCH_SIZE"),
+			Pass3BatchSize:       viper.GetInt("PASS3_BATCH_SIZE"),
+			StripSequenceColumns: viper.GetBool("STRIP_SEQUENCE_COLUMNS"),
 		},
 		API: APIConfig{
 			Port:     viper.GetString("API_PORT"),
@@ -250,6 +262,9 @@ func (c *Config) Validate() error {
 	}
 	// Bedrock uses the AWS credential chain, so no explicit key is required at
 	// config validation time.
+	if c.LLM.Provider == "openai" && c.LLM.OpenAIAPIKey == "" {
+		return fmt.Errorf("OPENAI_API_KEY is required when LLM_PROVIDER=openai")
+	}
 	if c.Neo4j.URI == "" {
 		return fmt.Errorf("NEO4J_URI is required")
 	}

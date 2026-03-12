@@ -62,6 +62,11 @@ func registerAllTools(s *mcp.Server, reader n4j.Reader, writer *n4j.BatchWriter)
 	registerGetMigrationSequence(s, reader)
 	registerGetFileAccessors(s, reader)
 	registerGetEffortEstimates(s, reader)
+	// IDMS tools
+	registerGetIDMSRecords(s, reader)
+	registerGetIDMSSchema(s, reader)
+	registerGetIDMSImpact(s, reader)
+	registerGetIDMSAreas(s, reader)
 	// Write tools (require writer)
 	if writer != nil {
 		registerReassignProgramDomain(s, writer)
@@ -520,5 +525,66 @@ func registerGetDataHierarchy(s *mcp.Server, reader n4j.Reader) {
 			return nil, nil, err
 		}
 		return nil, &output{Hierarchy: items}, nil
+	})
+}
+
+func registerGetIDMSRecords(s *mcp.Server, reader n4j.Reader) {
+	type output struct {
+		Records []n4j.IDMSRecordInfo `json:"records"`
+	}
+	mcp.AddTool(s, &mcp.Tool{
+		Name:        "get_idms_records",
+		Description: "List IDMS database records referenced by a program, including area associations.",
+	}, func(ctx context.Context, req *mcp.CallToolRequest, input GetIDMSRecordsInput) (*mcp.CallToolResult, *output, error) {
+		items, err := reader.GetIDMSRecords(ctx, input.ProgramID)
+		if err != nil {
+			return nil, nil, err
+		}
+		return nil, &output{Records: items}, nil
+	})
+}
+
+func registerGetIDMSSchema(s *mcp.Server, reader n4j.Reader) {
+	mcp.AddTool(s, &mcp.Tool{
+		Name:        "get_idms_schema",
+		Description: "Get the IDMS schema/subschema binding and protocol mode for a program.",
+	}, func(ctx context.Context, req *mcp.CallToolRequest, input GetIDMSSchemaInput) (*mcp.CallToolResult, *n4j.IDMSSchemaInfo, error) {
+		info, err := reader.GetIDMSSchema(ctx, input.ProgramID)
+		if err != nil {
+			return nil, nil, err
+		}
+		if info == nil {
+			return toolError("no IDMS schema found for program: " + input.ProgramID), nil, nil
+		}
+		return nil, info, nil
+	})
+}
+
+func registerGetIDMSImpact(s *mcp.Server, reader n4j.Reader) {
+	mcp.AddTool(s, &mcp.Tool{
+		Name:        "get_idms_impact",
+		Description: "Analyze which programs navigate, store, modify, or erase a given IDMS record. Shows the blast radius of changing an IDMS record definition.",
+	}, func(ctx context.Context, req *mcp.CallToolRequest, input GetIDMSImpactInput) (*mcp.CallToolResult, *n4j.IDMSImpactInfo, error) {
+		info, err := reader.GetIDMSImpact(ctx, input.RecordName)
+		if err != nil {
+			return nil, nil, err
+		}
+		return nil, info, nil
+	})
+}
+
+func registerGetIDMSAreas(s *mcp.Server, reader n4j.Reader) {
+	type output struct {
+		Areas []n4j.IDMSAreaInfo `json:"areas"`
+	}
+	mcp.AddTool(s, &mcp.Tool{
+		Name:        "get_idms_areas",
+		Description: "List IDMS database areas readied by a program with their usage modes (RETRIEVAL/UPDATE).",
+	}, func(ctx context.Context, req *mcp.CallToolRequest, input GetIDMSAreasInput) (*mcp.CallToolResult, *output, error) {
+		items, err := reader.GetIDMSAreas(ctx, input.ProgramID)
+		if err != nil {
+			return nil, nil, err
+		}
+		return nil, &output{Areas: items}, nil
 	})
 }

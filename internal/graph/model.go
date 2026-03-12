@@ -45,6 +45,14 @@ const (
 	RelAccesses            RelType = "ACCESSES"
 	RelDataFlowsTo         RelType = "DATA_FLOWS_TO"
 	RelLinkageMapsTo       RelType = "LINKAGE_MAPS_TO"
+	RelNavigates           RelType = "NAVIGATES"     // Program → IDMSRecord (OBTAIN/FIND/GET)
+	RelStoresIn            RelType = "STORES_IN"     // Program → IDMSRecord (STORE)
+	RelModifiesRec         RelType = "MODIFIES"      // Program → IDMSRecord (MODIFY)
+	RelErasesRec           RelType = "ERASES"        // Program → IDMSRecord (ERASE)
+	RelBindsTo             RelType = "BINDS_TO"      // Program → IDMSSchema
+	RelReadyArea           RelType = "READIES"       // Program → IDMSArea
+	RelConnectsSet         RelType = "CONNECTS"      // Program → IDMSSet
+	RelDisconnectsSet      RelType = "DISCONNECTS"   // Program → IDMSSet
 )
 
 // Relationship is a generic edge in the graph.
@@ -188,6 +196,53 @@ type VolumeEstimate struct {
 	Reason    string
 }
 
+// IDMSRecord represents an IDMS database record node.
+type IDMSRecord struct {
+	ID        string
+	Name      string
+	Area      string
+	Schema    string
+	ProgramID string
+}
+
+// IDMSSchema represents an IDMS schema/subschema binding.
+type IDMSSchema struct {
+	ID             string
+	SchemaName     string
+	SubschemaName  string
+	ProgramID      string
+	ProtocolMode   string
+}
+
+// IDMSArea represents an IDMS database area.
+type IDMSArea struct {
+	ID        string
+	Name      string
+	UsageMode string
+	Schema    string
+}
+
+// IDMSSet represents an IDMS set relationship.
+type IDMSSet struct {
+	ID           string
+	Name         string
+	OwnerRecord  string
+	MemberRecord string
+	Schema       string
+}
+
+// IDMSOperation represents an IDMS DML operation extracted in Pass 2.
+type IDMSOperation struct {
+	Verb       string
+	Record     string
+	Area       string
+	Set        string
+	CalcKey    string
+	Navigation string
+	Paragraph  string
+	UsageMode  string
+}
+
 // Pass1Result aggregates all extracted data from a single file's Pass 1 analysis.
 type Pass1Result struct {
 	SourceFile         string
@@ -203,6 +258,10 @@ type Pass1Result struct {
 	CICSTxns           []CICSTransaction
 	ExternalInterfaces []ExternalInterface
 	DBTables           []DBTable
+	IDMSRecords        []IDMSRecord
+	IDMSSchemas        []IDMSSchema
+	IDMSAreas          []IDMSArea
+	IDMSSets           []IDMSSet
 	Relationships      []Relationship
 }
 
@@ -222,6 +281,7 @@ type Pass2Result struct {
 	ConditionalLogic []ConditionalLogicItem
 	DynamicCallResolutions []DynamicCallResolution
 	ErrorHandlers  []ErrorHandler
+	IDMSOperations []IDMSOperation
 }
 
 // PerformRelation represents a PERFORM control flow.

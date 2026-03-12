@@ -223,6 +223,11 @@ func TestSplitParagraphs_UnderscoredName(t *testing.T) {
 }
 
 func TestNormalizeContinuations(t *testing.T) {
+	// This test uses unstripped content (cols 1-6 present)
+	oldVal := StripSequenceColumns
+	StripSequenceColumns = false
+	defer func() { StripSequenceColumns = oldVal }()
+
 	// Column:  1234567890123456...
 	// Line 1 has content, line 2 is a continuation (col 7 = '-')
 	content := "      COPY CUST\n      -    REC."

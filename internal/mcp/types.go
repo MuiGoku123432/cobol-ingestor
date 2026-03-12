@@ -79,3 +79,19 @@ type ReassignDomainInput struct {
 	ProgramID string `json:"programId" jsonschema:"The program ID to reassign"`
 	Domain    string `json:"domain" jsonschema:"The target business domain name"`
 }
+
+type GetIDMSRecordsInput struct {
+	ProgramID string `json:"programId" jsonschema:"The program ID to get IDMS records for"`
+}
+
+type GetIDMSSchemaInput struct {
+	ProgramID string `json:"programId" jsonschema:"The program ID to get IDMS schema for"`
+}
+
+type GetIDMSImpactInput struct {
+	RecordName string `json:"recordName" jsonschema:"The IDMS record name to analyze"`
+}
+
+type GetIDMSAreasInput struct {
+	ProgramID string `json:"programId" jsonschema:"The program ID to get IDMS areas for"`
+}

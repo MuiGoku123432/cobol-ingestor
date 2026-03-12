@@ -67,6 +67,11 @@ type Reader interface {
 	GetFileAccessors(ctx context.Context, fileName string) (*FileAccessInfo, error)
 	// Effort estimation
 	GetEffortEstimates(ctx context.Context) ([]EffortEstimate, error)
+	// IDMS support
+	GetIDMSRecords(ctx context.Context, programID string) ([]IDMSRecordInfo, error)
+	GetIDMSSchema(ctx context.Context, programID string) (*IDMSSchemaInfo, error)
+	GetIDMSAreas(ctx context.Context, programID string) ([]IDMSAreaInfo, error)
+	GetIDMSImpact(ctx context.Context, recordName string) (*IDMSImpactInfo, error)
 }
 
 // Ensure Client implements Reader.
@@ -1392,4 +1397,107 @@ func getBool(rec *neo4j.Record, key string) bool {
 		return b
 	}
 	return false
+}
+
+// GetIDMSRecords returns IDMS records associated with a program.
+func (c *Client) GetIDMSRecords(ctx context.Context, programID string) ([]IDMSRecordInfo, error) {
+	session := c.NewSession(ctx)
+	defer session.Close(ctx)
+
+	result, err := session.Run(ctx,
+		"MATCH (r:IDMSRecord {programId: $pid}) RETURN r.name AS name, r.area AS area, r.programId AS programId ORDER BY r.name",
+		map[string]any{"pid": programID})
+	if err != nil {
+		return nil, fmt.Errorf("IDMS records query: %w", err)
+	}
+
+	var items []IDMSRecordInfo
+	for result.Next(ctx) {
+		rec := result.Record()
+		items = append(items, IDMSRecordInfo{
+			Name:      getStr(rec, "name"),
+			Area:      getStr(rec, "area"),
+			ProgramID: getStr(rec, "programId"),
+		})
+	}
+	return items, nil
+}
+
+// GetIDMSSchema returns the IDMS schema binding for a program.
+func (c *Client) GetIDMSSchema(ctx context.Context, programID string) (*IDMSSchemaInfo, error) {
+	session := c.NewSession(ctx)
+	defer session.Close(ctx)
+
+	result, err := session.Run(ctx,
+		"MATCH (p:Program {programId: $pid})-[:BINDS_TO]->(s:IDMSSchema) "+
+			"RETURN s.schemaName AS schemaName, s.subschemaName AS subschemaName, s.protocolMode AS protocolMode, s.programId AS programId LIMIT 1",
+		map[string]any{"pid": programID})
+	if err != nil {
+		return nil, fmt.Errorf("IDMS schema query: %w", err)
+	}
+
+	if !result.Next(ctx) {
+		return nil, nil
+	}
+	rec := result.Record()
+	return &IDMSSchemaInfo{
+		SchemaName:    getStr(rec, "schemaName"),
+		SubschemaName: getStr(rec, "subschemaName"),
+		ProtocolMode:  getStr(rec, "protocolMode"),
+		ProgramID:     getStr(rec, "programId"),
+	}, nil
+}
+
+// GetIDMSAreas returns IDMS areas readied by a program.
+func (c *Client) GetIDMSAreas(ctx context.Context, programID string) ([]IDMSAreaInfo, error) {
+	session := c.NewSession(ctx)
+	defer session.Close(ctx)
+
+	result, err := session.Run(ctx,
+		"MATCH (p:Program {programId: $pid})-[r:READIES]->(a:IDMSArea) "+
+			"RETURN a.name AS name, r.usageMode AS usageMode ORDER BY a.name",
+		map[string]any{"pid": programID})
+	if err != nil {
+		return nil, fmt.Errorf("IDMS areas query: %w", err)
+	}
+
+	var items []IDMSAreaInfo
+	for result.Next(ctx) {
+		rec := result.Record()
+		items = append(items, IDMSAreaInfo{
+			Name:      getStr(rec, "name"),
+			UsageMode: getStr(rec, "usageMode"),
+		})
+	}
+	return items, nil
+}
+
+// GetIDMSImpact returns which programs navigate, store, modify, or erase a given IDMS record.
+func (c *Client) GetIDMSImpact(ctx context.Context, recordName string) (*IDMSImpactInfo, error) {
+	session := c.NewSession(ctx)
+	defer session.Close(ctx)
+
+	info := &IDMSImpactInfo{RecordName: recordName}
+
+	for _, pair := range []struct {
+		rel   string
+		field *[]string
+	}{
+		{"NAVIGATES", &info.Navigators},
+		{"STORES_IN", &info.Storers},
+		{"MODIFIES", &info.Modifiers},
+		{"ERASES", &info.Erasers},
+	} {
+		result, err := session.Run(ctx,
+			fmt.Sprintf("MATCH (p:Program)-[:%s]->(r:IDMSRecord {name: $name}) RETURN DISTINCT p.programId AS pid ORDER BY pid", pair.rel),
+			map[string]any{"name": recordName})
+		if err != nil {
+			return nil, fmt.Errorf("IDMS impact query (%s): %w", pair.rel, err)
+		}
+		for result.Next(ctx) {
+			*pair.field = append(*pair.field, getStr(result.Record(), "pid"))
+		}
+	}
+
+	return info, nil
 }

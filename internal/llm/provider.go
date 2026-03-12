@@ -64,7 +64,9 @@ func NewProvider(cfg *config.Config) (Provider, error) {
 		return NewVertexProvider(cfg)
 	case "bedrock":
 		return NewBedrockProvider(cfg)
+	case "openai":
+		return NewOpenAIProvider(cfg)
 	default:
-		return nil, fmt.Errorf("unknown LLM provider: %q (expected \"anthropic\", \"copilot\", \"vertex\", or \"bedrock\")", cfg.LLM.Provider)
+		return nil, fmt.Errorf("unknown LLM provider: %q (expected \"anthropic\", \"copilot\", \"vertex\", \"bedrock\", or \"openai\")", cfg.LLM.Provider)
 	}
 }

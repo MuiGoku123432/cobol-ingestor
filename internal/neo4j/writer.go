@@ -170,6 +170,14 @@ func mergeKeyForLabel(label string) string {
 		return "id"
 	case "DBTable":
 		return "name"
+	case "IDMSRecord":
+		return "name"
+	case "IDMSSchema":
+		return "id"
+	case "IDMSArea":
+		return "name"
+	case "IDMSSet":
+		return "name"
 	default:
 		return "id"
 	}
@@ -406,6 +414,73 @@ func (w *BatchWriter) WritePass1Result(ctx context.Context, result *graph.Pass1R
 			if err := w.WriteRelationships(ctx, "ACCESSES", "Program", "programId", "DBTable", "name", accessRows); err != nil {
 				return err
 			}
+		}
+	}
+
+	// Write IDMSSchema nodes
+	if len(result.IDMSSchemas) > 0 {
+		nodes := make([]map[string]any, len(result.IDMSSchemas))
+		for i, s := range result.IDMSSchemas {
+			nodes[i] = map[string]any{
+				"id":            s.ID,
+				"schemaName":    s.SchemaName,
+				"subschemaName": s.SubschemaName,
+				"programId":     s.ProgramID,
+				"protocolMode":  s.ProtocolMode,
+			}
+		}
+		if err := w.WriteNodes(ctx, "IDMSSchema", "id", nodes); err != nil {
+			return err
+		}
+	}
+
+	// Write IDMSRecord nodes
+	if len(result.IDMSRecords) > 0 {
+		nodes := make([]map[string]any, len(result.IDMSRecords))
+		for i, r := range result.IDMSRecords {
+			nodes[i] = map[string]any{
+				"id":        r.ID,
+				"name":      r.Name,
+				"area":      r.Area,
+				"schema":    r.Schema,
+				"programId": r.ProgramID,
+			}
+		}
+		if err := w.WriteNodes(ctx, "IDMSRecord", "name", nodes); err != nil {
+			return err
+		}
+	}
+
+	// Write IDMSArea nodes
+	if len(result.IDMSAreas) > 0 {
+		nodes := make([]map[string]any, len(result.IDMSAreas))
+		for i, a := range result.IDMSAreas {
+			nodes[i] = map[string]any{
+				"id":        a.ID,
+				"name":      a.Name,
+				"usageMode": a.UsageMode,
+				"schema":    a.Schema,
+			}
+		}
+		if err := w.WriteNodes(ctx, "IDMSArea", "name", nodes); err != nil {
+			return err
+		}
+	}
+
+	// Write IDMSSet nodes
+	if len(result.IDMSSets) > 0 {
+		nodes := make([]map[string]any, len(result.IDMSSets))
+		for i, s := range result.IDMSSets {
+			nodes[i] = map[string]any{
+				"id":           s.ID,
+				"name":         s.Name,
+				"ownerRecord":  s.OwnerRecord,
+				"memberRecord": s.MemberRecord,
+				"schema":       s.Schema,
+			}
+		}
+		if err := w.WriteNodes(ctx, "IDMSSet", "name", nodes); err != nil {
+			return err
 		}
 	}
 
@@ -774,6 +849,121 @@ func (w *BatchWriter) WritePass2Result(ctx context.Context, result *graph.Pass2R
 				"SET p.errorPattern = row.pattern, p.errorDetails = row.details",
 			ehRows); err != nil {
 			w.logger.Warn("failed to update error handling", zap.Error(err))
+		}
+	}
+
+	// Write IDMS operation relationships
+	if len(result.IDMSOperations) > 0 {
+		var idmsRels []graph.Relationship
+		for _, op := range result.IDMSOperations {
+			props := map[string]any{
+				"verb":       op.Verb,
+				"paragraph":  op.Paragraph,
+				"navigation": op.Navigation,
+				"calcKey":    op.CalcKey,
+				"usageMode":  op.UsageMode,
+			}
+
+			switch op.Verb {
+			case "OBTAIN", "FIND", "GET":
+				if op.Record != "" {
+					idmsRels = append(idmsRels, graph.Relationship{
+						Type:       graph.RelNavigates,
+						FromLabel:  "Program",
+						FromKey:    programID,
+						ToLabel:    "IDMSRecord",
+						ToKey:      op.Record,
+						Properties: props,
+					})
+				}
+			case "STORE":
+				if op.Record != "" {
+					idmsRels = append(idmsRels, graph.Relationship{
+						Type:       graph.RelStoresIn,
+						FromLabel:  "Program",
+						FromKey:    programID,
+						ToLabel:    "IDMSRecord",
+						ToKey:      op.Record,
+						Properties: props,
+					})
+				}
+			case "MODIFY":
+				if op.Record != "" {
+					idmsRels = append(idmsRels, graph.Relationship{
+						Type:       graph.RelModifiesRec,
+						FromLabel:  "Program",
+						FromKey:    programID,
+						ToLabel:    "IDMSRecord",
+						ToKey:      op.Record,
+						Properties: props,
+					})
+				}
+			case "ERASE":
+				if op.Record != "" {
+					idmsRels = append(idmsRels, graph.Relationship{
+						Type:       graph.RelErasesRec,
+						FromLabel:  "Program",
+						FromKey:    programID,
+						ToLabel:    "IDMSRecord",
+						ToKey:      op.Record,
+						Properties: props,
+					})
+				}
+			case "CONNECT":
+				if op.Set != "" {
+					idmsRels = append(idmsRels, graph.Relationship{
+						Type:       graph.RelConnectsSet,
+						FromLabel:  "Program",
+						FromKey:    programID,
+						ToLabel:    "IDMSSet",
+						ToKey:      op.Set,
+						Properties: props,
+					})
+				}
+			case "DISCONNECT":
+				if op.Set != "" {
+					idmsRels = append(idmsRels, graph.Relationship{
+						Type:       graph.RelDisconnectsSet,
+						FromLabel:  "Program",
+						FromKey:    programID,
+						ToLabel:    "IDMSSet",
+						ToKey:      op.Set,
+						Properties: props,
+					})
+				}
+			case "READY":
+				if op.Area != "" {
+					idmsRels = append(idmsRels, graph.Relationship{
+						Type:       graph.RelReadyArea,
+						FromLabel:  "Program",
+						FromKey:    programID,
+						ToLabel:    "IDMSArea",
+						ToKey:      op.Area,
+						Properties: props,
+					})
+				}
+			}
+		}
+
+		if len(idmsRels) > 0 {
+			idmsGrouped := groupRelationships(idmsRels)
+			for key, groupRels := range idmsGrouped {
+				rows := make([]map[string]any, len(groupRels))
+				for i, r := range groupRels {
+					p := r.Properties
+					if p == nil {
+						p = map[string]any{}
+					}
+					rows[i] = map[string]any{
+						"fromKey": r.FromKey,
+						"toKey":   r.ToKey,
+						"props":   p,
+					}
+				}
+				if err := w.WriteRelationships(ctx, string(key.relType), key.fromLabel, mergeKeyForLabel(key.fromLabel), key.toLabel, mergeKeyForLabel(key.toLabel), rows); err != nil {
+					w.logger.Warn("failed to write IDMS relationships", zap.String("type", string(key.relType)), zap.Error(err))
+				}
+			}
 		}
 	}
 

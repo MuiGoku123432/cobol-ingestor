@@ -203,3 +203,19 @@ func (m *MockReader) GetFileAccessors(_ context.Context, _ string) (*n4j.FileAcc
 func (m *MockReader) GetEffortEstimates(_ context.Context) ([]n4j.EffortEstimate, error) {
 	return nil, m.Err
 }
+
+func (m *MockReader) GetIDMSRecords(_ context.Context, _ string) ([]n4j.IDMSRecordInfo, error) {
+	return nil, m.Err
+}
+
+func (m *MockReader) GetIDMSSchema(_ context.Context, _ string) (*n4j.IDMSSchemaInfo, error) {
+	return nil, m.Err
+}
+
+func (m *MockReader) GetIDMSAreas(_ context.Context, _ string) ([]n4j.IDMSAreaInfo, error) {
+	return nil, m.Err
+}
+
+func (m *MockReader) GetIDMSImpact(_ context.Context, _ string) (*n4j.IDMSImpactInfo, error) {
+	return nil, m.Err
+}
