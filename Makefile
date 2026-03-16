@@ -64,17 +64,24 @@ swagger:
 run-desktop:
 	cd cmd/desktop && wails dev
 
-build-desktop:
-	cd cmd/desktop && wails build -o ../../$(BINARY_DIR)/cobol-graph-desktop
+build-desktop: bin
+	cd cmd/desktop && wails build
+	cp cmd/desktop/build/bin/cobol-graph-desktop bin/cobol-graph-desktop
 
-desktop-mac:
-	cd cmd/desktop && wails build -platform darwin/universal -o ../../$(BINARY_DIR)/cobol-graph-desktop
+desktop-mac: bin
+	cd cmd/desktop && wails build -platform darwin/universal
+	cp cmd/desktop/build/bin/cobol-graph-desktop bin/cobol-graph-desktop
 
-desktop-linux:
-	cd cmd/desktop && wails build -platform linux/amd64 -o ../../$(BINARY_DIR)/cobol-graph-desktop
+desktop-linux: bin
+	cd cmd/desktop && wails build -platform linux/amd64
+	cp cmd/desktop/build/bin/cobol-graph-desktop bin/cobol-graph-desktop
 
-desktop-windows:
-	cd cmd/desktop && wails build -platform windows/amd64 -o ../../$(BINARY_DIR)/cobol-graph-desktop.exe
+desktop-windows: bin
+	cd cmd/desktop && wails build -platform windows/amd64
+	cp cmd/desktop/build/bin/cobol-graph-desktop.exe bin/cobol-graph-desktop.exe
+
+bin:
+	mkdir -p bin
 
 docker:
 	docker compose up -d
