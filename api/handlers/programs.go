@@ -164,6 +164,196 @@ func (h *ProgramHandler) ExternalInterfaces(c *gin.Context) {
 	c.JSON(http.StatusOK, gin.H{"data": items})
 }
 
+// SQL returns SQL statements for a program.
+func (h *ProgramHandler) SQL(c *gin.Context) {
+	programID := c.Param("id")
+	items, err := h.Reader.GetProgramSQL(c.Request.Context(), programID)
+	if err != nil {
+		h.Logger.Error("getting SQL statements", zap.Error(err))
+		middleware.InternalError(c, "failed to get SQL statements")
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{"data": items})
+}
+
+// CICS returns CICS transactions for a program.
+func (h *ProgramHandler) CICS(c *gin.Context) {
+	programID := c.Param("id")
+	items, err := h.Reader.GetProgramCICS(c.Request.Context(), programID)
+	if err != nil {
+		h.Logger.Error("getting CICS transactions", zap.Error(err))
+		middleware.InternalError(c, "failed to get CICS transactions")
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{"data": items})
+}
+
+// ParagraphFlow returns paragraph execution flow for a program.
+func (h *ProgramHandler) ParagraphFlow(c *gin.Context) {
+	programID := c.Param("id")
+	items, err := h.Reader.GetParagraphFlow(c.Request.Context(), programID)
+	if err != nil {
+		h.Logger.Error("getting paragraph flow", zap.Error(err))
+		middleware.InternalError(c, "failed to get paragraph flow")
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{"data": items})
+}
+
+// DataFlow returns data flow information for a program.
+func (h *ProgramHandler) DataFlow(c *gin.Context) {
+	programID := c.Param("id")
+	items, err := h.Reader.GetDataFlow(c.Request.Context(), programID)
+	if err != nil {
+		h.Logger.Error("getting data flow", zap.Error(err))
+		middleware.InternalError(c, "failed to get data flow")
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{"data": items})
+}
+
+// DataHierarchy returns data hierarchy for a program.
+func (h *ProgramHandler) DataHierarchy(c *gin.Context) {
+	programID := c.Param("id")
+	items, err := h.Reader.GetDataHierarchy(c.Request.Context(), programID)
+	if err != nil {
+		h.Logger.Error("getting data hierarchy", zap.Error(err))
+		middleware.InternalError(c, "failed to get data hierarchy")
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{"data": items})
+}
+
+// DeadParagraphs returns dead paragraphs for a program.
+func (h *ProgramHandler) DeadParagraphs(c *gin.Context) {
+	programID := c.Param("id")
+	items, err := h.Reader.GetDeadParagraphs(c.Request.Context(), programID)
+	if err != nil {
+		h.Logger.Error("getting dead paragraphs", zap.Error(err))
+		middleware.InternalError(c, "failed to get dead paragraphs")
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{"data": items})
+}
+
+// Source returns the source code for a program.
+func (h *ProgramHandler) Source(c *gin.Context) {
+	programID := c.Param("id")
+	result, err := h.Reader.GetProgramSource(c.Request.Context(), programID)
+	if err != nil {
+		h.Logger.Error("getting program source", zap.Error(err))
+		middleware.InternalError(c, "failed to get program source")
+		return
+	}
+	if result == nil {
+		middleware.NotFound(c, "program source not found")
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{"data": result})
+}
+
+// JCL returns JCL information for a program.
+func (h *ProgramHandler) JCL(c *gin.Context) {
+	programID := c.Param("id")
+	result, err := h.Reader.GetProgramJCL(c.Request.Context(), programID)
+	if err != nil {
+		h.Logger.Error("getting program JCL", zap.Error(err))
+		middleware.InternalError(c, "failed to get program JCL")
+		return
+	}
+	if result == nil {
+		middleware.NotFound(c, "program JCL not found")
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{"data": result})
+}
+
+// TableAccess returns table access information for a program.
+func (h *ProgramHandler) TableAccess(c *gin.Context) {
+	programID := c.Param("id")
+	result, err := h.Reader.GetProgramTableAccess(c.Request.Context(), programID)
+	if err != nil {
+		h.Logger.Error("getting table access", zap.Error(err))
+		middleware.InternalError(c, "failed to get table access")
+		return
+	}
+	if result == nil {
+		middleware.NotFound(c, "table access not found")
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{"data": result})
+}
+
+// CrossProgramFlow returns cross-program data flow for a program.
+func (h *ProgramHandler) CrossProgramFlow(c *gin.Context) {
+	programID := c.Param("id")
+	items, err := h.Reader.GetCrossProgramDataFlow(c.Request.Context(), programID)
+	if err != nil {
+		h.Logger.Error("getting cross-program data flow", zap.Error(err))
+		middleware.InternalError(c, "failed to get cross-program data flow")
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{"data": items})
+}
+
+// EffortEstimate returns the effort estimate for a specific program.
+func (h *ProgramHandler) EffortEstimate(c *gin.Context) {
+	programID := c.Param("id")
+	all, err := h.Reader.GetEffortEstimates(c.Request.Context())
+	if err != nil {
+		h.Logger.Error("getting effort estimates", zap.Error(err))
+		middleware.InternalError(c, "failed to get effort estimates")
+		return
+	}
+	for _, e := range all {
+		if e.ProgramID == programID {
+			c.JSON(http.StatusOK, gin.H{"data": e})
+			return
+		}
+	}
+	middleware.NotFound(c, "effort estimate not found")
+}
+
+// IDMSRecords returns IDMS records for a program.
+func (h *ProgramHandler) IDMSRecords(c *gin.Context) {
+	programID := c.Param("id")
+	items, err := h.Reader.GetIDMSRecords(c.Request.Context(), programID)
+	if err != nil {
+		h.Logger.Error("getting IDMS records", zap.Error(err))
+		middleware.InternalError(c, "failed to get IDMS records")
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{"data": items})
+}
+
+// IDMSSchema returns the IDMS schema for a program.
+func (h *ProgramHandler) IDMSSchema(c *gin.Context) {
+	programID := c.Param("id")
+	result, err := h.Reader.GetIDMSSchema(c.Request.Context(), programID)
+	if err != nil {
+		h.Logger.Error("getting IDMS schema", zap.Error(err))
+		middleware.InternalError(c, "failed to get IDMS schema")
+		return
+	}
+	if result == nil {
+		middleware.NotFound(c, "IDMS schema not found")
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{"data": result})
+}
+
+// IDMSAreas returns IDMS areas for a program.
+func (h *ProgramHandler) IDMSAreas(c *gin.Context) {
+	programID := c.Param("id")
+	items, err := h.Reader.GetIDMSAreas(c.Request.Context(), programID)
+	if err != nil {
+		h.Logger.Error("getting IDMS areas", zap.Error(err))
+		middleware.InternalError(c, "failed to get IDMS areas")
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{"data": items})
+}
+
 func parsePagination(c *gin.Context) (page, pageSize int) {
 	page, _ = strconv.Atoi(c.DefaultQuery("page", "1"))
 	pageSize, _ = strconv.Atoi(c.DefaultQuery("pageSize", "20"))

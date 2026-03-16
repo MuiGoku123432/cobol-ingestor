@@ -23,7 +23,9 @@ func TestParsePass3Response_Valid(t *testing.T) {
 			{"programId": "OLDUTIL", "reason": "No callers, utility naming pattern"}
 		],
 		"riskFlags": [
-			{"programId": "MAINPROG", "riskType": "hub", "details": "Called by 15 programs", "score": 0.8}
+			{"programId": "MAINPROG", "riskType": "hub", "details": "Called by 15 programs", "score": 0.8},
+			{"programId": "CUSTMAINT", "riskType": "standard", "details": "Moderate complexity", "score": 0.3},
+			{"programId": "CUSTINQ", "riskType": "standard", "details": "Simple inquiry program", "score": 0.1}
 		],
 		"bridgePrograms": [
 			{"programId": "XFERPROG", "domains": ["Customer Management", "Account Processing"], "reason": "Bridges customer and account domains"}
@@ -54,10 +56,16 @@ func TestParsePass3Response_Valid(t *testing.T) {
 	assert.Len(t, result.DeadCodeFlags, 1)
 	assert.Equal(t, "OLDUTIL", result.DeadCodeFlags[0].ProgramID)
 
-	assert.Len(t, result.RiskFlags, 1)
+	assert.Len(t, result.RiskFlags, 3)
 	assert.Equal(t, "MAINPROG", result.RiskFlags[0].ProgramID)
 	assert.Equal(t, "hub", result.RiskFlags[0].RiskType)
 	assert.Equal(t, 0.8, result.RiskFlags[0].Score)
+	assert.Equal(t, "CUSTMAINT", result.RiskFlags[1].ProgramID)
+	assert.Equal(t, "standard", result.RiskFlags[1].RiskType)
+	assert.Equal(t, 0.3, result.RiskFlags[1].Score)
+	assert.Equal(t, "CUSTINQ", result.RiskFlags[2].ProgramID)
+	assert.Equal(t, "standard", result.RiskFlags[2].RiskType)
+	assert.Equal(t, 0.1, result.RiskFlags[2].Score)
 
 	// Bridge programs
 	require.Len(t, result.BridgePrograms, 1)

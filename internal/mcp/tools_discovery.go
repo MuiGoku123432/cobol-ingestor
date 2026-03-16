@@ -3,6 +3,7 @@ package mcp
 import (
 	"context"
 
+	"cobol-ingestor/internal/graph"
 	n4j "cobol-ingestor/internal/neo4j"
 
 	"github.com/modelcontextprotocol/go-sdk/mcp"
@@ -200,6 +201,174 @@ func registerGetSharedDataChannels(s *mcp.Server, reader n4j.Reader) {
 			return nil, nil, err
 		}
 		return nil, &output{Channels: items}, nil
+	})
+}
+
+// Domain reassignment write tool
+
+func registerReassignProgramDomain(s *mcp.Server, writer *n4j.BatchWriter) {
+	type output struct {
+		Success   bool   `json:"success"`
+		ProgramID string `json:"programId"`
+		Domain    string `json:"domain"`
+	}
+	mcp.AddTool(s, &mcp.Tool{
+		Name:        "reassign_program_domain",
+		Description: "Move a program to a different business domain. Deletes existing BELONGS_TO edges and creates a new one with confidence 1.0 and source 'manual_override'.",
+	}, func(ctx context.Context, req *mcp.CallToolRequest, input ReassignDomainInput) (*mcp.CallToolResult, *output, error) {
+		if input.ProgramID == "" || input.Domain == "" {
+			return toolError("both programId and domain are required"), nil, nil
+		}
+		if err := writer.ReassignProgramDomain(ctx, input.ProgramID, input.Domain); err != nil {
+			return nil, nil, err
+		}
+		return nil, &output{
+			Success:   true,
+			ProgramID: input.ProgramID,
+			Domain:    input.Domain,
+		}, nil
+	})
+}
+
+// Copybook structure tool
+
+func registerGetCopybookStructure(s *mcp.Server, reader n4j.Reader) {
+	type output struct {
+		Items []n4j.DataItemInfo `json:"items"`
+	}
+	mcp.AddTool(s, &mcp.Tool{
+		Name:        "get_copybook_structure",
+		Description: "Get the data structure defined in a copybook: all data items with levels, PIC clauses, and usage. Use to understand shared data layouts.",
+	}, func(ctx context.Context, req *mcp.CallToolRequest, input GetCopybookStructureInput) (*mcp.CallToolResult, *output, error) {
+		items, err := reader.GetCopybookStructure(ctx, input.Name)
+		if err != nil {
+			return nil, nil, err
+		}
+		if len(items) == 0 {
+			return toolError("no data items found for copybook: " + input.Name), nil, nil
+		}
+		return nil, &output{Items: items}, nil
+	})
+}
+
+// Type mappings tool
+
+func registerGetTypeMappings(s *mcp.Server, reader n4j.Reader) {
+	type mappedItem struct {
+		Name    string            `json:"name"`
+		Level   int               `json:"level"`
+		Picture string            `json:"picture,omitempty"`
+		Usage   string            `json:"usage,omitempty"`
+		Mapping graph.TypeMapping `json:"mapping"`
+	}
+	type output struct {
+		Items []mappedItem `json:"items"`
+	}
+	mcp.AddTool(s, &mcp.Tool{
+		Name:        "get_type_mappings",
+		Description: "Get Java and SQL type mappings for data items in a program or copybook. Maps COBOL PIC clauses and USAGE to Java types, SQL types, storage format, and byte length.",
+	}, func(ctx context.Context, req *mcp.CallToolRequest, input GetTypeMappingsInput) (*mcp.CallToolResult, *output, error) {
+		var dataItems []n4j.DataItemInfo
+		var err error
+		if input.CopybookName != "" {
+			dataItems, err = reader.GetCopybookStructure(ctx, input.CopybookName)
+		} else if input.ProgramID != "" {
+			dataItems, err = reader.GetDataItems(ctx, input.ProgramID)
+		} else {
+			return toolError("either programId or copybookName is required"), nil, nil
+		}
+		if err != nil {
+			return nil, nil, err
+		}
+
+		var items []mappedItem
+		for _, di := range dataItems {
+			if di.Picture == "" {
+				continue
+			}
+			items = append(items, mappedItem{
+				Name:    di.Name,
+				Level:   di.Level,
+				Picture: di.Picture,
+				Usage:   di.Usage,
+				Mapping: graph.MapPICToTypes(di.Picture, di.Usage),
+			})
+		}
+		if len(items) == 0 {
+			return toolError("no data items with PIC clauses found"), nil, nil
+		}
+		return nil, &output{Items: items}, nil
+	})
+}
+
+// Source code retrieval tool
+
+func registerGetProgramSource(s *mcp.Server, reader n4j.Reader) {
+	mcp.AddTool(s, &mcp.Tool{
+		Name:        "get_program_source",
+		Description: "Retrieve the raw COBOL source code for a program from disk. Returns the full source text with line count.",
+	}, func(ctx context.Context, req *mcp.CallToolRequest, input GetProgramInput) (*mcp.CallToolResult, *n4j.ProgramSourceInfo, error) {
+		info, err := reader.GetProgramSource(ctx, input.ProgramID)
+		if err != nil {
+			return nil, nil, err
+		}
+		if info == nil {
+			return toolError("program not found or no source file: " + input.ProgramID), nil, nil
+		}
+		return nil, info, nil
+	})
+}
+
+// Migration dependency ordering tool
+
+func registerGetMigrationSequence(s *mcp.Server, reader n4j.Reader) {
+	type emptyInput struct{}
+	type output struct {
+		Steps []n4j.MigrationStep `json:"steps"`
+	}
+	mcp.AddTool(s, &mcp.Tool{
+		Name:        "get_migration_sequence",
+		Description: "Get dependency-ordered migration sequence. Programs are sorted so that dependencies (callees) are migrated before callers. Each step shows blockedBy dependencies, tier (LEAF/MIDDLE/ROOT), and T-shirt sizing.",
+	}, func(ctx context.Context, req *mcp.CallToolRequest, input emptyInput) (*mcp.CallToolResult, *output, error) {
+		steps, err := reader.GetMigrationSequence(ctx)
+		if err != nil {
+			return nil, nil, err
+		}
+		return nil, &output{Steps: steps}, nil
+	})
+}
+
+// File accessor drill-down tool
+
+func registerGetFileAccessors(s *mcp.Server, reader n4j.Reader) {
+	mcp.AddTool(s, &mcp.Tool{
+		Name:        "get_file_accessors",
+		Description: "Get all programs that access a file (READS, WRITES, or both) and any JCL DD card mappings for the file.",
+	}, func(ctx context.Context, req *mcp.CallToolRequest, input GetFileAccessorsInput) (*mcp.CallToolResult, *n4j.FileAccessInfo, error) {
+		info, err := reader.GetFileAccessors(ctx, input.FileName)
+		if err != nil {
+			return nil, nil, err
+		}
+		return nil, info, nil
+	})
+}
+
+// Effort estimation tool
+
+func registerGetEffortEstimates(s *mcp.Server, reader n4j.Reader) {
+	type emptyInput struct{}
+	type output struct {
+		Estimates []n4j.EffortEstimate `json:"estimates"`
+	}
+	mcp.AddTool(s, &mcp.Tool{
+		Name:        "get_effort_estimates",
+		Description: "Get structural complexity and effort estimates for all programs. Includes paragraph/copybook/data item counts, external interfaces, SQL/CICS counts, complexity score, and T-shirt size (S/M/L/XL).",
+	}, func(ctx context.Context, req *mcp.CallToolRequest, input emptyInput) (*mcp.CallToolResult, *output, error) {
+		items, err := reader.GetEffortEstimates(ctx)
+		if err != nil {
+			return nil, nil, err
+		}
+		return nil, &output{Estimates: items}, nil
 	})
 }
 

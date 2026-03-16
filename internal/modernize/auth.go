@@ -229,6 +229,21 @@ func pollForToken(ctx context.Context, ps *ProviderState, deviceCode string, int
 	}
 }
 
+// ModelLister is an optional interface that providers can implement to
+// expose a dynamic list of available models (e.g. from Copilot's API).
+type ModelLister interface {
+	ListModels(ctx context.Context) ([]ModelInfo, error)
+}
+
+// ModelInfo describes a model returned by a ModelLister.
+type ModelInfo struct {
+	ID                   string `json:"id"`
+	Name                 string `json:"name"`
+	Description          string `json:"description,omitempty"`
+	MaxTokens            int    `json:"max_tokens,omitempty"`
+	SupportsToolCalling  bool   `json:"supports_tool_calling,omitempty"`
+}
+
 // ModelsHandler returns a handler for GET /api/models.
 func ModelsHandler(ps *ProviderState) gin.HandlerFunc {
 	return func(c *gin.Context) {
@@ -238,38 +253,59 @@ func ModelsHandler(ps *ProviderState) gin.HandlerFunc {
 			return
 		}
 
-		cp, ok := provider.(*llm.CopilotProvider)
-		if !ok {
-			// Non-copilot provider: return single entry with current model
-			model := ps.GetModel()
-			if model == "" {
-				c.JSON(http.StatusOK, []gin.H{})
+		// If the provider can list models dynamically, use that.
+		if lister, ok := provider.(ModelLister); ok {
+			models, err := lister.ListModels(c.Request.Context())
+			if err != nil {
+				c.JSON(http.StatusInternalServerError, gin.H{"error": fmt.Sprintf("fetching models: %v", err)})
 				return
 			}
-			c.JSON(http.StatusOK, []gin.H{{
-				"id":   model,
-				"name": model,
-			}})
+			result := make([]gin.H, 0, len(models))
+			for _, m := range models {
+				result = append(result, gin.H{
+					"id":                    m.ID,
+					"name":                  m.Name,
+					"description":           m.Description,
+					"max_tokens":            m.MaxTokens,
+					"supports_tool_calling": m.SupportsToolCalling,
+				})
+			}
+			c.JSON(http.StatusOK, result)
 			return
 		}
 
-		models, err := cp.GetCopilotProvider().GetModels(c.Request.Context())
-		if err != nil {
-			c.JSON(http.StatusInternalServerError, gin.H{"error": fmt.Sprintf("fetching models: %v", err)})
+		// Fallback for providers without dynamic model listing:
+		// check for the Copilot-specific path (backward compat).
+		if cp, ok := provider.(*llm.CopilotProvider); ok {
+			models, err := cp.GetCopilotProvider().GetModels(c.Request.Context())
+			if err != nil {
+				c.JSON(http.StatusInternalServerError, gin.H{"error": fmt.Sprintf("fetching models: %v", err)})
+				return
+			}
+			result := make([]gin.H, 0, len(models))
+			for _, m := range models {
+				result = append(result, gin.H{
+					"id":                    m.ID,
+					"name":                  m.Name,
+					"description":           m.Description,
+					"max_tokens":            m.MaxTokens,
+					"supports_tool_calling": m.SupportsToolCalling,
+				})
+			}
+			c.JSON(http.StatusOK, result)
 			return
 		}
 
-		result := make([]gin.H, 0, len(models))
-		for _, m := range models {
-			result = append(result, gin.H{
-				"id":                     m.ID,
-				"name":                   m.Name,
-				"description":            m.Description,
-				"max_tokens":             m.MaxTokens,
-				"supports_tool_calling":  m.SupportsToolCalling,
-			})
+		// Generic provider: return current model as a single entry.
+		model := ps.GetModel()
+		if model == "" {
+			c.JSON(http.StatusOK, []gin.H{})
+			return
 		}
-		c.JSON(http.StatusOK, result)
+		c.JSON(http.StatusOK, []gin.H{{
+			"id":   model,
+			"name": model,
+		}})
 	}
 }
 
@@ -290,9 +326,18 @@ func SelectModelHandler(ps *ProviderState) gin.HandlerFunc {
 			return
 		}
 
-		// Try to find max_tokens from the copilot models list
+		// Try to find max_tokens from the provider's model list.
 		maxTokens := 0
-		if cp, ok := provider.(*llm.CopilotProvider); ok {
+		if lister, ok := provider.(ModelLister); ok {
+			if models, err := lister.ListModels(c.Request.Context()); err == nil {
+				for _, m := range models {
+					if m.ID == req.Model {
+						maxTokens = m.MaxTokens
+						break
+					}
+				}
+			}
+		} else if cp, ok := provider.(*llm.CopilotProvider); ok {
 			if models, err := cp.GetCopilotProvider().GetModels(c.Request.Context()); err == nil {
 				for _, m := range models {
 					if m.ID == req.Model {

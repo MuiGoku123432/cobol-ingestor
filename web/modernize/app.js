@@ -158,9 +158,41 @@ checkAuth();
 // Client-side message history sent with each request
 let messages = [];
 let isStreaming = false;
+let migrationMode = true;
 let swarmEnabled = false;
+let multiRoundEnabled = false;
+let messageCounter = 0;
 let activeSessionId = localStorage.getItem('activeSessionId') || null;
 let sessions = [];
+
+function toggleMigrationMode() {
+  migrationMode = !migrationMode;
+  const toggle = document.getElementById("migrationToggle");
+  const thumb = document.getElementById("migrationThumb");
+  const settings = document.getElementById("migrationSettings");
+  toggle.setAttribute("aria-checked", migrationMode);
+  if (migrationMode) {
+    toggle.classList.add("swarm-active");
+    thumb.classList.add("swarm-thumb");
+    settings.style.maxHeight = settings.scrollHeight + "px";
+    settings.style.opacity = "1";
+  } else {
+    toggle.classList.remove("swarm-active");
+    thumb.classList.remove("swarm-thumb");
+    settings.style.maxHeight = "0";
+    settings.style.opacity = "0";
+  }
+  updatePlaceholder();
+}
+
+function updatePlaceholder() {
+  const sub = document.getElementById("chatPlaceholderSub");
+  if (sub) {
+    sub.textContent = migrationMode
+      ? "I'll use the graph database to understand and translate them"
+      : "I'll use the graph database to explore and understand them";
+  }
+}
 
 function toggleSwarm() {
   swarmEnabled = !swarmEnabled;
@@ -168,6 +200,24 @@ function toggleSwarm() {
   const thumb = document.getElementById("swarmToggleThumb");
   toggle.setAttribute("aria-checked", swarmEnabled);
   if (swarmEnabled) {
+    toggle.classList.add("swarm-active");
+    thumb.classList.add("swarm-thumb");
+    document.getElementById("multiRoundContainer").classList.remove("hidden");
+  } else {
+    toggle.classList.remove("swarm-active");
+    thumb.classList.remove("swarm-thumb");
+    document.getElementById("multiRoundContainer").classList.add("hidden");
+    // Disable multi-round when swarm is disabled
+    if (multiRoundEnabled) toggleMultiRound();
+  }
+}
+
+function toggleMultiRound() {
+  multiRoundEnabled = !multiRoundEnabled;
+  const toggle = document.getElementById("multiRoundToggle");
+  const thumb = document.getElementById("multiRoundThumb");
+  toggle.setAttribute("aria-checked", multiRoundEnabled);
+  if (multiRoundEnabled) {
     toggle.classList.add("swarm-active");
     thumb.classList.add("swarm-thumb");
   } else {
@@ -292,6 +342,7 @@ function toggleAgentDetail(id) {
   const card = document.getElementById(`agent-${id}`);
   if (!card) return;
   const detail = card.querySelector(".agent-card-detail");
+  if (!detail) return;
   detail.classList.toggle("expanded");
   const chevron = card.querySelector(".agent-chevron");
   if (detail.classList.contains("expanded")) {
@@ -306,7 +357,7 @@ function updateAgentCard(id, status, isDone, isError) {
   if (!card) return;
   const dot = card.querySelector(".pulse-dot");
   const statusEl = card.querySelector(".agent-status");
-  if (isDone) {
+  if (isDone && dot) {
     dot.classList.remove("pulse-dot", "bg-amber-400");
     dot.classList.add(isError ? "bg-red-400" : "bg-green-400");
   }
@@ -447,10 +498,13 @@ async function renameSession(id) {
 
 function clearChatUI() {
   const container = document.getElementById('chatMessages');
+  const subText = migrationMode
+    ? "I'll use the graph database to understand and translate them"
+    : "I'll use the graph database to explore and understand them";
   container.innerHTML = `
     <div class="text-center text-gray-500 mt-20">
       <p class="text-lg">Ask about your COBOL programs</p>
-      <p class="text-sm mt-1">I'll use the graph database to understand and translate them</p>
+      <p id="chatPlaceholderSub" class="text-sm mt-1">${subText}</p>
     </div>
   `;
 }
@@ -463,6 +517,8 @@ async function sendMessage(e) {
   const input = document.getElementById("chatInput");
   const text = input.value.trim();
   if (!text || isStreaming) return;
+
+  messageCounter++;
 
   // Add user message
   messages.push({ role: "user", content: text });
@@ -480,9 +536,12 @@ async function sendMessage(e) {
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
         messages: messages,
-        targetLanguage: langSelect.value,
-        framework: fwSelect.value,
+        targetLanguage: migrationMode ? langSelect.value : "",
+        framework: migrationMode ? fwSelect.value : "",
+        integrations: migrationMode ? document.getElementById("integrations").value.trim() : "",
+        discoveryMode: !migrationMode,
         sessionId: activeSessionId || '',
+        multiRound: swarmEnabled && multiRoundEnabled,
       }),
     });
 
@@ -540,37 +599,59 @@ async function sendMessage(e) {
           break;
 
         case "tool_start":
-          addToolIndicator(data.name, data.id);
+          addToolIndicator(data.name, `${messageCounter}-${data.id}`);
           break;
 
         case "tool_result":
           updateToolIndicator(
-            data.id,
+            `${messageCounter}-${data.id}`,
             data.result || data.error,
             !!data.error
           );
           break;
 
         case "agent_start":
-          addAgentCard(data.id, data.name);
+          addAgentCard(`${messageCounter}-${data.id}`, data.name);
           break;
 
         case "agent_tool_start":
-          updateAgentCard(data.id, `Calling ${data.toolName}...`, false, false);
-          appendAgentDetail(data.id, `<span class="text-amber-300">&#9654;</span> <code class="bg-gray-800 px-1 rounded text-amber-300">${escapeHtml(data.toolName)}</code>`);
+          updateAgentCard(`${messageCounter}-${data.id}`, `Calling ${data.toolName}...`, false, false);
+          appendAgentDetail(`${messageCounter}-${data.id}`, `<span class="text-amber-300">&#9654;</span> <code class="bg-gray-800 px-1 rounded text-amber-300">${escapeHtml(data.toolName)}</code>`);
           break;
 
-        case "agent_tool_result":
-          updateAgentCard(data.id, "Analyzing...", false, false);
-          appendAgentDetail(data.id, `<span class="text-green-400">&#10003;</span> Result: <span class="text-gray-500">${escapeHtml((data.result || "").substring(0, 120))}</span>`);
+        case "agent_tool_result": {
+          updateAgentCard(`${messageCounter}-${data.id}`, "Analyzing...", false, false);
+          const cachedBadge = data.cached === "true" ? ' <span class="text-cyan-400 text-[10px] font-medium">(cached)</span>' : '';
+          appendAgentDetail(`${messageCounter}-${data.id}`, `<span class="text-green-400">&#10003;</span> Result${cachedBadge}: <span class="text-gray-500">${escapeHtml((data.result || "").substring(0, 120))}</span>`);
           break;
+        }
 
         case "agent_progress":
-          updateAgentCard(data.id, "Writing summary...", false, false);
+          updateAgentCard(`${messageCounter}-${data.id}`, "Writing summary...", false, false);
           break;
 
         case "agent_complete":
-          updateAgentCard(data.id, "Complete", true, (data.summary || "").startsWith("Error:"));
+          updateAgentCard(`${messageCounter}-${data.id}`, "Complete", true, (data.summary || "").startsWith("Error:"));
+          break;
+
+        case "round_start":
+          addRoundDivider(`${messageCounter}-${data.round}`, data.maxRounds);
+          break;
+
+        case "round_complete":
+          updateRoundDivider(`${messageCounter}-${data.round}`);
+          break;
+
+        case "coordinator_decision":
+          addCoordinatorDecision(`${messageCounter}-${data.round}`, data.satisfied, data.reasoning, data.followUps);
+          break;
+
+        case "coordinator_tool_start":
+          addToolIndicator(data.toolName, `${messageCounter}-${data.toolId}`);
+          break;
+
+        case "coordinator_tool_result":
+          updateToolIndicator(`${messageCounter}-${data.toolId}`, data.result, false);
           break;
 
         case "synthesis_start":
@@ -610,4 +691,58 @@ async function sendMessage(e) {
 
 function clearChat() {
   createSession();
+}
+
+function addRoundDivider(round, maxRounds) {
+  const container = document.getElementById("chatMessages");
+  const placeholder = container.querySelector(".text-center");
+  if (placeholder) placeholder.remove();
+
+  const divider = document.createElement("div");
+  divider.id = `round-divider-${round}`;
+  divider.className = "flex items-center gap-3 my-4";
+  divider.innerHTML = `
+    <div class="flex-1 h-px bg-gray-700"></div>
+    <div class="flex items-center gap-2 text-xs font-medium text-gray-400 bg-gray-900 px-3 py-1 rounded-full border border-gray-700">
+      <span class="pulse-dot inline-block w-2 h-2 rounded-full bg-indigo-400"></span>
+      Round ${round} of ${maxRounds}
+    </div>
+    <div class="flex-1 h-px bg-gray-700"></div>
+  `;
+  container.appendChild(divider);
+  container.scrollTop = container.scrollHeight;
+}
+
+function updateRoundDivider(round) {
+  const divider = document.getElementById(`round-divider-${round}`);
+  if (!divider) return;
+  const dot = divider.querySelector(".pulse-dot");
+  if (dot) {
+    dot.classList.remove("pulse-dot", "bg-indigo-400");
+    dot.classList.add("bg-green-400");
+  }
+}
+
+function addCoordinatorDecision(round, satisfied, reasoning, followUps) {
+  const container = document.getElementById("chatMessages");
+  const card = document.createElement("div");
+  card.className = "agent-card border-indigo-800 bg-gray-900/50 my-3";
+  let followUpHtml = "";
+  if (followUps && Object.keys(followUps).length > 0) {
+    const items = Object.entries(followUps).map(([id, q]) =>
+      `<div class="text-xs text-gray-400"><span class="text-indigo-300 font-medium">${escapeHtml(id)}</span>: ${escapeHtml(q)}</div>`
+    ).join("");
+    followUpHtml = `<div class="mt-2 space-y-1">${items}</div>`;
+  }
+  const statusIcon = satisfied
+    ? '<span class="text-green-400">&#10003;</span> Sufficient'
+    : '<span class="text-amber-400">&#9654;</span> Needs follow-up';
+  card.innerHTML = `
+    <div class="text-xs font-medium text-indigo-300 mb-1">Coordinator Assessment (Round ${round})</div>
+    <div class="text-xs text-gray-300">${escapeHtml(reasoning || "")}</div>
+    <div class="text-xs mt-1">${statusIcon}</div>
+    ${followUpHtml}
+  `;
+  container.appendChild(card);
+  container.scrollTop = container.scrollHeight;
 }

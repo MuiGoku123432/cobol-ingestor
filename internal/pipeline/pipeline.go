@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"os"
+	"strconv"
 	"strings"
 	"sync"
 
@@ -41,6 +42,15 @@ func (p *Pipeline) Run(ctx context.Context, scanResult *scanner.ScanResult, pass
 			return fmt.Errorf("pass 1 JCL: %w", err)
 		}
 	}
+	// Mark external programs early so Pass 3 can exclude them
+	if passFlag == 0 || passFlag == 1 {
+		if fixed, err := p.Writer.FixDanglingCalls(ctx); err != nil {
+			p.Logger.Warn("early external marking failed", zap.Error(err))
+		} else if fixed > 0 {
+			p.Logger.Info("marked external programs (pre-Pass 3)", zap.Int("count", fixed))
+		}
+	}
+
 	if passFlag == 0 || passFlag == 2 {
 		if err := p.RunPass2(ctx, scanResult); err != nil {
 			return fmt.Errorf("pass 2: %w", err)
@@ -678,6 +688,9 @@ func (p *Pipeline) RunPass4(ctx context.Context) error {
 		if err := p.Writer.WritePass4Result(ctx, pass4Result); err != nil {
 			return fmt.Errorf("writing pass 4 results: %w", err)
 		}
+		if err := p.Writer.WritePass4FieldMappings(ctx, pass4Result); err != nil {
+			p.Logger.Warn("pass 4: field mapping write failed", zap.Error(err))
+		}
 	}
 
 	p.Logger.Info("pass 4 complete",
@@ -755,6 +768,20 @@ func (p *Pipeline) RunPass5(ctx context.Context, scanResult *scanner.ScanResult)
 		p.Logger.Warn("pass 5: dangling calls fix failed", zap.Error(err))
 	} else if fixed > 0 {
 		p.Logger.Info("pass 5: marked external programs", zap.Int("fixed", fixed))
+	}
+
+	// Step 5b: Clear scores from external programs (may have been scored before marking)
+	if cleared, err := p.Writer.ClearExternalScores(ctx); err != nil {
+		p.Logger.Warn("pass 5: clear external scores failed", zap.Error(err))
+	} else if cleared > 0 {
+		p.Logger.Info("pass 5: cleared scores from external programs", zap.Int("cleared", cleared))
+	}
+
+	// Step 5c: Fix false-positive dead code flags
+	if fixed, err := p.Writer.FixFalseDeadCode(ctx); err != nil {
+		p.Logger.Warn("pass 5: dead code false positive fix failed", zap.Error(err))
+	} else if fixed > 0 {
+		p.Logger.Info("pass 5: cleared false dead code flags", zap.Int("fixed", fixed))
 	}
 
 	// Step 6: Re-run Pass 3 for programs missing riskScore (needs relationships from steps 2-5)
@@ -927,6 +954,11 @@ func (p *Pipeline) repairRelationshipGap(ctx context.Context, programIDs []strin
 				return
 			}
 
+			// Ensure DataItem nodes exist before writing CHILD_OF relationships
+			if repairType == "CHILD_OF" && len(rels) > 0 {
+				p.ensureDataItemNodesForRepair(ctx, pid, rels)
+			}
+
 			if len(rels) > 0 {
 				if err := p.writeRepairRelationships(ctx, rels); err != nil {
 					p.Logger.Warn("pass 5: repair write failed",
@@ -1057,6 +1089,37 @@ func truncateForRepair(sourceCode string, tokenBudget int, repairType string) st
 		return trimmed
 	}
 	return trimmed[:maxChars]
+}
+
+// ensureDataItemNodesForRepair creates minimal DataItem nodes for CHILD_OF repair targets.
+func (p *Pipeline) ensureDataItemNodesForRepair(ctx context.Context, programID string, rels []graph.Relationship) {
+	seen := make(map[string]bool)
+	var nodes []map[string]any
+	for _, r := range rels {
+		for _, fqn := range []string{r.FromKey, r.ToKey} {
+			if seen[fqn] {
+				continue
+			}
+			seen[fqn] = true
+			// Parse level and name from FQN: "PROGRAM.LEVEL.NAME"
+			parts := strings.SplitN(fqn, ".", 3)
+			if len(parts) != 3 {
+				continue
+			}
+			level, _ := strconv.Atoi(parts[1])
+			nodes = append(nodes, map[string]any{
+				"name":      parts[2],
+				"level":     level,
+				"programId": programID,
+				"fqn":       fqn,
+			})
+		}
+	}
+	if len(nodes) > 0 {
+		if err := p.Writer.WriteNodes(ctx, "DataItem", "fqn", nodes); err != nil {
+			p.Logger.Warn("pass 5: failed to ensure DataItem nodes for CHILD_OF repair", zap.Error(err))
+		}
+	}
 }
 
 // writeRepairRelationships converts graph.Relationship slice to map rows and writes to Neo4j.

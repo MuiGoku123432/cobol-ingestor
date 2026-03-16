@@ -19,3 +19,9 @@ var Pass4CrossProgram string
 
 //go:embed pass5_repair.tmpl
 var Pass5Repair string
+
+//go:embed extdb_analysis.tmpl
+var ExtDBAnalysis string
+
+//go:embed bw_ingest.tmpl
+var BWIngest string

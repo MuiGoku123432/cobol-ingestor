@@ -212,3 +212,59 @@ func (m *MockReader) GetSharedDataChannels(_ context.Context) ([]n4j.SharedDataC
 func (m *MockReader) GetValidationReport(_ context.Context) (*n4j.ValidationResult, error) {
 	return nil, m.Err
 }
+
+func (m *MockReader) GetCopybookStructure(_ context.Context, _ string) ([]n4j.DataItemInfo, error) {
+	return nil, m.Err
+}
+
+func (m *MockReader) GetProgramSource(_ context.Context, _ string) (*n4j.ProgramSourceInfo, error) {
+	return nil, m.Err
+}
+
+func (m *MockReader) GetMigrationSequence(_ context.Context) ([]n4j.MigrationStep, error) {
+	return nil, m.Err
+}
+
+func (m *MockReader) GetFileAccessors(_ context.Context, _ string) (*n4j.FileAccessInfo, error) {
+	return nil, m.Err
+}
+
+func (m *MockReader) GetEffortEstimates(_ context.Context) ([]n4j.EffortEstimate, error) {
+	return nil, m.Err
+}
+
+func (m *MockReader) GetIDMSRecords(_ context.Context, _ string) ([]n4j.IDMSRecordInfo, error) {
+	return nil, m.Err
+}
+
+func (m *MockReader) GetIDMSSchema(_ context.Context, _ string) (*n4j.IDMSSchemaInfo, error) {
+	return nil, m.Err
+}
+
+func (m *MockReader) GetIDMSAreas(_ context.Context, _ string) ([]n4j.IDMSAreaInfo, error) {
+	return nil, m.Err
+}
+
+func (m *MockReader) GetIDMSImpact(_ context.Context, _ string) (*n4j.IDMSImpactInfo, error) {
+	return nil, m.Err
+}
+
+func (m *MockReader) ListExternalDBTables(_ context.Context) ([]n4j.ExternalDBTableInfo, error) {
+	return nil, m.Err
+}
+
+func (m *MockReader) GetExternalDBMapping(_ context.Context, _ string) (*n4j.ExternalDBMappingInfo, error) {
+	return nil, m.Err
+}
+
+func (m *MockReader) GetCobolToExternalMappings(_ context.Context, _ string) ([]n4j.ExternalDBMappingInfo, error) {
+	return nil, m.Err
+}
+
+func (m *MockReader) GetGapAnalysis(_ context.Context) ([]n4j.GapInfo, error) {
+	return nil, m.Err
+}
+
+func (m *MockReader) GetDataFlowPaths(_ context.Context, _ string) ([]n4j.DataFlowPathInfo, error) {
+	return nil, m.Err
+}

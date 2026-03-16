@@ -44,6 +44,15 @@ const (
 	RelMapsToFile          RelType = "MAPS_TO_FILE"
 	RelAccesses            RelType = "ACCESSES"
 	RelDataFlowsTo         RelType = "DATA_FLOWS_TO"
+	RelLinkageMapsTo       RelType = "LINKAGE_MAPS_TO"
+	RelNavigates           RelType = "NAVIGATES"     // Program → IDMSRecord (OBTAIN/FIND/GET)
+	RelStoresIn            RelType = "STORES_IN"     // Program → IDMSRecord (STORE)
+	RelModifiesRec         RelType = "MODIFIES"      // Program → IDMSRecord (MODIFY)
+	RelErasesRec           RelType = "ERASES"        // Program → IDMSRecord (ERASE)
+	RelBindsTo             RelType = "BINDS_TO"      // Program → IDMSSchema
+	RelReadyArea           RelType = "READIES"       // Program → IDMSArea
+	RelConnectsSet         RelType = "CONNECTS"      // Program → IDMSSet
+	RelDisconnectsSet      RelType = "DISCONNECTS"   // Program → IDMSSet
 )
 
 // Relationship is a generic edge in the graph.
@@ -187,6 +196,53 @@ type VolumeEstimate struct {
 	Reason    string
 }
 
+// IDMSRecord represents an IDMS database record node.
+type IDMSRecord struct {
+	ID        string
+	Name      string
+	Area      string
+	Schema    string
+	ProgramID string
+}
+
+// IDMSSchema represents an IDMS schema/subschema binding.
+type IDMSSchema struct {
+	ID             string
+	SchemaName     string
+	SubschemaName  string
+	ProgramID      string
+	ProtocolMode   string
+}
+
+// IDMSArea represents an IDMS database area.
+type IDMSArea struct {
+	ID        string
+	Name      string
+	UsageMode string
+	Schema    string
+}
+
+// IDMSSet represents an IDMS set relationship.
+type IDMSSet struct {
+	ID           string
+	Name         string
+	OwnerRecord  string
+	MemberRecord string
+	Schema       string
+}
+
+// IDMSOperation represents an IDMS DML operation extracted in Pass 2.
+type IDMSOperation struct {
+	Verb       string
+	Record     string
+	Area       string
+	Set        string
+	CalcKey    string
+	Navigation string
+	Paragraph  string
+	UsageMode  string
+}
+
 // Pass1Result aggregates all extracted data from a single file's Pass 1 analysis.
 type Pass1Result struct {
 	SourceFile         string
@@ -202,6 +258,10 @@ type Pass1Result struct {
 	CICSTxns           []CICSTransaction
 	ExternalInterfaces []ExternalInterface
 	DBTables           []DBTable
+	IDMSRecords        []IDMSRecord
+	IDMSSchemas        []IDMSSchema
+	IDMSAreas          []IDMSArea
+	IDMSSets           []IDMSSet
 	Relationships      []Relationship
 }
 
@@ -221,6 +281,7 @@ type Pass2Result struct {
 	ConditionalLogic []ConditionalLogicItem
 	DynamicCallResolutions []DynamicCallResolution
 	ErrorHandlers  []ErrorHandler
+	IDMSOperations []IDMSOperation
 }
 
 // PerformRelation represents a PERFORM control flow.
@@ -344,7 +405,7 @@ type DeadCodeFlag struct {
 	Reason    string
 }
 
-// RiskFlag marks a program as high-risk.
+// RiskFlag captures a program's risk assessment (all programs receive one).
 type RiskFlag struct {
 	ProgramID string
 	RiskType  string
@@ -401,4 +462,127 @@ type FieldPair struct {
 // Pass4Result aggregates cross-program data flow analysis.
 type Pass4Result struct {
 	Flows []CrossProgramFlow
+}
+
+// ExternalDatabase represents a modern database (Oracle, Postgres, etc.)
+type ExternalDatabase struct {
+	ID             string
+	Name           string
+	DatabaseType   string
+	ConnectionInfo string
+}
+
+// ExternalDBTable represents a table in an external database.
+type ExternalDBTable struct {
+	ID           string
+	Name         string
+	Schema       string
+	DatabaseName string
+	DatabaseType string
+	Columns      []ExtDBColumn
+}
+
+// ExtDBColumn represents a column in an external database table.
+type ExtDBColumn struct {
+	Name     string
+	DataType string
+	Nullable bool
+	IsPK     bool
+}
+
+// GapInfo describes a table/column present only on one side.
+type GapInfo struct {
+	Side        string // "cobol_only" or "external_only"
+	TableName   string
+	ColumnName  string
+	Description string
+}
+
+// DataFlowPath describes an end-to-end flow: COBOL program -> DB2 -> external DB.
+type DataFlowPath struct {
+	CobolProgram  string
+	Operation     string
+	DB2Table      string
+	ExternalTable string
+	FlowType      string
+	Description   string
+}
+
+// DBTableMapping maps a COBOL DB2 table to an external table.
+type DBTableMapping struct {
+	CobolDBTable   string
+	ExternalTable  string
+	Confidence     float64
+	Reason         string
+	ColumnMappings []ColumnMapping
+}
+
+// ColumnMapping maps a COBOL column to an external column.
+type ColumnMapping struct {
+	CobolColumn    string
+	ExternalColumn string
+	Transform      string // EXACT, RENAMED, TYPE_CHANGED
+}
+
+// ExternalDBResult is the full analysis result from an external DB gap analysis.
+type ExternalDBResult struct {
+	Database ExternalDatabase
+	Tables   []ExternalDBTable
+	Mappings []DBTableMapping
+	Gaps     []GapInfo
+	Flows    []DataFlowPath
+}
+
+const (
+	RelMapsToExtDB  RelType = "MAPS_TO_EXT_DB"
+	RelHostedIn     RelType = "HOSTED_IN"
+	RelBWContains   RelType = "BW_CONTAINS"
+	RelBWRelatesTo  RelType = "BW_RELATES_TO"
+	RelBWReferences RelType = "BW_REFERENCES"
+)
+
+// FileTypeBW classifies Businessware source files.
+const FileTypeBW FileType = "BW"
+
+// BWFile represents a Businessware source file node.
+type BWFile struct {
+	Path     string
+	FileType string
+	Summary  string
+}
+
+// BWEntity represents a flexible entity extracted by the LLM.
+type BWEntity struct {
+	Name        string
+	EntityType  string
+	Description string
+	SourceFile  string
+	MergeID     string         // sourceFile + "." + name (dedup key)
+	Properties  map[string]any
+}
+
+// BWRelationship represents a relationship between two BW entities.
+type BWRelationship struct {
+	FromEntity   string
+	ToEntity     string
+	RelationType string
+	Description  string
+	Confidence   float64
+}
+
+// BWCobolReference represents a cross-link from a BW entity to a COBOL program or copybook.
+type BWCobolReference struct {
+	EntityName    string
+	TargetName    string
+	TargetType    string // "Program" or "Copybook"
+	ReferenceType string
+	Description   string
+}
+
+// BWResult aggregates extraction results for one Businessware file.
+type BWResult struct {
+	File            BWFile
+	Entities        []BWEntity
+	Relationships   []BWRelationship
+	CobolReferences []BWCobolReference
 }

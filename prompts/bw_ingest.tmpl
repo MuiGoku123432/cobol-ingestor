@@ -1,0 +1,66 @@
+You are analyzing a Businessware enterprise artifact file. The file may contain natural language documentation, Java source code, XML configuration, workflow definitions, screen layouts, business rules, or other enterprise content.
+
+## File Information
+- **File name:** {{.FileName}}
+- **File type:** {{.FileType}}
+
+## Known COBOL Programs
+The following COBOL program IDs exist in the codebase. If the file references any of these programs (by name, ID, or clear description), include them in `cobolReferences`.
+
+{{.ExistingPrograms}}
+
+## Instructions
+
+1. **Extract entities** — Identify all meaningful entities in this file. Entity types are free-form; use whatever best describes the entity. Examples: `Class`, `Method`, `Interface`, `BusinessRule`, `Workflow`, `Screen`, `Configuration`, `DataMapping`, `Service`, `Endpoint`, `Table`, `Field`, etc.
+
+2. **Extract relationships** — Identify relationships between the entities you extracted. Relationship types are also free-form. Examples: `implements`, `calls`, `depends_on`, `maps_to`, `validates`, `triggers`, `contains`, `extends`, etc.
+
+3. **Identify COBOL references** — If any entity references a known COBOL program or copybook (from the list above), include it in `cobolReferences`. Reference types: `calls`, `replaces`, `wraps`, `maps_to`, `reads_from`, `writes_to`, etc.
+
+## Response Format
+
+Return a single JSON object:
+
+```json
+{
+  "summary": "Brief one-line summary of what this file does",
+  "entities": [
+    {
+      "name": "EntityName",
+      "entityType": "Class",
+      "description": "What this entity does",
+      "properties": {
+        "package": "com.example",
+        "visibility": "public"
+      }
+    }
+  ],
+  "relationships": [
+    {
+      "fromEntity": "EntityA",
+      "toEntity": "EntityB",
+      "relationType": "calls",
+      "description": "EntityA invokes EntityB for processing",
+      "confidence": 0.95
+    }
+  ],
+  "cobolReferences": [
+    {
+      "entityName": "JavaServiceClass",
+      "targetName": "PROG001",
+      "targetType": "Program",
+      "referenceType": "wraps",
+      "description": "Java service wraps calls to COBOL program PROG001"
+    }
+  ]
+}
+```
+
+**Important:**
+- Only extract entities that are genuinely meaningful — skip trivial imports, getters/setters, etc.
+- The `properties` field on entities is optional and free-form — include any properties that seem important
+- Be conservative with COBOL references — only include clear, confident matches
+- If the file is empty or contains no meaningful content, return empty arrays
+
+---
+

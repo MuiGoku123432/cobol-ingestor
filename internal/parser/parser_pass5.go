@@ -57,8 +57,8 @@ func ParseRepairChildOf(jsonResp, programID string) ([]graph.Relationship, error
 		if r.Child == "" || r.Parent == "" {
 			continue
 		}
-		childFQN := fmt.Sprintf("%s.%d.%s", programID, r.ChildLevel, strings.ToUpper(r.Child))
-		parentFQN := fmt.Sprintf("%s.%d.%s", programID, r.ParentLevel, strings.ToUpper(r.Parent))
+		childFQN := fmt.Sprintf("%s.%02d.%s", programID, r.ChildLevel, strings.ToUpper(r.Child))
+		parentFQN := fmt.Sprintf("%s.%02d.%s", programID, r.ParentLevel, strings.ToUpper(r.Parent))
 
 		rels = append(rels, graph.Relationship{
 			Type:      graph.RelChildOf,

@@ -61,3 +61,49 @@ type TraceFieldImpactInput struct {
 	ProgramID string `json:"programId" jsonschema:"The program ID"`
 	FieldName string `json:"fieldName" jsonschema:"The field name to trace"`
 }
+
+type GetCopybookStructureInput struct {
+	Name string `json:"name" jsonschema:"The copybook name"`
+}
+
+type GetFileAccessorsInput struct {
+	FileName string `json:"fileName" jsonschema:"The file name to look up"`
+}
+
+type GetTypeMappingsInput struct {
+	ProgramID    string `json:"programId,omitempty" jsonschema:"Program ID to get type mappings for"`
+	CopybookName string `json:"copybookName,omitempty" jsonschema:"Copybook name to get type mappings for"`
+}
+
+type ReassignDomainInput struct {
+	ProgramID string `json:"programId" jsonschema:"The program ID to reassign"`
+	Domain    string `json:"domain" jsonschema:"The target business domain name"`
+}
+
+type GetIDMSRecordsInput struct {
+	ProgramID string `json:"programId" jsonschema:"The program ID to get IDMS records for"`
+}
+
+type GetIDMSSchemaInput struct {
+	ProgramID string `json:"programId" jsonschema:"The program ID to get IDMS schema for"`
+}
+
+type GetIDMSImpactInput struct {
+	RecordName string `json:"recordName" jsonschema:"The IDMS record name to analyze"`
+}
+
+type GetIDMSAreasInput struct {
+	ProgramID string `json:"programId" jsonschema:"The program ID to get IDMS areas for"`
+}
+
+type GetExternalDBMappingInput struct {
+	TableName string `json:"tableName" jsonschema:"The external database table name"`
+}
+
+type GetCobolToExternalMappingsInput struct {
+	CobolTable string `json:"cobolTable" jsonschema:"The COBOL DB2 table name"`
+}
+
+type GetDataFlowPathsInput struct {
+	TableName string `json:"tableName,omitempty" jsonschema:"Filter by table name (DB2 or external). Leave empty for all flows."`
+}
