@@ -22,7 +22,6 @@ type App struct {
 
 	// Services exposed to frontend via Wails bindings
 	Neo4jService  *Neo4jService
-	GraphService  *GraphService
 	IngestService *IngestService
 	ChatService   *ChatService
 	ConfigService *ConfigService
@@ -31,7 +30,6 @@ type App struct {
 func NewApp(logger *zap.Logger) *App {
 	a := &App{logger: logger}
 	a.Neo4jService = &Neo4jService{app: a}
-	a.GraphService = &GraphService{app: a}
 	a.IngestService = &IngestService{app: a}
 	a.ChatService = &ChatService{app: a}
 	a.ConfigService = &ConfigService{app: a}

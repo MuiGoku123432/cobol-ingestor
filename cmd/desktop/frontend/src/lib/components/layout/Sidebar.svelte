@@ -2,8 +2,6 @@
   let { currentView = $bindable() }: { currentView: string } = $props();
 
   const navItems = [
-    { id: 'dashboard', label: 'Dashboard', icon: '&#9632;' },
-    { id: 'graph', label: 'Graph Explorer', icon: '&#9733;' },
     { id: 'ingest', label: 'Ingest', icon: '&#9654;' },
     { id: 'chat', label: 'Chat', icon: '&#9993;' },
     { id: 'swarm', label: 'Swarm', icon: '&#9881;' },

@@ -30,7 +30,6 @@ func main() {
 		Bind: []interface{}{
 			app,
 			app.Neo4jService,
-			app.GraphService,
 			app.IngestService,
 			app.ChatService,
 			app.ConfigService,

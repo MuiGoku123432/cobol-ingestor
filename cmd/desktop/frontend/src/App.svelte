@@ -1,24 +1,18 @@
 <script lang="ts">
   import Sidebar from './lib/components/layout/Sidebar.svelte';
   import StatusBar from './lib/components/layout/StatusBar.svelte';
-  import DashboardView from './lib/components/dashboard/DashboardView.svelte';
-  import GraphExplorer from './lib/components/graph/GraphExplorer.svelte';
   import IngestView from './lib/components/ingest/IngestView.svelte';
   import ChatView from './lib/components/chat/ChatView.svelte';
   import SwarmView from './lib/components/chat/SwarmView.svelte';
   import SettingsView from './lib/components/settings/SettingsView.svelte';
 
-  let currentView = $state('dashboard');
+  let currentView = $state('ingest');
 </script>
 
 <div class="app">
   <Sidebar bind:currentView />
   <main class="content">
-    {#if currentView === 'dashboard'}
-      <DashboardView />
-    {:else if currentView === 'graph'}
-      <GraphExplorer />
-    {:else if currentView === 'ingest'}
+    {#if currentView === 'ingest'}
       <IngestView />
     {:else if currentView === 'chat'}
       <ChatView />
