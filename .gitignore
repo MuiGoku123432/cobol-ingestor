@@ -5,3 +5,8 @@ api/docs/
 *.exe
 *.test
 *.out
+
+# Wails desktop build artifacts
+cmd/desktop/build/
+cmd/desktop/frontend/dist/
+cmd/desktop/frontend/node_modules/
