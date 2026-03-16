@@ -100,6 +100,29 @@ func (c *MCPClient) CallTool(ctx context.Context, name string, args map[string]a
 	return extractText(result), nil
 }
 
+// NewMCPClientInProcess creates an MCP client connected to a server in the same
+// process via in-memory transport. No subprocess or network needed.
+func NewMCPClientInProcess(ctx context.Context, server *mcp.Server) (*MCPClient, error) {
+	client := mcp.NewClient(&mcp.Implementation{
+		Name:    "cobol-modernize",
+		Version: "1.0.0",
+	}, nil)
+
+	clientTransport, serverTransport := mcp.NewInMemoryTransports()
+
+	// Start the server in a background goroutine.
+	go func() {
+		_ = server.Run(ctx, serverTransport)
+	}()
+
+	session, err := client.Connect(ctx, clientTransport, nil)
+	if err != nil {
+		return nil, fmt.Errorf("mcp in-process connect: %w", err)
+	}
+
+	return &MCPClient{client: client, session: session}, nil
+}
+
 // Close shuts down the MCP session.
 func (c *MCPClient) Close() error {
 	if c.session != nil {
