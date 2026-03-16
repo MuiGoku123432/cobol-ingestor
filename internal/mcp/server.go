@@ -7,11 +7,12 @@ import (
 )
 
 // NewServer creates an MCP server with all COBOL graph tools registered.
-func NewServer(reader n4j.Reader) *mcp.Server {
+// writer is optional — pass nil if write operations (e.g. domain reassignment) are not needed.
+func NewServer(reader n4j.Reader, writer *n4j.BatchWriter) *mcp.Server {
 	s := mcp.NewServer(&mcp.Implementation{
 		Name:    "cobol-graph",
 		Version: "1.0.0",
 	}, nil)
-	registerAllTools(s, reader)
+	registerAllTools(s, reader, writer)
 	return s
 }

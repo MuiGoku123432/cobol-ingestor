@@ -69,7 +69,7 @@ func (w *BatchWriter) RunValidation(ctx context.Context) (*ValidationResult, err
 			description: "Programs expected to have CALLS but have none",
 			severity:    "WARN",
 			fixMethod:   "LLM_REPAIR",
-			cypher:      "MATCH (p:Program) WHERE p.callCount > 0 AND NOT (p)-[:CALLS]->() RETURN p.programId AS id",
+			cypher:      "MATCH (p:Program) WHERE p.callTargetCount > 0 AND NOT (p)-[:CALLS]->() RETURN p.programId AS id",
 			idField:     "id",
 		},
 		{
@@ -97,6 +97,17 @@ func (w *BatchWriter) RunValidation(ctx context.Context) (*ValidationResult, err
 			fixMethod:   "GRAPH_ONLY",
 			cypher:      "MATCH (a:Program)-[:CALLS]->(b:Program) WHERE b.filePath IS NULL RETURN DISTINCT b.programId AS id",
 			idField:     "id",
+		},
+		{
+			name:        "cics_missing_child_of",
+			description: "CICS programs with DataItems but zero CHILD_OF relationships",
+			severity:    "WARN",
+			fixMethod:   "LLM_REPAIR",
+			cypher: "MATCH (p:Program) WHERE p.executionMode IN ['CICS', 'BATCH_AND_CICS'] " +
+				"AND EXISTS { MATCH (d:DataItem {programId: p.programId}) } " +
+				"AND NOT EXISTS { MATCH (d1:DataItem {programId: p.programId})-[:CHILD_OF]->(:DataItem) } " +
+				"RETURN p.programId AS id",
+			idField: "id",
 		},
 		{
 			name:        "orphan_data_items",
@@ -256,9 +267,86 @@ func (w *BatchWriter) MergeDuplicateDomains(ctx context.Context) (int, error) {
 	return merged, nil
 }
 
+// ClearExternalScores removes risk/modernization/domain data from external programs.
+func (w *BatchWriter) ClearExternalScores(ctx context.Context) (int, error) {
+	session := w.client.NewSession(ctx)
+	defer session.Close(ctx)
+
+	res, err := session.ExecuteWrite(ctx, func(tx neo4j.ManagedTransaction) (any, error) {
+		result, err := tx.Run(ctx,
+			"MATCH (p:Program) WHERE p.isExternal = true "+
+				"OPTIONAL MATCH (p)-[r:BELONGS_TO]->(:BusinessDomain) "+
+				"DELETE r "+
+				"SET p.riskScore = null, p.riskType = null, p.riskDetails = null, "+
+				"p.modernizationScore = null, p.modernizationReason = null, p.modernizationApproach = null, "+
+				"p.deadCode = null, p.deadCodeReason = null "+
+				"RETURN count(p) AS cnt",
+			nil)
+		if err != nil {
+			return int64(0), err
+		}
+		if result.Next(ctx) {
+			if val, ok := result.Record().Get("cnt"); ok {
+				if n, ok := val.(int64); ok {
+					return n, nil
+				}
+			}
+		}
+		return int64(0), nil
+	})
+	if err != nil {
+		return 0, fmt.Errorf("clearing external scores: %w", err)
+	}
+	return int(res.(int64)), nil
+}
+
+// FixFalseDeadCode clears deadCode=true on programs that are invoked by JCL or have COBOL callers.
+func (w *BatchWriter) FixFalseDeadCode(ctx context.Context) (int, error) {
+	session := w.client.NewSession(ctx)
+	defer session.Close(ctx)
+
+	res, err := session.ExecuteWrite(ctx, func(tx neo4j.ManagedTransaction) (any, error) {
+		result, err := tx.Run(ctx,
+			"MATCH (p:Program) "+
+				"WHERE p.deadCode = true "+
+				"AND ( "+
+				"  EXISTS { MATCH (step:JCLStep)-[:RUNS]->(p) } "+
+				"  OR EXISTS { MATCH (caller:Program)-[:CALLS]->(p) WHERE caller.filePath IS NOT NULL } "+
+				") "+
+				"SET p.deadCode = false, p.deadCodeReason = 'Cleared: invoked by JCL or has callers' "+
+				"RETURN count(p) AS cnt",
+			nil)
+		if err != nil {
+			return int64(0), err
+		}
+		if result.Next(ctx) {
+			if val, ok := result.Record().Get("cnt"); ok {
+				if n, ok := val.(int64); ok {
+					return n, nil
+				}
+			}
+		}
+		return int64(0), nil
+	})
+	if err != nil {
+		return 0, fmt.Errorf("fixing false dead code: %w", err)
+	}
+
+	count := int(res.(int64))
+	if count > 0 {
+		w.logger.Info("cleared false dead code flags", zap.Int("count", count))
+	}
+	return count, nil
+}
+
 // QueryProgramsMissingPass3 returns program IDs that lack riskScore (never processed by Pass 3).
 // All programs processed by Pass 3 receive a riskScore (even low-risk ones),
 // so riskScore IS NULL reliably indicates programs that were skipped or failed.
+// QueryAllProgramIDs returns all program IDs in the graph, sorted alphabetically.
+func (c *Client) QueryAllProgramIDs(ctx context.Context) ([]string, error) {
+	return c.queryIDList(ctx, "MATCH (p:Program) RETURN p.programId AS id ORDER BY p.programId")
+}
+
 func (c *Client) QueryProgramsMissingPass3(ctx context.Context) ([]string, error) {
 	return c.queryIDList(ctx, "MATCH (p:Program) WHERE p.riskScore IS NULL RETURN p.programId AS id")
 }
@@ -282,7 +370,7 @@ func (c *Client) QueryProgramsMissingMovesTo(ctx context.Context) ([]string, err
 // QueryProgramsMissingCalls returns program IDs expected to have CALLS but have none.
 func (c *Client) QueryProgramsMissingCalls(ctx context.Context) ([]string, error) {
 	return c.queryIDList(ctx,
-		"MATCH (p:Program) WHERE p.callCount > 0 AND NOT (p)-[:CALLS]->() RETURN p.programId AS id")
+		"MATCH (p:Program) WHERE p.callTargetCount > 0 AND NOT (p)-[:CALLS]->() RETURN p.programId AS id")
 }
 
 // QueryUnannotatedParagraphs returns a map of programID → paragraph names that lack descriptions.

@@ -42,6 +42,15 @@ func (p *Pipeline) Run(ctx context.Context, scanResult *scanner.ScanResult, pass
 			return fmt.Errorf("pass 1 JCL: %w", err)
 		}
 	}
+	// Mark external programs early so Pass 3 can exclude them
+	if passFlag == 0 || passFlag == 1 {
+		if fixed, err := p.Writer.FixDanglingCalls(ctx); err != nil {
+			p.Logger.Warn("early external marking failed", zap.Error(err))
+		} else if fixed > 0 {
+			p.Logger.Info("marked external programs (pre-Pass 3)", zap.Int("count", fixed))
+		}
+	}
+
 	if passFlag == 0 || passFlag == 2 {
 		if err := p.RunPass2(ctx, scanResult); err != nil {
 			return fmt.Errorf("pass 2: %w", err)
@@ -679,6 +688,9 @@ func (p *Pipeline) RunPass4(ctx context.Context) error {
 		if err := p.Writer.WritePass4Result(ctx, pass4Result); err != nil {
 			return fmt.Errorf("writing pass 4 results: %w", err)
 		}
+		if err := p.Writer.WritePass4FieldMappings(ctx, pass4Result); err != nil {
+			p.Logger.Warn("pass 4: field mapping write failed", zap.Error(err))
+		}
 	}
 
 	p.Logger.Info("pass 4 complete",
@@ -756,6 +768,20 @@ func (p *Pipeline) RunPass5(ctx context.Context, scanResult *scanner.ScanResult)
 		p.Logger.Warn("pass 5: dangling calls fix failed", zap.Error(err))
 	} else if fixed > 0 {
 		p.Logger.Info("pass 5: marked external programs", zap.Int("fixed", fixed))
+	}
+
+	// Step 5b: Clear scores from external programs (may have been scored before marking)
+	if cleared, err := p.Writer.ClearExternalScores(ctx); err != nil {
+		p.Logger.Warn("pass 5: clear external scores failed", zap.Error(err))
+	} else if cleared > 0 {
+		p.Logger.Info("pass 5: cleared scores from external programs", zap.Int("cleared", cleared))
+	}
+
+	// Step 5c: Fix false-positive dead code flags
+	if fixed, err := p.Writer.FixFalseDeadCode(ctx); err != nil {
+		p.Logger.Warn("pass 5: dead code false positive fix failed", zap.Error(err))
+	} else if fixed > 0 {
+		p.Logger.Info("pass 5: cleared false dead code flags", zap.Int("fixed", fixed))
 	}
 
 	// Step 6: Re-run Pass 3 for programs missing riskScore (needs relationships from steps 2-5)

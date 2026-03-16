@@ -56,3 +56,15 @@ func (h *CopybookHandler) Usage(c *gin.Context) {
 
 	c.JSON(http.StatusOK, gin.H{"data": usage})
 }
+
+// Structure returns the data item structure of a copybook.
+func (h *CopybookHandler) Structure(c *gin.Context) {
+	name := c.Param("name")
+	items, err := h.Reader.GetCopybookStructure(c.Request.Context(), name)
+	if err != nil {
+		h.Logger.Error("getting copybook structure", zap.Error(err))
+		middleware.InternalError(c, "failed to get copybook structure")
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{"data": items})
+}

@@ -58,13 +58,13 @@ func main() {
 
 	// Set up pipeline for async jobs (optional — may fail if no API key)
 	var pipe *pipeline.Pipeline
+	writer := n4j.NewBatchWriter(neo4jClient, cfg.Ingest.BatchSize, logger)
 	provider, providerErr := llm.NewProvider(cfg)
 	if providerErr == nil {
 		claudeClient, claudeErr := claude.NewClient(provider, cfg.Claude, logger)
 		if claudeErr == nil {
 			fileCache, cacheErr := cache.New(cfg.Ingest.CacheDB)
 			if cacheErr == nil {
-				writer := n4j.NewBatchWriter(neo4jClient, cfg.Ingest.BatchSize, logger)
 				pipe = &pipeline.Pipeline{
 					Config:      cfg,
 					Claude:      claudeClient,
@@ -87,7 +87,7 @@ func main() {
 		c.JSON(200, gin.H{"status": "ok"})
 	})
 
-	api.RegisterRoutes(r, neo4jClient, pipe, logger)
+	api.RegisterRoutes(r, neo4jClient, writer, pipe, logger)
 
 	addr := fmt.Sprintf(":%s", cfg.API.Port)
 	logger.Info("starting API server", zap.String("addr", addr))

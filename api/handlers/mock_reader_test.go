@@ -19,7 +19,41 @@ type MockReader struct {
 	SearchResults  []n4j.SearchResult
 	Domains        []n4j.BusinessDomainSummary
 	DomainDetail   *n4j.BusinessDomainDetail
-	Err            error
+
+	// New fields for expanded endpoints
+	SQLStatements       []n4j.SQLStatementInfo
+	CICSTransactions    []n4j.CICSTransactionInfo
+	ParagraphFlowItems  []n4j.ParagraphFlowInfo
+	DataFlowItems       []n4j.DataFlowInfo
+	DataHierarchyItems  []n4j.DataHierarchyInfo
+	DeadParagraphItems  []n4j.DeadParagraphInfo
+	ProgramSourceResult *n4j.ProgramSourceInfo
+	ProgramJCLResult    *n4j.ProgramJCLInfo
+	TableAccessResult   *n4j.ProgramTableAccessInfo
+	CrossProgramFlows   []n4j.CrossProgramFlowInfo
+	EffortEstimates     []n4j.EffortEstimate
+	IDMSRecordItems     []n4j.IDMSRecordInfo
+	IDMSSchemaResult    *n4j.IDMSSchemaInfo
+	IDMSAreaItems       []n4j.IDMSAreaInfo
+	DeadCodeSummaries   []n4j.DeadCodeSummaryInfo
+	MigrationSteps      []n4j.MigrationStep
+	FieldImpacts        []n4j.FieldImpactInfo
+	SharedChannels      []n4j.SharedDataChannelInfo
+	FileAccessResult    *n4j.FileAccessInfo
+	IDMSImpactResult    *n4j.IDMSImpactInfo
+	ValidationResult    *n4j.ValidationResult
+	JCLJobs             []n4j.JCLJobInfo
+	JCLJobResult        *n4j.JCLJobDetail
+	DatasetUsages       []n4j.DatasetUsageInfo
+	DBTables            []n4j.DBTableInfo
+	TableUsageResult    *n4j.TableUsageInfo
+	ExternalDBTables    []n4j.ExternalDBTableInfo
+	ExternalDBMapping   *n4j.ExternalDBMappingInfo
+	CobolToExtMappings  []n4j.ExternalDBMappingInfo
+	GapInfoItems        []n4j.GapInfo
+	DataFlowPathItems   []n4j.DataFlowPathInfo
+
+	Err error
 }
 
 func (m *MockReader) ListPrograms(_ context.Context, _ n4j.Filter, page, pageSize int) (*n4j.PagedResponse, error) {
@@ -113,73 +147,129 @@ func (m *MockReader) ListVolumeEstimates(_ context.Context) ([]n4j.VolumeEstimat
 }
 
 func (m *MockReader) GetProgramSQL(_ context.Context, _ string) ([]n4j.SQLStatementInfo, error) {
-	return nil, m.Err
+	return m.SQLStatements, m.Err
 }
 
 func (m *MockReader) GetProgramCICS(_ context.Context, _ string) ([]n4j.CICSTransactionInfo, error) {
-	return nil, m.Err
+	return m.CICSTransactions, m.Err
 }
 
 func (m *MockReader) GetParagraphFlow(_ context.Context, _ string) ([]n4j.ParagraphFlowInfo, error) {
-	return nil, m.Err
+	return m.ParagraphFlowItems, m.Err
 }
 
 func (m *MockReader) GetDataFlow(_ context.Context, _ string) ([]n4j.DataFlowInfo, error) {
-	return nil, m.Err
+	return m.DataFlowItems, m.Err
 }
 
 func (m *MockReader) GetDataHierarchy(_ context.Context, _ string) ([]n4j.DataHierarchyInfo, error) {
-	return nil, m.Err
+	return m.DataHierarchyItems, m.Err
 }
 
 func (m *MockReader) GetDeadParagraphs(_ context.Context, _ string) ([]n4j.DeadParagraphInfo, error) {
-	return nil, m.Err
+	return m.DeadParagraphItems, m.Err
 }
 
 func (m *MockReader) GetDeadCodeSummary(_ context.Context) ([]n4j.DeadCodeSummaryInfo, error) {
-	return nil, m.Err
+	return m.DeadCodeSummaries, m.Err
 }
 
 func (m *MockReader) ListJCLJobs(_ context.Context) ([]n4j.JCLJobInfo, error) {
-	return nil, m.Err
+	return m.JCLJobs, m.Err
 }
 
 func (m *MockReader) GetJCLJob(_ context.Context, _ string) (*n4j.JCLJobDetail, error) {
-	return nil, m.Err
+	return m.JCLJobResult, m.Err
 }
 
 func (m *MockReader) GetProgramJCL(_ context.Context, _ string) (*n4j.ProgramJCLInfo, error) {
-	return nil, m.Err
+	return m.ProgramJCLResult, m.Err
 }
 
 func (m *MockReader) GetDatasetUsage(_ context.Context, _ string) ([]n4j.DatasetUsageInfo, error) {
-	return nil, m.Err
+	return m.DatasetUsages, m.Err
 }
 
 func (m *MockReader) ListDBTables(_ context.Context) ([]n4j.DBTableInfo, error) {
-	return nil, m.Err
+	return m.DBTables, m.Err
 }
 
 func (m *MockReader) GetTableUsage(_ context.Context, _ string) (*n4j.TableUsageInfo, error) {
-	return nil, m.Err
+	return m.TableUsageResult, m.Err
 }
 
 func (m *MockReader) GetProgramTableAccess(_ context.Context, _ string) (*n4j.ProgramTableAccessInfo, error) {
-	return nil, m.Err
+	return m.TableAccessResult, m.Err
 }
 
 func (m *MockReader) GetCrossProgramDataFlow(_ context.Context, _ string) ([]n4j.CrossProgramFlowInfo, error) {
-	return nil, m.Err
+	return m.CrossProgramFlows, m.Err
 }
 
 func (m *MockReader) TraceFieldImpact(_ context.Context, _ string, _ string) ([]n4j.FieldImpactInfo, error) {
-	return nil, m.Err
+	return m.FieldImpacts, m.Err
 }
 
 func (m *MockReader) GetSharedDataChannels(_ context.Context) ([]n4j.SharedDataChannelInfo, error) {
-	return nil, m.Err
+	return m.SharedChannels, m.Err
 }
 
 func (m *MockReader) GetValidationReport(_ context.Context) (*n4j.ValidationResult, error) {
-	return nil, m.Err
+	return m.ValidationResult, m.Err
+}
+
+func (m *MockReader) GetCopybookStructure(_ context.Context, _ string) ([]n4j.DataItemInfo, error) {
+	return m.DataItems, m.Err
+}
+
+func (m *MockReader) GetProgramSource(_ context.Context, _ string) (*n4j.ProgramSourceInfo, error) {
+	return m.ProgramSourceResult, m.Err
+}
+
+func (m *MockReader) GetMigrationSequence(_ context.Context) ([]n4j.MigrationStep, error) {
+	return m.MigrationSteps, m.Err
+}
+
+func (m *MockReader) GetFileAccessors(_ context.Context, _ string) (*n4j.FileAccessInfo, error) {
+	return m.FileAccessResult, m.Err
+}
+
+func (m *MockReader) GetEffortEstimates(_ context.Context) ([]n4j.EffortEstimate, error) {
+	return m.EffortEstimates, m.Err
+}
+
+func (m *MockReader) GetIDMSRecords(_ context.Context, _ string) ([]n4j.IDMSRecordInfo, error) {
+	return m.IDMSRecordItems, m.Err
+}
+
+func (m *MockReader) GetIDMSSchema(_ context.Context, _ string) (*n4j.IDMSSchemaInfo, error) {
+	return m.IDMSSchemaResult, m.Err
+}
+
+func (m *MockReader) GetIDMSAreas(_ context.Context, _ string) ([]n4j.IDMSAreaInfo, error) {
+	return m.IDMSAreaItems, m.Err
+}
+
+func (m *MockReader) GetIDMSImpact(_ context.Context, _ string) (*n4j.IDMSImpactInfo, error) {
+	return m.IDMSImpactResult, m.Err
+}
+
+func (m *MockReader) ListExternalDBTables(_ context.Context) ([]n4j.ExternalDBTableInfo, error) {
+	return m.ExternalDBTables, m.Err
+}
+
+func (m *MockReader) GetExternalDBMapping(_ context.Context, _ string) (*n4j.ExternalDBMappingInfo, error) {
+	return m.ExternalDBMapping, m.Err
+}
+
+func (m *MockReader) GetCobolToExternalMappings(_ context.Context, _ string) ([]n4j.ExternalDBMappingInfo, error) {
+	return m.CobolToExtMappings, m.Err
+}
+
+func (m *MockReader) GetGapAnalysis(_ context.Context) ([]n4j.GapInfo, error) {
+	return m.GapInfoItems, m.Err
+}
+
+func (m *MockReader) GetDataFlowPaths(_ context.Context, _ string) ([]n4j.DataFlowPathInfo, error) {
+	return m.DataFlowPathItems, m.Err
 }

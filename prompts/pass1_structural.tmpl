@@ -72,6 +72,32 @@ Return a single JSON object with these fields:
       "columns": ["array of column names referenced across all SQL for this table"],
       "operations": ["SELECT", "INSERT", "UPDATE", "DELETE"]
     }
+  ],
+  "idmsSchemas": [
+    {
+      "schemaName": "string — SCHEMA name from DB statement",
+      "subschemaName": "string — subschema name from DB statement",
+      "protocolMode": "string — PROTOCOL MODE (BATCH, IDMS-DC, or empty)"
+    }
+  ],
+  "idmsRecords": [
+    {
+      "name": "string — IDMS record name",
+      "area": "string — area name if identifiable, else empty"
+    }
+  ],
+  "idmsAreas": [
+    {
+      "name": "string — IDMS area name",
+      "usageMode": "string — RETRIEVAL, UPDATE, or empty"
+    }
+  ],
+  "idmsSets": [
+    {
+      "name": "string — IDMS set name",
+      "ownerRecord": "string — owner record name or empty",
+      "memberRecord": "string — member record name or empty"
+    }
   ]
 }
 
@@ -104,4 +130,11 @@ Rules:
   - CALL 'DFSORT' / 'ICETOOL' / 'IDCAMS' / 'IEBGENER' / 'IEBCOPY' → BATCH_UTIL. Details should include utility name and operation
   - Always populate the paragraph field with the paragraph name where the interface is invoked
 - For dbTables: deduplicate across all SQL statements. Collect all column names and operations per table. Extract table names from FROM, JOIN, INTO, UPDATE, DELETE FROM clauses. Extract column names from SELECT lists, WHERE predicates, SET clauses, INSERT column lists. Only include tables from EXEC SQL blocks
+- For COPY IDMS: COPY IDMS SUBSCHEMA-CTRL → copyReference is "SUBSCHEMA-CTRL"; COPY IDMS RECORD MANUAL → copyReference is "MANUAL". The actual member name follows the IDMS keyword (and optional RECORD/MAP/MODULE qualifier)
+- For IDMS SCHEMA SECTION: extract DB subschema WITHIN schema → idmsSchemas entry. Protocol mode from IDMS-CONTROL SECTION (PROTOCOL. MODE IS xxx)
+- For IDMS records: extract record names from COPY IDMS RECORD statements, OBTAIN/FIND/STORE/MODIFY/ERASE DML verbs, and BIND RECORD statements
+- For IDMS areas: extract area names from READY statements (READY areaName USAGE-MODE xxx)
+- For IDMS sets: extract set names from CONNECT/DISCONNECT statements and OBTAIN/FIND WITHIN SET navigation
+- For executionMode: add IDMS_DC (program runs under IDMS DC/UCF) and IDMS_BATCH (program uses IDMS in batch mode) values. Detect from PROTOCOL MODE or IDMS-CONTROL section
+- For errorHandling pattern: add IDMS-STATUS value for programs that check IDMS error status codes (DB-STATUS-CODE, ERROR-STATUS, IDMS-STATUS)
 - Return ONLY the JSON object, no markdown fences, no explanation

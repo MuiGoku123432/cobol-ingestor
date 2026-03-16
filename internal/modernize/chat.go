@@ -38,6 +38,8 @@ func ChatHandler(ps *ProviderState, mcpClient *MCPClient, defaultModel string, d
 			Messages       []chatInputMessage `json:"messages"`
 			TargetLanguage string             `json:"targetLanguage"`
 			Framework      string             `json:"framework"`
+			Integrations   string             `json:"integrations"`
+			DiscoveryMode  bool               `json:"discoveryMode"`
 			SessionID      string             `json:"sessionId"`
 		}
 		if err := c.ShouldBindJSON(&req); err != nil {
@@ -45,18 +47,33 @@ func ChatHandler(ps *ProviderState, mcpClient *MCPClient, defaultModel string, d
 			return
 		}
 
-		systemPrompt, err := BuildSystemPrompt(req.TargetLanguage, req.Framework)
+		var systemPrompt string
+		var err error
+		if req.DiscoveryMode {
+			systemPrompt, err = BuildDiscoveryPrompt()
+		} else {
+			systemPrompt, err = BuildSystemPrompt(req.TargetLanguage, req.Framework, req.Integrations)
+		}
 		if err != nil {
 			c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to build system prompt"})
 			return
 		}
 
 		// Convert input messages to ChatMessage format
+		var preamble string
+		if !req.DiscoveryMode {
+			preamble = BuildContextPreamble(req.TargetLanguage, req.Framework, req.Integrations)
+		}
 		messages := make([]llm.ChatMessage, 0, len(req.Messages))
-		for _, m := range req.Messages {
+		for i, m := range req.Messages {
+			text := m.Content
+			// Prepend context preamble to the first user message
+			if i == 0 && m.Role == "user" && preamble != "" {
+				text = preamble + text
+			}
 			messages = append(messages, llm.ChatMessage{
 				Role:    m.Role,
-				Content: []llm.ContentBlock{llm.NewTextContent(m.Content)},
+				Content: []llm.ContentBlock{llm.NewTextContent(text)},
 			})
 		}
 

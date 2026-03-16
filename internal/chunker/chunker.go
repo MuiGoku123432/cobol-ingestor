@@ -46,6 +46,30 @@ func (cc *CopybookCache) Read(path string) (string, error) {
 	return content, nil
 }
 
+// StripSequenceColumns controls whether columns 1-6 and 73-80 are stripped.
+// Set via config; package-level for simplicity.
+var StripSequenceColumns = true
+
+// stripSequenceColumns removes columns 1-6 (sequence/change markers) and 73-80
+// (identification area) from fixed-format COBOL lines. Lines shorter than 7 chars
+// are left as-is.
+func stripSequenceColumns(content string) string {
+	lines := strings.Split(content, "\n")
+	for i, line := range lines {
+		if len(line) < 7 {
+			continue
+		}
+		// Strip columns 73-80 first (if present)
+		if len(line) > 72 {
+			line = line[6:72]
+		} else {
+			line = line[6:]
+		}
+		lines[i] = line
+	}
+	return strings.Join(lines, "\n")
+}
+
 // Chunk represents a piece of a source file ready for analysis.
 type Chunk struct {
 	FileName string
@@ -67,6 +91,9 @@ func ChunkFile(fi graph.FileInfo, tokenLimit int, logger *zap.Logger) ([]Chunk, 
 	}
 
 	content := string(data)
+	if StripSequenceColumns {
+		content = stripSequenceColumns(content)
+	}
 	tokens := EstimateTokens(content)
 
 	// If it fits, return single chunk
@@ -309,20 +336,35 @@ func BuildCopybookIndex(files []graph.FileInfo) CopybookIndex {
 	return idx
 }
 
-// normalizeContinuations joins COBOL fixed-format continuation lines (column 7 = '-').
-// A continuation line has '-' in column 7 (0-indexed column 6) and continues the previous line.
+// normalizeContinuations joins COBOL fixed-format continuation lines.
+// After stripSequenceColumns, column 7 is at index 0 and column 12 is at index 5.
+// If columns have NOT been stripped, column 7 is at index 6 and column 12 is at index 11.
 func normalizeContinuations(content string) string {
 	lines := strings.Split(content, "\n")
 	var result []string
+
+	// Detect whether content has been stripped by checking if lines look like
+	// they start at column 7 (indicator column). Stripped content has the indicator
+	// at index 0; unstripped at index 6.
+	stripped := StripSequenceColumns
+	indicatorIdx := 0
+	contStartIdx := 5
+	codeStartIdx := 1
+	if !stripped {
+		indicatorIdx = 6
+		contStartIdx = 11
+		codeStartIdx = 7
+	}
+
 	for _, line := range lines {
-		if len(line) >= 7 && line[6] == '-' {
-			// This is a continuation line — append its content (from column 12 onward) to the previous line
+		if len(line) > indicatorIdx && line[indicatorIdx] == '-' {
+			// This is a continuation line
 			if len(result) > 0 {
 				continuation := ""
-				if len(line) > 11 {
-					continuation = line[11:]
-				} else if len(line) > 7 {
-					continuation = strings.TrimLeft(line[7:], " ")
+				if len(line) > contStartIdx {
+					continuation = line[contStartIdx:]
+				} else if len(line) > codeStartIdx {
+					continuation = strings.TrimLeft(line[codeStartIdx:], " ")
 				}
 				result[len(result)-1] = strings.TrimRight(result[len(result)-1], " ") + continuation
 				continue
@@ -333,8 +375,13 @@ func normalizeContinuations(content string) string {
 	return strings.Join(result, "\n")
 }
 
-// copyRegex matches COPY statements including optional REPLACING clauses, up to the terminating period.
-var copyRegex = regexp.MustCompile(`(?im)^\s+COPY\s+([A-Za-z0-9_-]+)\s*([^.]*?)\.`)
+// copyRegex matches COPY statements including COPY IDMS variants and optional REPLACING clauses.
+// Handles: COPY CUSTFILE., COPY IDMS SUBSCHEMA-CTRL., COPY IDMS RECORD MANUAL., COPY IDMS MAP MAPNAME.
+var copyRegex = regexp.MustCompile(
+	`(?im)^\s+COPY\s+(?:IDMS\s+(?:(?:RECORD|MAP|MODULE)\s+)?)?([A-Za-z0-9_-]+)\s*([^.]*?)\.`)
+
+// copyIDMSPrefixRegex detects COPY IDMS statements for inline marker context preservation.
+var copyIDMSPrefixRegex = regexp.MustCompile(`(?im)^\s+COPY\s+IDMS\s+`)
 
 // replacingRegex parses REPLACING pairs: ==old== BY ==new==
 var replacingRegex = regexp.MustCompile(`==\s*([^=]+?)\s*==\s+BY\s+==\s*([^=]+?)\s*==`)
@@ -418,7 +465,12 @@ func inlineCopybooksRecurse(content string, index CopybookIndex, depth int, visi
 		inlined, _ := inlineCopybooksRecurse(copybookContent, index, depth-1, visited, cache)
 		delete(visited, name) // allow same copybook in different branches
 
-		return fmt.Sprintf("      *>> COPY %s INLINED BEGIN\n%s\n      *>> COPY %s INLINED END", name, inlined, name)
+		// Preserve IDMS context in inline markers
+		marker := name
+		if copyIDMSPrefixRegex.MatchString(match) {
+			marker = "IDMS " + name
+		}
+		return fmt.Sprintf("      *>> COPY %s INLINED BEGIN\n%s\n      *>> COPY %s INLINED END", marker, inlined, marker)
 	}), nil
 }
 
@@ -439,6 +491,9 @@ func ChunkFilePass2(fi graph.FileInfo, opts Pass2ChunkOptions, logger *zap.Logge
 	}
 
 	content := string(data)
+	if StripSequenceColumns {
+		content = stripSequenceColumns(content)
+	}
 
 	// Inline copybooks
 	if opts.CopybookIndex != nil {
@@ -743,6 +798,22 @@ func summarizePreamble(divs map[string]string) string {
 				sb.WriteString(item[1])
 			}
 			sb.WriteString("\n")
+		}
+	}
+
+	// IDMS: extract PROTOCOL MODE from ENVIRONMENT
+	if env, ok := divs["ENVIRONMENT"]; ok {
+		re := regexp.MustCompile(`(?im)PROTOCOL\.\s*MODE\s+IS\s+(\S+)`)
+		if m := re.FindStringSubmatch(env); len(m) >= 2 {
+			sb.WriteString("*>> IDMS-CONTROL: PROTOCOL MODE " + m[1] + "\n")
+		}
+	}
+
+	// IDMS: extract SCHEMA info from DATA DIVISION
+	if data, ok := divs["DATA"]; ok {
+		re := regexp.MustCompile(`(?im)DB\s+([A-Za-z0-9_-]+)\s+WITHIN\s+([A-Za-z0-9_-]+)`)
+		if m := re.FindStringSubmatch(data); len(m) >= 3 {
+			sb.WriteString("*>> SCHEMA: subschema " + m[1] + " within " + m[2] + "\n")
 		}
 	}
 

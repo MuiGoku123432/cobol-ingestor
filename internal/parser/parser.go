@@ -26,6 +26,10 @@ type Pass1JSON struct {
 	CICSCommands       []CICSJSON              `json:"cicsCommands"`
 	ExternalInterfaces []ExternalInterfaceJSON `json:"externalInterfaces"`
 	DBTables           []DBTableJSON           `json:"dbTables"`
+	IDMSSchemas        []IDMSSchemaJSON        `json:"idmsSchemas"`
+	IDMSRecords        []IDMSRecordJSON        `json:"idmsRecords"`
+	IDMSAreas          []IDMSAreaJSON          `json:"idmsAreas"`
+	IDMSSets           []IDMSSetJSON           `json:"idmsSets"`
 }
 
 type DBTableJSON struct {
@@ -82,6 +86,28 @@ type ExternalInterfaceJSON struct {
 	Paragraph string `json:"paragraph"`
 }
 
+type IDMSSchemaJSON struct {
+	SchemaName    string `json:"schemaName"`
+	SubschemaName string `json:"subschemaName"`
+	ProtocolMode  string `json:"protocolMode"`
+}
+
+type IDMSRecordJSON struct {
+	Name string `json:"name"`
+	Area string `json:"area"`
+}
+
+type IDMSAreaJSON struct {
+	Name      string `json:"name"`
+	UsageMode string `json:"usageMode"`
+}
+
+type IDMSSetJSON struct {
+	Name         string `json:"name"`
+	OwnerRecord  string `json:"ownerRecord"`
+	MemberRecord string `json:"memberRecord"`
+}
+
 // ParsePass1Response parses Claude's JSON response into a Pass1Result.
 func ParsePass1Response(jsonStr, sourceFile string) (*graph.Pass1Result, error) {
 	cleaned := stripMarkdownFences(jsonStr)
@@ -133,7 +159,7 @@ func ParsePass1Response(jsonStr, sourceFile string) (*graph.Pass1Result, error) 
 			FromLabel: "Program",
 			FromKey:   programID,
 			ToLabel:   "Program",
-			ToKey:     ct.Target,
+			ToKey:     strings.ToUpper(ct.Target),
 			Properties: map[string]any{
 				"isDynamic": ct.IsDynamic,
 			},
@@ -284,6 +310,67 @@ func ParsePass1Response(jsonStr, sourceFile string) (*graph.Pass1Result, error) 
 		result.DBTables = append(result.DBTables, table)
 	}
 
+	// IDMS Schemas
+	for _, s := range raw.IDMSSchemas {
+		schema := graph.IDMSSchema{
+			ID:            newID(),
+			SchemaName:    s.SchemaName,
+			SubschemaName: s.SubschemaName,
+			ProgramID:     programID,
+			ProtocolMode:  s.ProtocolMode,
+		}
+		result.IDMSSchemas = append(result.IDMSSchemas, schema)
+		result.Relationships = append(result.Relationships, graph.Relationship{
+			Type:      graph.RelBindsTo,
+			FromLabel: "Program",
+			FromKey:   programID,
+			ToLabel:   "IDMSSchema",
+			ToKey:     schema.ID,
+		})
+	}
+
+	// IDMS Records
+	for _, r := range raw.IDMSRecords {
+		rec := graph.IDMSRecord{
+			ID:        newID(),
+			Name:      r.Name,
+			Area:      r.Area,
+			ProgramID: programID,
+		}
+		result.IDMSRecords = append(result.IDMSRecords, rec)
+	}
+
+	// IDMS Areas
+	for _, a := range raw.IDMSAreas {
+		area := graph.IDMSArea{
+			ID:        newID(),
+			Name:      a.Name,
+			UsageMode: a.UsageMode,
+		}
+		result.IDMSAreas = append(result.IDMSAreas, area)
+		result.Relationships = append(result.Relationships, graph.Relationship{
+			Type:      graph.RelReadyArea,
+			FromLabel: "Program",
+			FromKey:   programID,
+			ToLabel:   "IDMSArea",
+			ToKey:     a.Name,
+			Properties: map[string]any{
+				"usageMode": a.UsageMode,
+			},
+		})
+	}
+
+	// IDMS Sets
+	for _, s := range raw.IDMSSets {
+		set := graph.IDMSSet{
+			ID:           newID(),
+			Name:         s.Name,
+			OwnerRecord:  s.OwnerRecord,
+			MemberRecord: s.MemberRecord,
+		}
+		result.IDMSSets = append(result.IDMSSets, set)
+	}
+
 	// External interfaces
 	for _, ei := range raw.ExternalInterfaces {
 		iface := graph.ExternalInterface{
@@ -337,6 +424,18 @@ type Pass2JSON struct {
 	ConditionalLogic       []ConditionalLogicJSON     `json:"conditionalLogic"`
 	DynamicCallResolution  []DynamicCallResolutionJSON `json:"dynamicCallResolution"`
 	ErrorHandling          []ErrorHandlingJSON        `json:"errorHandling"`
+	IDMSOperations         []IDMSOperationJSON        `json:"idmsOperations"`
+}
+
+type IDMSOperationJSON struct {
+	Verb       string `json:"verb"`
+	Record     string `json:"record"`
+	Area       string `json:"area"`
+	Set        string `json:"set"`
+	CalcKey    string `json:"calcKey"`
+	Navigation string `json:"navigation"`
+	Paragraph  string `json:"paragraph"`
+	UsageMode  string `json:"usageMode"`
 }
 
 type PerformJSON struct {
@@ -514,6 +613,19 @@ func ParsePass2Response(jsonStr, sourceFile, programID string) (*graph.Pass2Resu
 			Paragraph: eh.Paragraph,
 			Pattern:   eh.Pattern,
 			Details:   eh.Details,
+		})
+	}
+
+	for _, op := range raw.IDMSOperations {
+		result.IDMSOperations = append(result.IDMSOperations, graph.IDMSOperation{
+			Verb:       op.Verb,
+			Record:     op.Record,
+			Area:       op.Area,
+			Set:        op.Set,
+			CalcKey:    op.CalcKey,
+			Navigation: op.Navigation,
+			Paragraph:  op.Paragraph,
+			UsageMode:  op.UsageMode,
 		})
 	}
 

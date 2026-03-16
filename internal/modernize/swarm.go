@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"sort"
 	"sync"
 	"text/template"
 
@@ -13,7 +14,12 @@ import (
 	"github.com/gin-gonic/gin"
 )
 
-const maxSwarmToolIterations = 10
+const (
+	maxSwarmToolIterations         = 10
+	maxCoordinatorToolIterations   = 5
+	maxContextCharsLatest          = 3000
+	maxContextCharsPrior           = 1500
+)
 
 type agentRole struct {
 	ID     string
@@ -26,6 +32,60 @@ var agentRoles = []agentRole{
 	{ID: "dataflow", Name: "Data Flow Analyst", Prompt: dataFlowAnalystPrompt},
 	{ID: "dependency", Name: "Dependency Mapper", Prompt: dependencyMapperPrompt},
 	{ID: "business", Name: "Business Logic Extractor", Prompt: businessLogicExtractorPrompt},
+}
+
+// toolCache provides a thread-safe cache for MCP tool call results.
+type toolCache struct {
+	mu    sync.RWMutex
+	store map[string]string
+}
+
+func newToolCache() *toolCache {
+	return &toolCache{store: make(map[string]string)}
+}
+
+// Key builds a deterministic cache key from tool name and arguments.
+func (tc *toolCache) Key(name string, args map[string]any) string {
+	// Sort keys for determinism
+	keys := make([]string, 0, len(args))
+	for k := range args {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+	ordered := make(map[string]any, len(args))
+	for _, k := range keys {
+		ordered[k] = args[k]
+	}
+	b, _ := json.Marshal(map[string]any{"tool": name, "args": ordered})
+	return string(b)
+}
+
+func (tc *toolCache) Get(key string) (string, bool) {
+	tc.mu.RLock()
+	defer tc.mu.RUnlock()
+	v, ok := tc.store[key]
+	return v, ok
+}
+
+func (tc *toolCache) Set(key, value string) {
+	tc.mu.Lock()
+	defer tc.mu.Unlock()
+	tc.store[key] = value
+}
+
+// truncateForContext truncates a string to maxChars, appending "..." if truncated.
+func truncateForContext(s string, maxChars int) string {
+	if len(s) <= maxChars {
+		return s
+	}
+	return s[:maxChars] + "..."
+}
+
+// coordinatorDecision represents the coordinator's assessment between rounds.
+type coordinatorDecision struct {
+	Satisfied bool              `json:"satisfied"`
+	FollowUps map[string]string `json:"follow_ups"`
+	Reasoning string            `json:"reasoning"`
 }
 
 // SwarmHandler creates a Gin handler for the agent swarm endpoint.
@@ -52,7 +112,10 @@ func SwarmHandler(ps *ProviderState, mcpClient *MCPClient, defaultModel string, 
 			Messages       []chatInputMessage `json:"messages"`
 			TargetLanguage string             `json:"targetLanguage"`
 			Framework      string             `json:"framework"`
+			Integrations   string             `json:"integrations"`
+			DiscoveryMode  bool               `json:"discoveryMode"`
 			SessionID      string             `json:"sessionId"`
+			MultiRound     bool               `json:"multiRound"`
 		}
 		if err := c.ShouldBindJSON(&req); err != nil {
 			c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
@@ -82,86 +145,140 @@ func SwarmHandler(ps *ProviderState, mcpClient *MCPClient, defaultModel string, 
 		w := c.Writer
 		var mu sync.Mutex
 
+		targetLanguage := req.TargetLanguage
+		framework := req.Framework
+		integrations := req.Integrations
+		if req.DiscoveryMode {
+			targetLanguage = ""
+			framework = ""
+			integrations = ""
+		}
+
 		promptData := swarmPromptData{
-			TargetLanguage: req.TargetLanguage,
-			Framework:      req.Framework,
+			TargetLanguage: targetLanguage,
+			Framework:      framework,
+			Integrations:   integrations,
 		}
 
-		// Run 4 agents in parallel
-		results := make([]agentResult, len(agentRoles))
-		var wg sync.WaitGroup
-
-		for i, role := range agentRoles {
-			wg.Add(1)
-			go func(idx int, role agentRole) {
-				defer wg.Done()
-
-				summary, err := runAgent(ctx, role, userQuery, promptData, provider, mcpClient, tools, model, maxTokens, w, &mu)
-				if err != nil {
-					mu.Lock()
-					SendSSEJSON(w, "agent_complete", map[string]string{
-						"id":      role.ID,
-						"summary": fmt.Sprintf("Error: %v", err),
-					})
-					mu.Unlock()
-					results[idx] = agentResult{Name: role.Name, Summary: fmt.Sprintf("Error: %v", err)}
-					return
-				}
-				results[idx] = agentResult{Name: role.Name, Summary: summary}
-			}(i, role)
+		maxRounds := 1
+		if req.MultiRound {
+			maxRounds = 3
 		}
 
-		wg.Wait()
+		cache := newToolCache()
+		var allRounds []roundSummary
+		var followUpQueries map[string]string
 
-		// Check if client disconnected
+		for round := 1; round <= maxRounds; round++ {
+			if ctx.Err() != nil {
+				return
+			}
+
+			// SSE: round_start (multi-round only)
+			if maxRounds > 1 {
+				mu.Lock()
+				SendSSEJSON(w, "round_start", map[string]any{
+					"round":     round,
+					"maxRounds": maxRounds,
+				})
+				mu.Unlock()
+			}
+
+			// Determine which agents to run
+			agentsToRun, agentFollowUps := selectAgents(agentRoles, followUpQueries, round)
+
+			// Run agents in parallel
+			results := make([]agentResult, len(agentsToRun))
+			var wg sync.WaitGroup
+
+			for i, role := range agentsToRun {
+				wg.Add(1)
+				go func(idx int, role agentRole) {
+					defer wg.Done()
+
+					// Build per-agent prompt data with round context
+					agentPromptData := promptData
+					agentPromptData.Round = round
+					if round > 1 {
+						// Truncate prior round summaries for context
+						agentPromptData.PriorRounds = truncateRoundSummaries(allRounds, maxContextCharsPrior)
+					}
+					if q, ok := agentFollowUps[role.ID]; ok {
+						agentPromptData.FollowUpQuery = q
+					}
+
+					// Use round-aware agent ID for SSE
+					sseID := role.ID
+					if maxRounds > 1 {
+						sseID = fmt.Sprintf("%s-round-%d", role.ID, round)
+					}
+					sseRole := agentRole{ID: sseID, Name: role.Name, Prompt: role.Prompt}
+
+					summary, err := runAgent(ctx, sseRole, role.Prompt, userQuery, agentPromptData, provider, mcpClient, cache, tools, model, maxTokens, w, &mu, round, maxRounds > 1)
+					if err != nil {
+						mu.Lock()
+						SendSSEJSON(w, "agent_complete", map[string]string{
+							"id":      sseID,
+							"summary": fmt.Sprintf("Error: %v", err),
+						})
+						mu.Unlock()
+						results[idx] = agentResult{Name: role.Name, Summary: fmt.Sprintf("Error: %v", err)}
+						return
+					}
+					results[idx] = agentResult{Name: role.Name, Summary: summary}
+				}(i, role)
+			}
+
+			wg.Wait()
+
+			if ctx.Err() != nil {
+				return
+			}
+
+			allRounds = append(allRounds, roundSummary{Round: round, Results: results})
+
+			// SSE: round_complete (multi-round only)
+			if maxRounds > 1 {
+				mu.Lock()
+				SendSSEJSON(w, "round_complete", map[string]any{"round": round})
+				mu.Unlock()
+			}
+
+			// If this is the last allowed round, skip decision
+			if round == maxRounds {
+				break
+			}
+
+			// Coordinator decision: do we need more info?
+			latestResults := allRounds[len(allRounds)-1].Results
+			decision, err := runCoordinatorDecision(ctx, latestResults, userQuery, promptData, provider, model, w, &mu, round)
+			if err != nil || decision.Satisfied {
+				break
+			}
+			followUpQueries = decision.FollowUps
+		}
+
 		if ctx.Err() != nil {
 			return
 		}
 
-		// Run Coordinator
+		// Flatten all round results for final synthesis
+		finalResults := flattenRounds(allRounds, maxContextCharsLatest, maxContextCharsPrior)
+
+		// Final synthesis with tool access
 		mu.Lock()
 		SendSSEJSON(w, "synthesis_start", map[string]string{})
 		mu.Unlock()
 
 		promptData.UserQuery = userQuery
-		promptData.AgentResults = results
+		promptData.AgentResults = finalResults
 
-		coordSystemPrompt, err := buildSwarmPrompt(coordinatorPrompt, promptData)
-		if err != nil {
-			mu.Lock()
-			SendSSEJSON(w, "error", map[string]string{"error": "failed to build coordinator prompt"})
-			mu.Unlock()
-			return
-		}
-
-		coordMessages := []llm.ChatMessage{
-			{
-				Role:    llm.RoleUser,
-				Content: []llm.ContentBlock{llm.NewTextContent(userQuery)},
-			},
-		}
-
-		chatReq := llm.ChatRequest{
-			Model:       model,
-			System:      coordSystemPrompt,
-			Messages:    coordMessages,
-			MaxTokens:   maxTokens,
-			Temperature: 0.3,
-		}
-
-		resp, err := provider.CompleteChat(ctx, chatReq)
+		coordText, err := runCoordinatorSynthesis(ctx, promptData, provider, mcpClient, cache, tools, model, maxTokens, w, &mu)
 		if err != nil {
 			mu.Lock()
 			SendSSEJSON(w, "error", map[string]string{"error": fmt.Sprintf("Coordinator error: %v", err)})
 			mu.Unlock()
 			return
-		}
-
-		coordText := resp.TextContent()
-		if coordText != "" {
-			mu.Lock()
-			SendSSEJSON(w, "text", map[string]string{"content": coordText})
-			mu.Unlock()
 		}
 
 		// Persist session
@@ -195,36 +312,113 @@ func SwarmHandler(ps *ProviderState, mcpClient *MCPClient, defaultModel string, 
 	}
 }
 
+// selectAgents determines which agents to run for a given round.
+// Round 1: all agents. Round 2+: only those in followUpQueries (or all if nil/empty).
+func selectAgents(roles []agentRole, followUpQueries map[string]string, round int) ([]agentRole, map[string]string) {
+	if round == 1 || len(followUpQueries) == 0 {
+		return roles, followUpQueries
+	}
+	var selected []agentRole
+	for _, role := range roles {
+		if _, ok := followUpQueries[role.ID]; ok {
+			selected = append(selected, role)
+		}
+	}
+	if len(selected) == 0 {
+		return roles, followUpQueries
+	}
+	return selected, followUpQueries
+}
+
+// truncateRoundSummaries creates a copy of round summaries with truncated agent summaries.
+func truncateRoundSummaries(rounds []roundSummary, maxChars int) []roundSummary {
+	out := make([]roundSummary, len(rounds))
+	for i, r := range rounds {
+		results := make([]agentResult, len(r.Results))
+		for j, ar := range r.Results {
+			results[j] = agentResult{
+				Name:    ar.Name,
+				Summary: truncateForContext(ar.Summary, maxChars),
+			}
+		}
+		out[i] = roundSummary{Round: r.Round, Results: results}
+	}
+	return out
+}
+
+// flattenRounds creates a flat list of agent results for the coordinator.
+// The latest round gets higher char limits; prior rounds get lower limits.
+func flattenRounds(rounds []roundSummary, latestMax, priorMax int) []agentResult {
+	if len(rounds) == 0 {
+		return nil
+	}
+	if len(rounds) == 1 {
+		// Single round: use latest max for all
+		results := make([]agentResult, len(rounds[0].Results))
+		for i, ar := range rounds[0].Results {
+			results[i] = agentResult{
+				Name:    ar.Name,
+				Summary: truncateForContext(ar.Summary, latestMax),
+			}
+		}
+		return results
+	}
+
+	var all []agentResult
+	for i, r := range rounds {
+		maxChars := priorMax
+		if i == len(rounds)-1 {
+			maxChars = latestMax
+		}
+		for _, ar := range r.Results {
+			all = append(all, agentResult{
+				Name:    fmt.Sprintf("%s (Round %d)", ar.Name, r.Round),
+				Summary: truncateForContext(ar.Summary, maxChars),
+			})
+		}
+	}
+	return all
+}
+
 func runAgent(
 	ctx context.Context,
-	role agentRole,
+	sseRole agentRole, // role with potentially round-qualified ID for SSE
+	promptTmpl *template.Template,
 	userQuery string,
 	promptData swarmPromptData,
 	provider llm.ChatProvider,
 	mcpClient *MCPClient,
+	cache *toolCache,
 	tools []llm.ToolDefinition,
 	model string,
 	maxTokens int,
 	w http.ResponseWriter,
 	mu *sync.Mutex,
+	round int,
+	isMultiRound bool,
 ) (string, error) {
 	// Send agent_start event
+	startEvent := map[string]any{
+		"id":   sseRole.ID,
+		"name": sseRole.Name,
+	}
+	if isMultiRound {
+		startEvent["round"] = round
+	}
 	mu.Lock()
-	SendSSEJSON(w, "agent_start", map[string]string{
-		"id":   role.ID,
-		"name": role.Name,
-	})
+	SendSSEJSON(w, "agent_start", startEvent)
 	mu.Unlock()
 
-	systemPrompt, err := buildSwarmPrompt(role.Prompt, promptData)
+	systemPrompt, err := buildSwarmPrompt(promptTmpl, promptData)
 	if err != nil {
 		return "", fmt.Errorf("build prompt: %w", err)
 	}
 
+	preamble := BuildContextPreamble(promptData.TargetLanguage, promptData.Framework, promptData.Integrations)
 	messages := []llm.ChatMessage{
 		{
 			Role:    llm.RoleUser,
-			Content: []llm.ContentBlock{llm.NewTextContent(userQuery)},
+			Content: []llm.ContentBlock{llm.NewTextContent(preamble + userQuery)},
 		},
 	}
 
@@ -253,7 +447,7 @@ func runAgent(
 			fullText += text
 			mu.Lock()
 			SendSSEJSON(w, "agent_progress", map[string]string{
-				"id":      role.ID,
+				"id":      sseRole.ID,
 				"content": text,
 			})
 			mu.Unlock()
@@ -262,7 +456,7 @@ func runAgent(
 		if resp.StopReason != "tool_use" {
 			mu.Lock()
 			SendSSEJSON(w, "agent_complete", map[string]string{
-				"id":      role.ID,
+				"id":      sseRole.ID,
 				"summary": truncate(fullText, 500),
 			})
 			mu.Unlock()
@@ -281,7 +475,7 @@ func runAgent(
 		for _, block := range toolUseBlocks {
 			mu.Lock()
 			SendSSEJSON(w, "agent_tool_start", map[string]string{
-				"id":       role.ID,
+				"id":       sseRole.ID,
 				"toolName": block.Name,
 				"toolId":   block.ID,
 			})
@@ -292,25 +486,41 @@ func runAgent(
 				args = map[string]any{}
 			}
 
-			result, err := mcpClient.CallTool(ctx, block.Name, args)
-			if err != nil {
-				toolResults = append(toolResults, llm.NewToolResultContent(block.ID, fmt.Sprintf("Error: %v", err), true))
+			cacheKey := cache.Key(block.Name, args)
+			if cached, ok := cache.Get(cacheKey); ok {
+				toolResults = append(toolResults, llm.NewToolResultContent(block.ID, cached, false))
 				mu.Lock()
 				SendSSEJSON(w, "agent_tool_result", map[string]string{
-					"id":     role.ID,
+					"id":     sseRole.ID,
 					"toolId": block.ID,
-					"result": err.Error(),
+					"result": truncate(cached, 300),
+					"cached": "true",
 				})
 				mu.Unlock()
 			} else {
-				toolResults = append(toolResults, llm.NewToolResultContent(block.ID, result, false))
-				mu.Lock()
-				SendSSEJSON(w, "agent_tool_result", map[string]string{
-					"id":     role.ID,
-					"toolId": block.ID,
-					"result": truncate(result, 300),
-				})
-				mu.Unlock()
+				result, callErr := mcpClient.CallTool(ctx, block.Name, args)
+				if callErr != nil {
+					toolResults = append(toolResults, llm.NewToolResultContent(block.ID, fmt.Sprintf("Error: %v", callErr), true))
+					mu.Lock()
+					SendSSEJSON(w, "agent_tool_result", map[string]string{
+						"id":     sseRole.ID,
+						"toolId": block.ID,
+						"result": callErr.Error(),
+						"cached": "false",
+					})
+					mu.Unlock()
+				} else {
+					cache.Set(cacheKey, result)
+					toolResults = append(toolResults, llm.NewToolResultContent(block.ID, result, false))
+					mu.Lock()
+					SendSSEJSON(w, "agent_tool_result", map[string]string{
+						"id":     sseRole.ID,
+						"toolId": block.ID,
+						"result": truncate(result, 300),
+						"cached": "false",
+					})
+					mu.Unlock()
+				}
 			}
 		}
 
@@ -323,9 +533,229 @@ func runAgent(
 	// Max iterations reached — return what we have
 	mu.Lock()
 	SendSSEJSON(w, "agent_complete", map[string]string{
-		"id":      role.ID,
+		"id":      sseRole.ID,
 		"summary": truncate(fullText, 500),
 	})
 	mu.Unlock()
+	return fullText, nil
+}
+
+// runCoordinatorDecision asks the coordinator if the current findings are sufficient.
+func runCoordinatorDecision(
+	ctx context.Context,
+	results []agentResult,
+	userQuery string,
+	promptData swarmPromptData,
+	provider llm.ChatProvider,
+	model string,
+	w http.ResponseWriter,
+	mu *sync.Mutex,
+	round int,
+) (*coordinatorDecision, error) {
+	decisionPromptData := swarmPromptData{
+		TargetLanguage: promptData.TargetLanguage,
+		Framework:      promptData.Framework,
+		Integrations:   promptData.Integrations,
+		UserQuery:      userQuery,
+		AgentResults:   results,
+	}
+
+	systemPrompt, err := buildSwarmPrompt(coordinatorDecisionPrompt, decisionPromptData)
+	if err != nil {
+		return &coordinatorDecision{Satisfied: true}, err
+	}
+
+	messages := []llm.ChatMessage{
+		{
+			Role:    llm.RoleUser,
+			Content: []llm.ContentBlock{llm.NewTextContent("Evaluate the findings and respond with JSON.")},
+		},
+	}
+
+	chatReq := llm.ChatRequest{
+		Model:       model,
+		System:      systemPrompt,
+		Messages:    messages,
+		MaxTokens:   1024,
+		Temperature: 0.2,
+	}
+
+	resp, err := provider.CompleteChat(ctx, chatReq)
+	if err != nil {
+		return &coordinatorDecision{Satisfied: true}, err
+	}
+
+	text := resp.TextContent()
+	var decision coordinatorDecision
+	if err := json.Unmarshal([]byte(text), &decision); err != nil {
+		// Try to extract JSON from markdown code blocks
+		decision = coordinatorDecision{Satisfied: true, Reasoning: "Could not parse decision response"}
+		if extracted := extractJSON(text); extracted != "" {
+			_ = json.Unmarshal([]byte(extracted), &decision)
+		}
+	}
+
+	// Send coordinator_decision SSE event
+	mu.Lock()
+	SendSSEJSON(w, "coordinator_decision", map[string]any{
+		"round":     round,
+		"satisfied": decision.Satisfied,
+		"reasoning": decision.Reasoning,
+		"followUps": decision.FollowUps,
+	})
+	mu.Unlock()
+
+	return &decision, nil
+}
+
+// extractJSON tries to extract a JSON object from text that may contain markdown code blocks.
+func extractJSON(s string) string {
+	// Look for ```json ... ``` or ``` ... ```
+	start := -1
+	for i := 0; i < len(s)-2; i++ {
+		if s[i] == '{' {
+			start = i
+			break
+		}
+	}
+	if start == -1 {
+		return ""
+	}
+	depth := 0
+	for i := start; i < len(s); i++ {
+		switch s[i] {
+		case '{':
+			depth++
+		case '}':
+			depth--
+			if depth == 0 {
+				return s[start : i+1]
+			}
+		}
+	}
+	return ""
+}
+
+// runCoordinatorSynthesis runs the coordinator with tool access for final synthesis.
+func runCoordinatorSynthesis(
+	ctx context.Context,
+	promptData swarmPromptData,
+	provider llm.ChatProvider,
+	mcpClient *MCPClient,
+	cache *toolCache,
+	tools []llm.ToolDefinition,
+	model string,
+	maxTokens int,
+	w http.ResponseWriter,
+	mu *sync.Mutex,
+) (string, error) {
+	coordSystemPrompt, err := buildSwarmPrompt(coordinatorPrompt, promptData)
+	if err != nil {
+		return "", fmt.Errorf("build coordinator prompt: %w", err)
+	}
+
+	coordPreamble := BuildContextPreamble(promptData.TargetLanguage, promptData.Framework, promptData.Integrations)
+	messages := []llm.ChatMessage{
+		{
+			Role:    llm.RoleUser,
+			Content: []llm.ContentBlock{llm.NewTextContent(coordPreamble + promptData.UserQuery)},
+		},
+	}
+
+	var fullText string
+
+	for i := 0; i < maxCoordinatorToolIterations; i++ {
+		if ctx.Err() != nil {
+			return "", ctx.Err()
+		}
+
+		chatReq := llm.ChatRequest{
+			Model:       model,
+			System:      coordSystemPrompt,
+			Messages:    messages,
+			Tools:       tools,
+			MaxTokens:   maxTokens,
+			Temperature: 0.3,
+		}
+
+		resp, err := provider.CompleteChat(ctx, chatReq)
+		if err != nil {
+			return "", fmt.Errorf("coordinator LLM error: %w", err)
+		}
+
+		if text := resp.TextContent(); text != "" {
+			fullText += text
+			mu.Lock()
+			SendSSEJSON(w, "text", map[string]string{"content": text})
+			mu.Unlock()
+		}
+
+		if resp.StopReason != "tool_use" {
+			return fullText, nil
+		}
+
+		// Process coordinator tool calls
+		toolUseBlocks := resp.ToolUseBlocks()
+
+		messages = append(messages, llm.ChatMessage{
+			Role:    llm.RoleAssistant,
+			Content: resp.Content,
+		})
+
+		var toolResults []llm.ContentBlock
+		for _, block := range toolUseBlocks {
+			mu.Lock()
+			SendSSEJSON(w, "coordinator_tool_start", map[string]string{
+				"toolName": block.Name,
+				"toolId":   block.ID,
+			})
+			mu.Unlock()
+
+			var args map[string]any
+			if err := json.Unmarshal(block.Input, &args); err != nil {
+				args = map[string]any{}
+			}
+
+			cacheKey := cache.Key(block.Name, args)
+			if cached, ok := cache.Get(cacheKey); ok {
+				toolResults = append(toolResults, llm.NewToolResultContent(block.ID, cached, false))
+				mu.Lock()
+				SendSSEJSON(w, "coordinator_tool_result", map[string]string{
+					"toolId": block.ID,
+					"result": truncate(cached, 300),
+					"cached": "true",
+				})
+				mu.Unlock()
+			} else {
+				result, callErr := mcpClient.CallTool(ctx, block.Name, args)
+				if callErr != nil {
+					toolResults = append(toolResults, llm.NewToolResultContent(block.ID, fmt.Sprintf("Error: %v", callErr), true))
+					mu.Lock()
+					SendSSEJSON(w, "coordinator_tool_result", map[string]string{
+						"toolId": block.ID,
+						"result": callErr.Error(),
+						"cached": "false",
+					})
+					mu.Unlock()
+				} else {
+					cache.Set(cacheKey, result)
+					toolResults = append(toolResults, llm.NewToolResultContent(block.ID, result, false))
+					mu.Lock()
+					SendSSEJSON(w, "coordinator_tool_result", map[string]string{
+						"toolId": block.ID,
+						"result": truncate(result, 300),
+						"cached": "false",
+					})
+					mu.Unlock()
+				}
+			}
+		}
+
+		messages = append(messages, llm.ChatMessage{
+			Role:    llm.RoleUser,
+			Content: toolResults,
+		})
+	}
+
 	return fullText, nil
 }

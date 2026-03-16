@@ -44,6 +44,7 @@ type Client struct {
 	jclTmpl        *template.Template
 	pass4Tmpl      *template.Template
 	pass5Tmpl      *template.Template
+	bwTmpl         *template.Template
 }
 
 // NewClient creates a Claude API client using an LLM provider.
@@ -78,6 +79,11 @@ func NewClient(provider llm.Provider, cfg config.ClaudeConfig, logger *zap.Logge
 		return nil, fmt.Errorf("parsing pass5 template: %w", err)
 	}
 
+	bwTmpl, err := template.New("bw").Parse(prompts.BWIngest)
+	if err != nil {
+		return nil, fmt.Errorf("parsing bw template: %w", err)
+	}
+
 	// Rate limit: ~120 requests per minute to stay within API limits.
 	// DISABLE_RATE_LIMIT=true removes the limit entirely.
 	var limiter *rate.Limiter
@@ -110,6 +116,7 @@ func NewClient(provider llm.Provider, cfg config.ClaudeConfig, logger *zap.Logge
 		jclTmpl:     jclTmpl,
 		pass4Tmpl:   p4Tmpl,
 		pass5Tmpl:   p5Tmpl,
+		bwTmpl:      bwTmpl,
 	}, nil
 }
 
@@ -246,6 +253,31 @@ func (c *Client) AnalyzeRepair(ctx context.Context, repairType, programID, graph
 		Messages: []llm.Message{
 			{Role: llm.RoleSystem, Content: "You are an expert COBOL analyst repairing gaps in extracted program metadata. Return only valid JSON matching the requested schema."},
 			{Role: llm.RoleUser, Content: userMsg.String()},
+		},
+	})
+}
+
+// AnalyzeBW sends a Businessware file to Claude Opus for entity/relationship extraction.
+func (c *Client) AnalyzeBW(ctx context.Context, fileName, fileType, content, existingPrograms string, maxTokens int) (string, error) {
+	var userMsg bytes.Buffer
+	if err := c.bwTmpl.Execute(&userMsg, map[string]string{
+		"FileName":         fileName,
+		"FileType":         fileType,
+		"ExistingPrograms": existingPrograms,
+	}); err != nil {
+		return "", fmt.Errorf("rendering bw template: %w", err)
+	}
+
+	if maxTokens <= 0 {
+		maxTokens = 16000
+	}
+
+	return c.completeWithRetry(ctx, llm.CompletionRequest{
+		Model:     c.opusModel,
+		MaxTokens: maxTokens,
+		Messages: []llm.Message{
+			{Role: llm.RoleSystem, Content: "You are an enterprise software analyst. You extract entities, relationships, and COBOL cross-references from Businessware artifacts (Java code, documentation, configuration files). Return structured JSON."},
+			{Role: llm.RoleUser, Content: userMsg.String() + "\n\n---\n\n" + content},
 		},
 	})
 }

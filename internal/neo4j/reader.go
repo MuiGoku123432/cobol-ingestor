@@ -3,6 +3,9 @@ package neo4j
 import (
 	"context"
 	"fmt"
+	"os"
+	"sort"
+	"strings"
 
 	"github.com/neo4j/neo4j-go-driver/v5/neo4j"
 	"go.uber.org/zap"
@@ -54,6 +57,27 @@ type Reader interface {
 	GetSharedDataChannels(ctx context.Context) ([]SharedDataChannelInfo, error)
 	// Phase 5: Validation report
 	GetValidationReport(ctx context.Context) (*ValidationResult, error)
+	// Copybook structure
+	GetCopybookStructure(ctx context.Context, copybookName string) ([]DataItemInfo, error)
+	// Source code retrieval
+	GetProgramSource(ctx context.Context, programID string) (*ProgramSourceInfo, error)
+	// Migration dependency ordering
+	GetMigrationSequence(ctx context.Context) ([]MigrationStep, error)
+	// File accessor drill-down
+	GetFileAccessors(ctx context.Context, fileName string) (*FileAccessInfo, error)
+	// Effort estimation
+	GetEffortEstimates(ctx context.Context) ([]EffortEstimate, error)
+	// IDMS support
+	GetIDMSRecords(ctx context.Context, programID string) ([]IDMSRecordInfo, error)
+	GetIDMSSchema(ctx context.Context, programID string) (*IDMSSchemaInfo, error)
+	GetIDMSAreas(ctx context.Context, programID string) ([]IDMSAreaInfo, error)
+	GetIDMSImpact(ctx context.Context, recordName string) (*IDMSImpactInfo, error)
+	// External DB gap analysis
+	ListExternalDBTables(ctx context.Context) ([]ExternalDBTableInfo, error)
+	GetExternalDBMapping(ctx context.Context, tableName string) (*ExternalDBMappingInfo, error)
+	GetCobolToExternalMappings(ctx context.Context, cobolTable string) ([]ExternalDBMappingInfo, error)
+	GetGapAnalysis(ctx context.Context) ([]GapInfo, error)
+	GetDataFlowPaths(ctx context.Context, tableName string) ([]DataFlowPathInfo, error)
 }
 
 // Ensure Client implements Reader.
@@ -261,7 +285,7 @@ func (c *Client) GetDataItems(ctx context.Context, programID string) ([]DataItem
 	defer session.Close(ctx)
 
 	result, err := session.Run(ctx,
-		"MATCH (d:DataItem {programId: $id}) RETURN d.name AS name, d.level AS level, d.fqn AS fqn, d.picture AS picture, d.usage AS usage ORDER BY d.level, d.name",
+		"MATCH (d:DataItem {programId: $id}) RETURN d.name AS name, d.level AS level, d.fqn AS fqn, d.picture AS picture, d.usage AS usage, d.copybook AS copybook ORDER BY d.level, d.name",
 		map[string]any{"id": programID})
 	if err != nil {
 		return nil, fmt.Errorf("data items query: %w", err)
@@ -271,11 +295,12 @@ func (c *Client) GetDataItems(ctx context.Context, programID string) ([]DataItem
 	for result.Next(ctx) {
 		rec := result.Record()
 		items = append(items, DataItemInfo{
-			Name:    getStr(rec, "name"),
-			Level:   int(getInt64(rec, "level")),
-			FQN:     getStr(rec, "fqn"),
-			Picture: getStr(rec, "picture"),
-			Usage:   getStr(rec, "usage"),
+			Name:     getStr(rec, "name"),
+			Level:    int(getInt64(rec, "level")),
+			FQN:      getStr(rec, "fqn"),
+			Picture:  getStr(rec, "picture"),
+			Usage:    getStr(rec, "usage"),
+			Copybook: getStr(rec, "copybook"),
 		})
 	}
 
@@ -701,7 +726,7 @@ func (c *Client) ListModernizationCandidates(ctx context.Context) ([]Modernizati
 	defer session.Close(ctx)
 
 	result, err := session.Run(ctx,
-		"MATCH (p:Program) WHERE p.modernizationScore IS NOT NULL RETURN p.programId AS programId, p.modernizationScore AS score, p.modernizationReason AS reason, p.modernizationApproach AS approach ORDER BY p.modernizationScore DESC", nil)
+		"MATCH (p:Program) WHERE p.modernizationScore IS NOT NULL AND p.filePath IS NOT NULL RETURN p.programId AS programId, p.modernizationScore AS score, p.modernizationReason AS reason, p.modernizationApproach AS approach ORDER BY p.modernizationScore DESC", nil)
 	if err != nil {
 		return nil, fmt.Errorf("modernization candidates query: %w", err)
 	}
@@ -724,7 +749,7 @@ func (c *Client) ListRiskPrograms(ctx context.Context, minScore float64) ([]Risk
 	defer session.Close(ctx)
 
 	result, err := session.Run(ctx,
-		"MATCH (p:Program) WHERE p.riskScore >= $min RETURN p.programId AS programId, p.riskScore AS riskScore, p.riskType AS riskType, p.riskDetails AS riskDetails ORDER BY p.riskScore DESC",
+		"MATCH (p:Program) WHERE p.riskScore >= $min AND p.filePath IS NOT NULL RETURN p.programId AS programId, p.riskScore AS riskScore, p.riskType AS riskType, p.riskDetails AS riskDetails ORDER BY p.riskScore DESC",
 		map[string]any{"min": minScore})
 	if err != nil {
 		return nil, fmt.Errorf("risk programs query: %w", err)
@@ -930,6 +955,355 @@ func (c *Client) GetValidationReport(ctx context.Context) (*ValidationResult, er
 	return w.RunValidation(ctx)
 }
 
+func (c *Client) GetCopybookStructure(ctx context.Context, copybookName string) ([]DataItemInfo, error) {
+	session := c.NewSession(ctx)
+	defer session.Close(ctx)
+
+	result, err := session.Run(ctx,
+		"MATCH (d:DataItem)-[:DEFINED_IN]->(c:Copybook {name: $name}) "+
+			"RETURN d.name AS name, d.level AS level, d.fqn AS fqn, "+
+			"d.picture AS picture, d.usage AS usage, d.copybook AS copybook "+
+			"ORDER BY d.level, d.name",
+		map[string]any{"name": copybookName})
+	if err != nil {
+		return nil, fmt.Errorf("copybook structure query: %w", err)
+	}
+
+	var items []DataItemInfo
+	for result.Next(ctx) {
+		rec := result.Record()
+		items = append(items, DataItemInfo{
+			Name:     getStr(rec, "name"),
+			Level:    int(getInt64(rec, "level")),
+			FQN:      getStr(rec, "fqn"),
+			Picture:  getStr(rec, "picture"),
+			Usage:    getStr(rec, "usage"),
+			Copybook: getStr(rec, "copybook"),
+		})
+	}
+	return items, nil
+}
+
+func (c *Client) GetProgramSource(ctx context.Context, programID string) (*ProgramSourceInfo, error) {
+	session := c.NewSession(ctx)
+	defer session.Close(ctx)
+
+	result, err := session.Run(ctx,
+		"MATCH (p:Program {programId: $id}) RETURN p.filePath AS filePath",
+		map[string]any{"id": programID})
+	if err != nil {
+		return nil, fmt.Errorf("querying program source: %w", err)
+	}
+	if !result.Next(ctx) {
+		return nil, nil
+	}
+
+	filePath := getStr(result.Record(), "filePath")
+	if filePath == "" {
+		return nil, nil
+	}
+
+	data, err := os.ReadFile(filePath)
+	if err != nil {
+		return nil, fmt.Errorf("reading source file %s: %w", filePath, err)
+	}
+
+	source := string(data)
+	lineCount := strings.Count(source, "\n") + 1
+
+	return &ProgramSourceInfo{
+		ProgramID: programID,
+		FilePath:  filePath,
+		Source:    source,
+		LineCount: lineCount,
+	}, nil
+}
+
+func (c *Client) GetMigrationSequence(ctx context.Context) ([]MigrationStep, error) {
+	session := c.NewSession(ctx)
+	defer session.Close(ctx)
+
+	// Get all modernization candidates with their call targets (also candidates)
+	result, err := session.Run(ctx,
+		"MATCH (p:Program) WHERE p.modernizationScore IS NOT NULL "+
+			"OPTIONAL MATCH (p)-[:CALLS]->(callee:Program) WHERE callee.modernizationScore IS NOT NULL "+
+			"OPTIONAL MATCH (p)-[:BELONGS_TO]->(d:BusinessDomain) "+
+			"RETURN p.programId AS programId, p.modernizationScore AS score, "+
+			"p.modernizationApproach AS approach, "+
+			"collect(DISTINCT callee.programId) AS blockedBy, "+
+			"head(collect(DISTINCT d.name)) AS domain",
+		nil)
+	if err != nil {
+		return nil, fmt.Errorf("migration sequence query: %w", err)
+	}
+
+	type candidate struct {
+		programID string
+		score     float64
+		approach  string
+		domain    string
+		blockedBy []string
+	}
+
+	candidateSet := make(map[string]bool)
+	var candidates []candidate
+
+	for result.Next(ctx) {
+		rec := result.Record()
+		pid := getStr(rec, "programId")
+		candidateSet[pid] = true
+
+		var blockedBy []string
+		if val, ok := rec.Get("blockedBy"); ok && val != nil {
+			if arr, ok := val.([]any); ok {
+				for _, v := range arr {
+					if s, ok := v.(string); ok && s != "" {
+						blockedBy = append(blockedBy, s)
+					}
+				}
+			}
+		}
+
+		candidates = append(candidates, candidate{
+			programID: pid,
+			score:     getFloat64(rec, "score"),
+			approach:  getStr(rec, "approach"),
+			domain:    getStr(rec, "domain"),
+			blockedBy: blockedBy,
+		})
+	}
+
+	// Filter blockedBy to only include actual candidates
+	for i := range candidates {
+		var filtered []string
+		for _, b := range candidates[i].blockedBy {
+			if candidateSet[b] {
+				filtered = append(filtered, b)
+			}
+		}
+		candidates[i].blockedBy = filtered
+	}
+
+	// Build adjacency for topological sort (Kahn's algorithm)
+	inDegree := make(map[string]int)
+	dependents := make(map[string][]string) // key blocks values
+	candidateMap := make(map[string]*candidate)
+
+	for i := range candidates {
+		c := &candidates[i]
+		candidateMap[c.programID] = c
+		if _, ok := inDegree[c.programID]; !ok {
+			inDegree[c.programID] = 0
+		}
+		for _, dep := range c.blockedBy {
+			inDegree[c.programID]++
+			dependents[dep] = append(dependents[dep], c.programID)
+		}
+	}
+
+	// Kahn's algorithm
+	var queue []string
+	for pid, deg := range inDegree {
+		if deg == 0 {
+			queue = append(queue, pid)
+		}
+	}
+	sort.Strings(queue) // deterministic ordering
+
+	var ordered []string
+	for len(queue) > 0 {
+		pid := queue[0]
+		queue = queue[1:]
+		ordered = append(ordered, pid)
+		for _, dep := range dependents[pid] {
+			inDegree[dep]--
+			if inDegree[dep] == 0 {
+				queue = append(queue, dep)
+				sort.Strings(queue)
+			}
+		}
+	}
+
+	// Add any remaining (cycles) at the end
+	if len(ordered) < len(candidates) {
+		for _, c := range candidates {
+			found := false
+			for _, o := range ordered {
+				if o == c.programID {
+					found = true
+					break
+				}
+			}
+			if !found {
+				ordered = append(ordered, c.programID)
+			}
+		}
+	}
+
+	// Classify tiers and build result
+	// LEAF = no outbound deps, ROOT = no inbound, MIDDLE = both
+	hasOutbound := make(map[string]bool)
+	hasInbound := make(map[string]bool)
+	for _, c := range candidates {
+		if len(c.blockedBy) > 0 {
+			hasOutbound[c.programID] = true
+			for _, b := range c.blockedBy {
+				hasInbound[b] = true
+			}
+		}
+	}
+
+	var steps []MigrationStep
+	for i, pid := range ordered {
+		c := candidateMap[pid]
+		tier := "MIDDLE"
+		if !hasOutbound[pid] {
+			tier = "LEAF"
+		} else if !hasInbound[pid] {
+			tier = "ROOT"
+		}
+
+		steps = append(steps, MigrationStep{
+			ProgramID: pid,
+			Order:     i + 1,
+			BlockedBy: c.blockedBy,
+			Domain:    c.domain,
+			Approach:  c.approach,
+			Score:     c.score,
+			Tier:      tier,
+		})
+	}
+
+	return steps, nil
+}
+
+func (c *Client) GetFileAccessors(ctx context.Context, fileName string) (*FileAccessInfo, error) {
+	session := c.NewSession(ctx)
+	defer session.Close(ctx)
+
+	params := map[string]any{"name": fileName}
+	info := &FileAccessInfo{FileName: fileName}
+
+	// Query programs that read/write this file
+	result, err := session.Run(ctx,
+		"MATCH (p:Program)-[r:READS|WRITES]->(f:File {name: $name}) "+
+			"RETURN p.programId AS programId, type(r) AS accessType",
+		params)
+	if err != nil {
+		return nil, fmt.Errorf("file accessors query: %w", err)
+	}
+
+	// Track per-program access types for dedup into READS_WRITES
+	accessMap := make(map[string]map[string]bool)
+	for result.Next(ctx) {
+		rec := result.Record()
+		pid := getStr(rec, "programId")
+		atype := getStr(rec, "accessType")
+		if accessMap[pid] == nil {
+			accessMap[pid] = make(map[string]bool)
+		}
+		accessMap[pid][atype] = true
+	}
+
+	for pid, types := range accessMap {
+		accessType := "READS"
+		if types["READS"] && types["WRITES"] {
+			accessType = "READS_WRITES"
+		} else if types["WRITES"] {
+			accessType = "WRITES"
+		}
+		info.Accessors = append(info.Accessors, FileAccessorInfo{
+			ProgramID:  pid,
+			AccessType: accessType,
+		})
+	}
+
+	// Query DD card mappings
+	ddResult, err := session.Run(ctx,
+		"MATCH (dd:DDCard)-[:MAPS_TO_FILE]->(f:File {name: $name}) "+
+			"RETURN dd.ddName AS ddName, dd.dsname AS dsname, dd.jobName AS jobName, "+
+			"dd.stepName AS stepName, dd.isInput AS isInput, dd.isOutput AS isOutput",
+		params)
+	if err == nil {
+		for ddResult.Next(ctx) {
+			rec := ddResult.Record()
+			info.DDCards = append(info.DDCards, FileAccessDDInfo{
+				DDName:   getStr(rec, "ddName"),
+				DSName:   getStr(rec, "dsname"),
+				JobName:  getStr(rec, "jobName"),
+				StepName: getStr(rec, "stepName"),
+				IsInput:  getBool(rec, "isInput"),
+				IsOutput: getBool(rec, "isOutput"),
+			})
+		}
+	}
+
+	return info, nil
+}
+
+func (c *Client) GetEffortEstimates(ctx context.Context) ([]EffortEstimate, error) {
+	session := c.NewSession(ctx)
+	defer session.Close(ctx)
+
+	result, err := session.Run(ctx,
+		"MATCH (p:Program) "+
+			"OPTIONAL MATCH (para:Paragraph)-[:BELONGS_TO]->(p) "+
+			"OPTIONAL MATCH (p)-[:INCLUDES]->(cb:Copybook) "+
+			"OPTIONAL MATCH (d:DataItem {programId: p.programId}) "+
+			"OPTIONAL MATCH (e:ExternalInterface {programId: p.programId}) "+
+			"OPTIONAL MATCH (s:SQLStatement {programId: p.programId}) "+
+			"OPTIONAL MATCH (c:CICSTransaction {programId: p.programId}) "+
+			"RETURN p.programId AS programId, p.lineCount AS lineCount, "+
+			"p.modernizationApproach AS approach, "+
+			"count(DISTINCT para) AS paragraphs, count(DISTINCT cb) AS copybooks, "+
+			"count(DISTINCT d) AS dataItems, count(DISTINCT e) AS externals, "+
+			"count(DISTINCT s) AS sqls, count(DISTINCT c) AS cics "+
+			"ORDER BY p.programId",
+		nil)
+	if err != nil {
+		return nil, fmt.Errorf("effort estimates query: %w", err)
+	}
+
+	var items []EffortEstimate
+	for result.Next(ctx) {
+		rec := result.Record()
+		lineCount := int(getInt64(rec, "lineCount"))
+		paragraphs := int(getInt64(rec, "paragraphs"))
+		copybooks := int(getInt64(rec, "copybooks"))
+		dataItemCount := int(getInt64(rec, "dataItems"))
+		externals := int(getInt64(rec, "externals"))
+		sqls := int(getInt64(rec, "sqls"))
+		cics := int(getInt64(rec, "cics"))
+
+		score := paragraphs*2 + copybooks*3 + externals*5 + sqls*3 + cics*4 + lineCount/500
+
+		tshirt := "S"
+		if score > 120 {
+			tshirt = "XL"
+		} else if score > 60 {
+			tshirt = "L"
+		} else if score > 20 {
+			tshirt = "M"
+		}
+
+		items = append(items, EffortEstimate{
+			ProgramID:       getStr(rec, "programId"),
+			ParagraphCount:  paragraphs,
+			CopybookCount:   copybooks,
+			DataItemCount:   dataItemCount,
+			ExternalCount:   externals,
+			SQLCount:        sqls,
+			CICSCount:       cics,
+			LineCount:       lineCount,
+			TShirtSize:      tshirt,
+			ComplexityScore: score,
+			Approach:        getStr(rec, "approach"),
+		})
+	}
+
+	return items, nil
+}
+
 // Helper methods
 
 func (c *Client) queryCallInfoList(ctx context.Context, session neo4j.SessionWithContext, cypher string, params map[string]any) ([]CallInfo, error) {
@@ -1029,4 +1403,107 @@ func getBool(rec *neo4j.Record, key string) bool {
 		return b
 	}
 	return false
+}
+
+// GetIDMSRecords returns IDMS records associated with a program.
+func (c *Client) GetIDMSRecords(ctx context.Context, programID string) ([]IDMSRecordInfo, error) {
+	session := c.NewSession(ctx)
+	defer session.Close(ctx)
+
+	result, err := session.Run(ctx,
+		"MATCH (r:IDMSRecord {programId: $pid}) RETURN r.name AS name, r.area AS area, r.programId AS programId ORDER BY r.name",
+		map[string]any{"pid": programID})
+	if err != nil {
+		return nil, fmt.Errorf("IDMS records query: %w", err)
+	}
+
+	var items []IDMSRecordInfo
+	for result.Next(ctx) {
+		rec := result.Record()
+		items = append(items, IDMSRecordInfo{
+			Name:      getStr(rec, "name"),
+			Area:      getStr(rec, "area"),
+			ProgramID: getStr(rec, "programId"),
+		})
+	}
+	return items, nil
+}
+
+// GetIDMSSchema returns the IDMS schema binding for a program.
+func (c *Client) GetIDMSSchema(ctx context.Context, programID string) (*IDMSSchemaInfo, error) {
+	session := c.NewSession(ctx)
+	defer session.Close(ctx)
+
+	result, err := session.Run(ctx,
+		"MATCH (p:Program {programId: $pid})-[:BINDS_TO]->(s:IDMSSchema) "+
+			"RETURN s.schemaName AS schemaName, s.subschemaName AS subschemaName, s.protocolMode AS protocolMode, s.programId AS programId LIMIT 1",
+		map[string]any{"pid": programID})
+	if err != nil {
+		return nil, fmt.Errorf("IDMS schema query: %w", err)
+	}
+
+	if !result.Next(ctx) {
+		return nil, nil
+	}
+	rec := result.Record()
+	return &IDMSSchemaInfo{
+		SchemaName:    getStr(rec, "schemaName"),
+		SubschemaName: getStr(rec, "subschemaName"),
+		ProtocolMode:  getStr(rec, "protocolMode"),
+		ProgramID:     getStr(rec, "programId"),
+	}, nil
+}
+
+// GetIDMSAreas returns IDMS areas readied by a program.
+func (c *Client) GetIDMSAreas(ctx context.Context, programID string) ([]IDMSAreaInfo, error) {
+	session := c.NewSession(ctx)
+	defer session.Close(ctx)
+
+	result, err := session.Run(ctx,
+		"MATCH (p:Program {programId: $pid})-[r:READIES]->(a:IDMSArea) "+
+			"RETURN a.name AS name, r.usageMode AS usageMode ORDER BY a.name",
+		map[string]any{"pid": programID})
+	if err != nil {
+		return nil, fmt.Errorf("IDMS areas query: %w", err)
+	}
+
+	var items []IDMSAreaInfo
+	for result.Next(ctx) {
+		rec := result.Record()
+		items = append(items, IDMSAreaInfo{
+			Name:      getStr(rec, "name"),
+			UsageMode: getStr(rec, "usageMode"),
+		})
+	}
+	return items, nil
+}
+
+// GetIDMSImpact returns which programs navigate, store, modify, or erase a given IDMS record.
+func (c *Client) GetIDMSImpact(ctx context.Context, recordName string) (*IDMSImpactInfo, error) {
+	session := c.NewSession(ctx)
+	defer session.Close(ctx)
+
+	info := &IDMSImpactInfo{RecordName: recordName}
+
+	for _, pair := range []struct {
+		rel   string
+		field *[]string
+	}{
+		{"NAVIGATES", &info.Navigators},
+		{"STORES_IN", &info.Storers},
+		{"MODIFIES", &info.Modifiers},
+		{"ERASES", &info.Erasers},
+	} {
+		result, err := session.Run(ctx,
+			fmt.Sprintf("MATCH (p:Program)-[:%s]->(r:IDMSRecord {name: $name}) RETURN DISTINCT p.programId AS pid ORDER BY pid", pair.rel),
+			map[string]any{"name": recordName})
+		if err != nil {
+			return nil, fmt.Errorf("IDMS impact query (%s): %w", pair.rel, err)
+		}
+		for result.Next(ctx) {
+			*pair.field = append(*pair.field, getStr(result.Record(), "pid"))
+		}
+	}
+
+	return info, nil
 }

@@ -86,8 +86,20 @@ Return a single JSON object with these fields:
   "errorHandling": [
     {
       "paragraph": "string — paragraph name",
-      "pattern": "string — STRUCTURED, AD-HOC, FILE-STATUS, SQLCODE, or CICS-RESP",
+      "pattern": "string — STRUCTURED, AD-HOC, FILE-STATUS, SQLCODE, CICS-RESP, or IDMS-STATUS",
       "details": "string — brief description of the error handling approach"
+    }
+  ],
+  "idmsOperations": [
+    {
+      "verb": "string — BIND, READY, OBTAIN, FIND, GET, STORE, MODIFY, ERASE, CONNECT, DISCONNECT, FINISH",
+      "record": "string — target record name or empty",
+      "area": "string — target area name or empty",
+      "set": "string — target set name or empty",
+      "calcKey": "string — CALC key value for OBTAIN CALC or empty",
+      "navigation": "string — CALC, FIRST, NEXT, PRIOR, LAST, OWNER, WITHIN, CURRENT, DB-KEY, or empty",
+      "paragraph": "string — paragraph where the DML occurs",
+      "usageMode": "string — RETRIEVAL, UPDATE, or empty (for READY)"
     }
   ]
 }
@@ -102,6 +114,21 @@ Rules:
 - For annotations: provide a concise business-level description of each paragraph's purpose, specific to what it does in THIS program — do not use generic descriptions like 'main processing' or 'initialization'
 - For conditionalLogic: extract IF and EVALUATE conditions with the variables they test, per paragraph
 - For dynamicCallResolution: for CALL variable-name, examine surrounding MOVE statements or VALUE clauses that set the variable; if you can determine likely target program(s), include them as resolvedTargets
-- For errorHandling: identify error handler paragraphs and classify the pattern (STRUCTURED = uses ON ERROR/NOT ON ERROR, FILE-STATUS = checks file status codes, SQLCODE = checks SQLCODE, CICS-RESP = checks EIBRESP, AD-HOC = informal error checking)
+- For errorHandling: identify error handler paragraphs and classify the pattern (STRUCTURED = uses ON ERROR/NOT ON ERROR, FILE-STATUS = checks file status codes, SQLCODE = checks SQLCODE, CICS-RESP = checks EIBRESP, IDMS-STATUS = checks DB-STATUS-CODE/ERROR-STATUS/IDMS-STATUS, AD-HOC = informal error checking)
+- For idmsOperations: extract ALL IDMS DML verbs:
+  - BIND RUN-UNIT → verb=BIND, record/area/set empty
+  - BIND RECORD recordName → verb=BIND, record=recordName
+  - READY areaName USAGE-MODE xxx → verb=READY, area=areaName, usageMode=xxx
+  - OBTAIN CALC recordName → verb=OBTAIN, record=recordName, navigation=CALC, calcKey=the key value if identifiable
+  - OBTAIN FIRST/NEXT/PRIOR/LAST/OWNER recordName WITHIN setName → verb=OBTAIN, record=recordName, navigation=FIRST/NEXT/etc., set=setName
+  - FIND recordName (same navigation patterns as OBTAIN)
+  - GET recordName → verb=GET, record=recordName
+  - STORE recordName → verb=STORE, record=recordName
+  - MODIFY recordName → verb=MODIFY, record=recordName
+  - ERASE recordName → verb=ERASE, record=recordName
+  - CONNECT recordName TO setName → verb=CONNECT, record=recordName, set=setName
+  - DISCONNECT recordName FROM setName → verb=DISCONNECT, record=recordName, set=setName
+  - FINISH → verb=FINISH
+  - Always populate paragraph with the paragraph name where the DML occurs
 - If this is a partial chunk, extract only what is visible — do not fabricate content from other chunks
 - Return ONLY the JSON object, no markdown fences, no explanation

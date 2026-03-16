@@ -44,11 +44,12 @@ type ParagraphInfo struct {
 
 // DataItemInfo holds data item details for API responses.
 type DataItemInfo struct {
-	Name    string `json:"name"`
-	Level   int    `json:"level"`
-	FQN     string `json:"fqn"`
-	Picture string `json:"picture,omitempty"`
-	Usage   string `json:"usage,omitempty"`
+	Name     string `json:"name"`
+	Level    int    `json:"level"`
+	FQN      string `json:"fqn"`
+	Picture  string `json:"picture,omitempty"`
+	Usage    string `json:"usage,omitempty"`
+	Copybook string `json:"copybook,omitempty"`
 }
 
 // CallChainNode represents a node in a call chain traversal.
@@ -403,6 +404,129 @@ type SharedDataChannelInfo struct {
 	Channel  string   `json:"channel"`
 	Writers  []string `json:"writers"`
 	Readers  []string `json:"readers"`
+}
+
+// ProgramSourceInfo holds source code retrieved from disk for a program.
+type ProgramSourceInfo struct {
+	ProgramID string `json:"programId"`
+	FilePath  string `json:"filePath"`
+	Source    string `json:"source"`
+	LineCount int    `json:"lineCount"`
+}
+
+// MigrationStep represents a dependency-ordered migration entry.
+type MigrationStep struct {
+	ProgramID string   `json:"programId"`
+	Order     int      `json:"order"`
+	BlockedBy []string `json:"blockedBy"`
+	Domain    string   `json:"domain,omitempty"`
+	Approach  string   `json:"approach,omitempty"`
+	Score     float64  `json:"score"`
+	Tier      string   `json:"tier"` // LEAF, MIDDLE, ROOT
+}
+
+// FileAccessInfo holds all accessors and DD card mappings for a file.
+type FileAccessInfo struct {
+	FileName  string             `json:"fileName"`
+	Accessors []FileAccessorInfo `json:"accessors"`
+	DDCards   []FileAccessDDInfo `json:"ddCards,omitempty"`
+}
+
+// FileAccessorInfo holds per-program file access info.
+type FileAccessorInfo struct {
+	ProgramID  string `json:"programId"`
+	AccessType string `json:"accessType"` // READS, WRITES, READS_WRITES
+}
+
+// FileAccessDDInfo holds DD card mapping info for a file.
+type FileAccessDDInfo struct {
+	DDName   string `json:"ddName"`
+	DSName   string `json:"dsname,omitempty"`
+	JobName  string `json:"jobName,omitempty"`
+	StepName string `json:"stepName,omitempty"`
+	IsInput  bool   `json:"isInput"`
+	IsOutput bool   `json:"isOutput"`
+}
+
+// EffortEstimate holds structural complexity metrics for a program.
+type EffortEstimate struct {
+	ProgramID       string `json:"programId"`
+	ParagraphCount  int    `json:"paragraphCount"`
+	CopybookCount   int    `json:"copybookCount"`
+	DataItemCount   int    `json:"dataItemCount"`
+	ExternalCount   int    `json:"externalInterfaceCount"`
+	SQLCount        int    `json:"sqlStatementCount"`
+	CICSCount       int    `json:"cicsTransactionCount"`
+	LineCount       int    `json:"lineCount"`
+	TShirtSize      string `json:"tShirtSize"` // S, M, L, XL
+	ComplexityScore int    `json:"complexityScore"`
+	Approach        string `json:"approach,omitempty"`
+}
+
+// IDMSRecordInfo holds IDMS record details for API responses.
+type IDMSRecordInfo struct {
+	Name      string `json:"name"`
+	Area      string `json:"area,omitempty"`
+	ProgramID string `json:"programId"`
+}
+
+// IDMSSchemaInfo holds IDMS schema details for API responses.
+type IDMSSchemaInfo struct {
+	SchemaName    string `json:"schemaName"`
+	SubschemaName string `json:"subschemaName"`
+	ProtocolMode  string `json:"protocolMode,omitempty"`
+	ProgramID     string `json:"programId"`
+}
+
+// IDMSAreaInfo holds IDMS area details for API responses.
+type IDMSAreaInfo struct {
+	Name      string `json:"name"`
+	UsageMode string `json:"usageMode,omitempty"`
+}
+
+// IDMSImpactInfo holds IDMS record impact analysis.
+type IDMSImpactInfo struct {
+	RecordName string   `json:"recordName"`
+	Navigators []string `json:"navigators"` // programs that OBTAIN/FIND/GET
+	Storers    []string `json:"storers"`    // programs that STORE
+	Modifiers  []string `json:"modifiers"`  // programs that MODIFY
+	Erasers    []string `json:"erasers"`    // programs that ERASE
+}
+
+// ExternalDBTableInfo holds external DB table details for API responses.
+type ExternalDBTableInfo struct {
+	Name         string `json:"name"`
+	Schema       string `json:"schema,omitempty"`
+	DatabaseName string `json:"databaseName"`
+	DatabaseType string `json:"databaseType"`
+	Columns      string `json:"columns,omitempty"` // JSON array of column objects
+}
+
+// ExternalDBMappingInfo holds a mapping between COBOL DB2 table and external table.
+type ExternalDBMappingInfo struct {
+	CobolTable     string  `json:"cobolTable"`
+	ExternalTable  string  `json:"externalTable"`
+	Confidence     float64 `json:"confidence"`
+	Reason         string  `json:"reason,omitempty"`
+	ColumnMappings string  `json:"columnMappings,omitempty"` // JSON array
+}
+
+// GapInfo holds gap analysis details.
+type GapInfo struct {
+	Side        string `json:"side"`
+	TableName   string `json:"tableName"`
+	ColumnName  string `json:"columnName,omitempty"`
+	Description string `json:"description"`
+}
+
+// DataFlowPathInfo holds data flow path details.
+type DataFlowPathInfo struct {
+	CobolProgram  string `json:"cobolProgram"`
+	Operation     string `json:"operation"`
+	DB2Table      string `json:"db2Table"`
+	ExternalTable string `json:"externalTable"`
+	FlowType      string `json:"flowType"`
+	Description   string `json:"description"`
 }
 
 // Filter holds common query filters.

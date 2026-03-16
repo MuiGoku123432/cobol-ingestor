@@ -7,7 +7,7 @@ BINARIES := \
 	$(BINARY_DIR)/cobol-graph-mcp \
 	$(BINARY_DIR)/cobol-graph-modernize
 
-.PHONY: build clean install uninstall run-ingest run-api run-mcp run-modernize test test-integration vet lint swagger docker docker-build
+.PHONY: build clean install uninstall run-ingest run-api run-mcp run-modernize run-desktop build-desktop desktop-mac desktop-linux desktop-windows test test-integration vet lint swagger docker docker-build
 
 build: $(BINARIES)
 
@@ -59,6 +59,22 @@ lint:
 
 swagger:
 	swag init -g cmd/server/main.go -o api/docs
+
+# Desktop (Wails) targets
+run-desktop:
+	cd cmd/desktop && wails dev
+
+build-desktop:
+	cd cmd/desktop && wails build -o ../../$(BINARY_DIR)/cobol-graph-desktop
+
+desktop-mac:
+	cd cmd/desktop && wails build -platform darwin/universal -o ../../$(BINARY_DIR)/cobol-graph-desktop
+
+desktop-linux:
+	cd cmd/desktop && wails build -platform linux/amd64 -o ../../$(BINARY_DIR)/cobol-graph-desktop
+
+desktop-windows:
+	cd cmd/desktop && wails build -platform windows/amd64 -o ../../$(BINARY_DIR)/cobol-graph-desktop.exe
 
 docker:
 	docker compose up -d
