@@ -67,6 +67,8 @@ func registerAllTools(s *mcp.Server, reader n4j.Reader, writer *n4j.BatchWriter)
 	registerGetIDMSSchema(s, reader)
 	registerGetIDMSImpact(s, reader)
 	registerGetIDMSAreas(s, reader)
+	// External DB gap analysis tools
+	registerExternalDBTools(s, reader)
 	// Write tools (require writer)
 	if writer != nil {
 		registerReassignProgramDomain(s, writer)

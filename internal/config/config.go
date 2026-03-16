@@ -11,14 +11,37 @@ import (
 )
 
 type Config struct {
-	DataDir   string // COBOL_GRAPH_DATA_DIR — base directory for persistent data (default ~/.cobol-graph)
-	LLM       LLMConfig
-	Claude    ClaudeConfig
-	Neo4j     Neo4jConfig
-	Ingest    IngestConfig
-	API       APIConfig
-	MCP       MCPConfig
-	Modernize ModernizeConfig
+	DataDir    string // COBOL_GRAPH_DATA_DIR — base directory for persistent data (default ~/.cobol-graph)
+	LLM        LLMConfig
+	Claude     ClaudeConfig
+	Neo4j      Neo4jConfig
+	Ingest     IngestConfig
+	API        APIConfig
+	MCP        MCPConfig
+	Modernize  ModernizeConfig
+	ExternalDB ExternalDBConfig
+}
+
+// ExternalDBConfig holds settings for external database gap analysis via MCP.
+type ExternalDBConfig struct {
+	DBMCPCommand   string // EXTDB_MCP_CMD — shell command to start external DB MCP server
+	DBMCPServerURL string // EXTDB_MCP_URL — HTTP endpoint alternative
+	GraphMCPBin    string // EXTDB_GRAPH_MCP_BIN — path to cobol-graph-mcp binary
+	GraphMCPURL    string // EXTDB_GRAPH_MCP_URL — HTTP endpoint alternative
+	MaxIterations  int    // EXTDB_MAX_ITERATIONS (default 20)
+	MaxTokens      int    // EXTDB_MAX_TOKENS (default 16000)
+	DatabaseName   string // EXTDB_DATABASE_NAME — human label
+	DatabaseType   string // EXTDB_DATABASE_TYPE — "oracle", "postgres", etc.
+
+	// Oracle SQLcl auto-launch settings
+	OracleHost       string // ORACLE_HOST (default "localhost")
+	OraclePort       string // ORACLE_PORT (default "1521")
+	OracleService    string // ORACLE_SERVICE
+	OracleUser       string // ORACLE_USER
+	OraclePassword   string // ORACLE_PASSWORD
+	OracleWalletPath string // ORACLE_WALLET_PATH
+	OracleTNSAdmin   string // ORACLE_TNS_ADMIN
+	OracleSQLclPath  string // ORACLE_SQLCL_PATH
 }
 
 type MCPConfig struct {
@@ -164,6 +187,20 @@ func Load() (*Config, error) {
 	defaultDataDir := filepath.Join(func() string { h, _ := os.UserHomeDir(); return h }(), ".cobol-graph")
 	viper.SetDefault("COBOL_GRAPH_DATA_DIR", defaultDataDir)
 
+	// External DB defaults
+	viper.SetDefault("EXTDB_MCP_CMD", "")
+	viper.SetDefault("EXTDB_MCP_URL", "")
+	viper.SetDefault("EXTDB_GRAPH_MCP_BIN", "./bin/cobol-graph-mcp")
+	viper.SetDefault("EXTDB_GRAPH_MCP_URL", "")
+	viper.SetDefault("EXTDB_MAX_ITERATIONS", 20)
+	viper.SetDefault("EXTDB_MAX_TOKENS", 16000)
+	viper.SetDefault("EXTDB_DATABASE_NAME", "")
+	viper.SetDefault("EXTDB_DATABASE_TYPE", "")
+
+	// Oracle SQLcl defaults
+	viper.SetDefault("ORACLE_HOST", "localhost")
+	viper.SetDefault("ORACLE_PORT", "1521")
+
 	// Modernize defaults
 	viper.SetDefault("MODERNIZE_PORT", "8081")
 	viper.SetDefault("MCP_TRANSPORT", "command")
@@ -236,6 +273,24 @@ func Load() (*Config, error) {
 		},
 		MCP: MCPConfig{
 			HTTPPort: viper.GetString("MCP_HTTP_PORT"),
+		},
+		ExternalDB: ExternalDBConfig{
+			DBMCPCommand:    viper.GetString("EXTDB_MCP_CMD"),
+			DBMCPServerURL:  viper.GetString("EXTDB_MCP_URL"),
+			GraphMCPBin:     viper.GetString("EXTDB_GRAPH_MCP_BIN"),
+			GraphMCPURL:     viper.GetString("EXTDB_GRAPH_MCP_URL"),
+			MaxIterations:   viper.GetInt("EXTDB_MAX_ITERATIONS"),
+			MaxTokens:       viper.GetInt("EXTDB_MAX_TOKENS"),
+			DatabaseName:    viper.GetString("EXTDB_DATABASE_NAME"),
+			DatabaseType:    viper.GetString("EXTDB_DATABASE_TYPE"),
+			OracleHost:      viper.GetString("ORACLE_HOST"),
+			OraclePort:      viper.GetString("ORACLE_PORT"),
+			OracleService:   viper.GetString("ORACLE_SERVICE"),
+			OracleUser:      viper.GetString("ORACLE_USER"),
+			OraclePassword:  viper.GetString("ORACLE_PASSWORD"),
+			OracleWalletPath: viper.GetString("ORACLE_WALLET_PATH"),
+			OracleTNSAdmin:  viper.GetString("ORACLE_TNS_ADMIN"),
+			OracleSQLclPath: viper.GetString("ORACLE_SQLCL_PATH"),
 		},
 		Modernize: ModernizeConfig{
 			Port:          viper.GetString("MODERNIZE_PORT"),

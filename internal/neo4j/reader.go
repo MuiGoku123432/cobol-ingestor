@@ -72,6 +72,12 @@ type Reader interface {
 	GetIDMSSchema(ctx context.Context, programID string) (*IDMSSchemaInfo, error)
 	GetIDMSAreas(ctx context.Context, programID string) ([]IDMSAreaInfo, error)
 	GetIDMSImpact(ctx context.Context, recordName string) (*IDMSImpactInfo, error)
+	// External DB gap analysis
+	ListExternalDBTables(ctx context.Context) ([]ExternalDBTableInfo, error)
+	GetExternalDBMapping(ctx context.Context, tableName string) (*ExternalDBMappingInfo, error)
+	GetCobolToExternalMappings(ctx context.Context, cobolTable string) ([]ExternalDBMappingInfo, error)
+	GetGapAnalysis(ctx context.Context) ([]GapInfo, error)
+	GetDataFlowPaths(ctx context.Context, tableName string) ([]DataFlowPathInfo, error)
 }
 
 // Ensure Client implements Reader.

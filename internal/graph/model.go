@@ -463,3 +463,77 @@ type FieldPair struct {
 type Pass4Result struct {
 	Flows []CrossProgramFlow
 }
+
+// ExternalDatabase represents a modern database (Oracle, Postgres, etc.)
+type ExternalDatabase struct {
+	ID             string
+	Name           string
+	DatabaseType   string
+	ConnectionInfo string
+}
+
+// ExternalDBTable represents a table in an external database.
+type ExternalDBTable struct {
+	ID           string
+	Name         string
+	Schema       string
+	DatabaseName string
+	DatabaseType string
+	Columns      []ExtDBColumn
+}
+
+// ExtDBColumn represents a column in an external database table.
+type ExtDBColumn struct {
+	Name     string
+	DataType string
+	Nullable bool
+	IsPK     bool
+}
+
+// GapInfo describes a table/column present only on one side.
+type GapInfo struct {
+	Side        string // "cobol_only" or "external_only"
+	TableName   string
+	ColumnName  string
+	Description string
+}
+
+// DataFlowPath describes an end-to-end flow: COBOL program -> DB2 -> external DB.
+type DataFlowPath struct {
+	CobolProgram  string
+	Operation     string
+	DB2Table      string
+	ExternalTable string
+	FlowType      string
+	Description   string
+}
+
+// DBTableMapping maps a COBOL DB2 table to an external table.
+type DBTableMapping struct {
+	CobolDBTable   string
+	ExternalTable  string
+	Confidence     float64
+	Reason         string
+	ColumnMappings []ColumnMapping
+}
+
+// ColumnMapping maps a COBOL column to an external column.
+type ColumnMapping struct {
+	CobolColumn    string
+	ExternalColumn string
+	Transform      string // EXACT, RENAMED, TYPE_CHANGED
+}
+
+// ExternalDBResult is the full analysis result from an external DB gap analysis.
+type ExternalDBResult struct {
+	Database ExternalDatabase
+	Tables   []ExternalDBTable
+	Mappings []DBTableMapping
+	Gaps     []GapInfo
+	Flows    []DataFlowPath
+}
+
+const (
+	RelMapsToExtDB RelType = "MAPS_TO_EXT_DB"
+	RelHostedIn    RelType = "HOSTED_IN"
+)

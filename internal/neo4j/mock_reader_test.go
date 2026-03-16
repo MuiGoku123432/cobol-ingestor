@@ -248,3 +248,23 @@ func (m *MockReader) GetIDMSAreas(_ context.Context, _ string) ([]n4j.IDMSAreaIn
 func (m *MockReader) GetIDMSImpact(_ context.Context, _ string) (*n4j.IDMSImpactInfo, error) {
 	return nil, m.Err
 }
+
+func (m *MockReader) ListExternalDBTables(_ context.Context) ([]n4j.ExternalDBTableInfo, error) {
+	return nil, m.Err
+}
+
+func (m *MockReader) GetExternalDBMapping(_ context.Context, _ string) (*n4j.ExternalDBMappingInfo, error) {
+	return nil, m.Err
+}
+
+func (m *MockReader) GetCobolToExternalMappings(_ context.Context, _ string) ([]n4j.ExternalDBMappingInfo, error) {
+	return nil, m.Err
+}
+
+func (m *MockReader) GetGapAnalysis(_ context.Context) ([]n4j.GapInfo, error) {
+	return nil, m.Err
+}
+
+func (m *MockReader) GetDataFlowPaths(_ context.Context, _ string) ([]n4j.DataFlowPathInfo, error) {
+	return nil, m.Err
+}

@@ -2,6 +2,7 @@ package neo4j
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"sync"
 
@@ -177,6 +178,10 @@ func mergeKeyForLabel(label string) string {
 	case "IDMSArea":
 		return "name"
 	case "IDMSSet":
+		return "name"
+	case "ExternalDatabase":
+		return "name"
+	case "ExternalDBTable":
 		return "name"
 	default:
 		return "id"
@@ -1242,6 +1247,110 @@ func findParentLevel(hierarchy []graph.DataHierarchyItem, parentName, childName 
 		}
 	}
 	return 0
+}
+
+// WriteExternalDBResult writes external DB gap analysis results to Neo4j.
+func (w *BatchWriter) WriteExternalDBResult(ctx context.Context, result *graph.ExternalDBResult) error {
+	// Write ExternalDatabase node
+	dbNode := []map[string]any{{
+		"id":             result.Database.ID,
+		"name":           result.Database.Name,
+		"databaseType":   result.Database.DatabaseType,
+		"connectionInfo": result.Database.ConnectionInfo,
+	}}
+	if err := w.WriteNodes(ctx, "ExternalDatabase", "name", dbNode); err != nil {
+		return fmt.Errorf("writing ExternalDatabase node: %w", err)
+	}
+
+	// Write ExternalDBTable nodes
+	if len(result.Tables) > 0 {
+		nodes := make([]map[string]any, len(result.Tables))
+		for i, t := range result.Tables {
+			colJSON, _ := json.Marshal(t.Columns)
+			nodes[i] = map[string]any{
+				"id":           t.ID,
+				"name":         t.Name,
+				"schema":       t.Schema,
+				"databaseName": t.DatabaseName,
+				"databaseType": t.DatabaseType,
+				"columns":      string(colJSON),
+			}
+		}
+		if err := w.WriteNodes(ctx, "ExternalDBTable", "name", nodes); err != nil {
+			return fmt.Errorf("writing ExternalDBTable nodes: %w", err)
+		}
+
+		// Write HOSTED_IN relationships (ExternalDBTable → ExternalDatabase)
+		hostedRows := make([]map[string]any, len(result.Tables))
+		for i, t := range result.Tables {
+			hostedRows[i] = map[string]any{
+				"fromKey": t.Name,
+				"toKey":   result.Database.Name,
+				"props":   map[string]any{},
+			}
+		}
+		if err := w.WriteRelationships(ctx, "HOSTED_IN", "ExternalDBTable", "name", "ExternalDatabase", "name", hostedRows); err != nil {
+			return fmt.Errorf("writing HOSTED_IN relationships: %w", err)
+		}
+	}
+
+	// Write MAPS_TO_EXT_DB relationships (DBTable → ExternalDBTable)
+	if len(result.Mappings) > 0 {
+		var mappingRows []map[string]any
+		for _, m := range result.Mappings {
+			colMapJSON, _ := json.Marshal(m.ColumnMappings)
+			mappingRows = append(mappingRows, map[string]any{
+				"fromKey": m.CobolDBTable,
+				"toKey":   m.ExternalTable,
+				"props": map[string]any{
+					"confidence":     m.Confidence,
+					"reason":         m.Reason,
+					"columnMappings": string(colMapJSON),
+				},
+			})
+		}
+		if err := w.WriteRelationships(ctx, "MAPS_TO_EXT_DB", "DBTable", "name", "ExternalDBTable", "name", mappingRows); err != nil {
+			w.logger.Warn("failed to write MAPS_TO_EXT_DB relationships", zap.Error(err))
+		}
+	}
+
+	// Store gaps as JSON property on ExternalDatabase node
+	if len(result.Gaps) > 0 {
+		gapJSON, _ := json.Marshal(result.Gaps)
+		gapRows := []map[string]any{{
+			"name": result.Database.Name,
+			"gaps": string(gapJSON),
+		}}
+		if err := w.batchUpdate(ctx,
+			"UNWIND $rows AS row MATCH (n:ExternalDatabase {name: row.name}) SET n.gaps = row.gaps",
+			gapRows); err != nil {
+			w.logger.Warn("failed to write gap analysis", zap.Error(err))
+		}
+	}
+
+	// Store data flows as JSON property on ExternalDatabase node
+	if len(result.Flows) > 0 {
+		flowJSON, _ := json.Marshal(result.Flows)
+		flowRows := []map[string]any{{
+			"name":  result.Database.Name,
+			"flows": string(flowJSON),
+		}}
+		if err := w.batchUpdate(ctx,
+			"UNWIND $rows AS row MATCH (n:ExternalDatabase {name: row.name}) SET n.dataFlows = row.flows",
+			flowRows); err != nil {
+			w.logger.Warn("failed to write data flows", zap.Error(err))
+		}
+	}
+
+	w.logger.Info("wrote external DB results",
+		zap.String("database", result.Database.Name),
+		zap.Int("tables", len(result.Tables)),
+		zap.Int("mappings", len(result.Mappings)),
+		zap.Int("gaps", len(result.Gaps)),
+		zap.Int("flows", len(result.Flows)),
+	)
+
+	return nil
 }
 
 // ReassignProgramDomain moves a program to a different business domain.

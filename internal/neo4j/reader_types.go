@@ -493,6 +493,42 @@ type IDMSImpactInfo struct {
 	Erasers    []string `json:"erasers"`    // programs that ERASE
 }
 
+// ExternalDBTableInfo holds external DB table details for API responses.
+type ExternalDBTableInfo struct {
+	Name         string `json:"name"`
+	Schema       string `json:"schema,omitempty"`
+	DatabaseName string `json:"databaseName"`
+	DatabaseType string `json:"databaseType"`
+	Columns      string `json:"columns,omitempty"` // JSON array of column objects
+}
+
+// ExternalDBMappingInfo holds a mapping between COBOL DB2 table and external table.
+type ExternalDBMappingInfo struct {
+	CobolTable     string  `json:"cobolTable"`
+	ExternalTable  string  `json:"externalTable"`
+	Confidence     float64 `json:"confidence"`
+	Reason         string  `json:"reason,omitempty"`
+	ColumnMappings string  `json:"columnMappings,omitempty"` // JSON array
+}
+
+// GapInfo holds gap analysis details.
+type GapInfo struct {
+	Side        string `json:"side"`
+	TableName   string `json:"tableName"`
+	ColumnName  string `json:"columnName,omitempty"`
+	Description string `json:"description"`
+}
+
+// DataFlowPathInfo holds data flow path details.
+type DataFlowPathInfo struct {
+	CobolProgram  string `json:"cobolProgram"`
+	Operation     string `json:"operation"`
+	DB2Table      string `json:"db2Table"`
+	ExternalTable string `json:"externalTable"`
+	FlowType      string `json:"flowType"`
+	Description   string `json:"description"`
+}
+
 // Filter holds common query filters.
 type Filter struct {
 	Search string

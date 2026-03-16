@@ -95,3 +95,15 @@ type GetIDMSImpactInput struct {
 type GetIDMSAreasInput struct {
 	ProgramID string `json:"programId" jsonschema:"The program ID to get IDMS areas for"`
 }
+
+type GetExternalDBMappingInput struct {
+	TableName string `json:"tableName" jsonschema:"The external database table name"`
+}
+
+type GetCobolToExternalMappingsInput struct {
+	CobolTable string `json:"cobolTable" jsonschema:"The COBOL DB2 table name"`
+}
+
+type GetDataFlowPathsInput struct {
+	TableName string `json:"tableName,omitempty" jsonschema:"Filter by table name (DB2 or external). Leave empty for all flows."`
+}

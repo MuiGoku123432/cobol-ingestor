@@ -36,6 +36,26 @@ func NewMCPClient(ctx context.Context, serverBin string, env []string) (*MCPClie
 	return &MCPClient{client: client, session: session}, nil
 }
 
+// NewMCPClientCommand creates an MCP client using a pre-built exec.Cmd.
+func NewMCPClientCommand(ctx context.Context, cmd *exec.Cmd, env []string) (*MCPClient, error) {
+	client := mcp.NewClient(&mcp.Implementation{
+		Name:    "cobol-modernize",
+		Version: "1.0.0",
+	}, nil)
+
+	if len(env) > 0 {
+		cmd.Env = env
+	}
+
+	transport := &mcp.CommandTransport{Command: cmd}
+	session, err := client.Connect(ctx, transport, nil)
+	if err != nil {
+		return nil, fmt.Errorf("mcp command connect: %w", err)
+	}
+
+	return &MCPClient{client: client, session: session}, nil
+}
+
 // NewMCPClientHTTP creates an MCP client using Streamable HTTP transport.
 func NewMCPClientHTTP(ctx context.Context, serverURL string) (*MCPClient, error) {
 	client := mcp.NewClient(&mcp.Implementation{
@@ -52,6 +72,15 @@ func NewMCPClientHTTP(ctx context.Context, serverURL string) (*MCPClient, error)
 	}
 
 	return &MCPClient{client: client, session: session}, nil
+}
+
+// ListTools returns the tools available on this MCP server.
+func (c *MCPClient) ListTools(ctx context.Context) ([]*mcp.Tool, error) {
+	result, err := c.session.ListTools(ctx, nil)
+	if err != nil {
+		return nil, fmt.Errorf("mcp list tools: %w", err)
+	}
+	return result.Tools, nil
 }
 
 // CallTool calls an MCP tool and returns the text content from the result.
