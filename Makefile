@@ -66,11 +66,11 @@ run-desktop:
 
 build-desktop: bin
 	cd cmd/desktop && wails build
-	cp cmd/desktop/build/bin/cobol-graph-desktop bin/cobol-graph-desktop
+	cp -r cmd/desktop/build/bin/cobol-graph-desktop.app bin/cobol-graph-desktop.app
 
 desktop-mac: bin
 	cd cmd/desktop && wails build -platform darwin/universal
-	cp cmd/desktop/build/bin/cobol-graph-desktop bin/cobol-graph-desktop
+	cp -r cmd/desktop/build/bin/cobol-graph-desktop.app bin/cobol-graph-desktop.app
 
 desktop-linux: bin
 	cd cmd/desktop && wails build -platform linux/amd64
