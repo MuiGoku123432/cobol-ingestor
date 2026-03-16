@@ -20,6 +20,16 @@ type Config struct {
 	MCP        MCPConfig
 	Modernize  ModernizeConfig
 	ExternalDB ExternalDBConfig
+	BW         BWConfig
+}
+
+// BWConfig holds settings for Businessware ingestion.
+type BWConfig struct {
+	Dir        string // BW_DIR — root directory of Businessware files
+	Extensions string // BW_EXTENSIONS — comma-separated file extensions (default ".java,.md,.bw,.txt,.xml")
+	MaxWorkers int    // BW_MAX_WORKERS — concurrent analysis workers (default 5)
+	MaxTokens  int    // BW_MAX_TOKENS — max output tokens per LLM call (default 16000)
+	TokenLimit int    // BW_TOKEN_LIMIT — input chunking token limit (default 30000)
 }
 
 // ExternalDBConfig holds settings for external database gap analysis via MCP.
@@ -197,6 +207,13 @@ func Load() (*Config, error) {
 	viper.SetDefault("EXTDB_DATABASE_NAME", "")
 	viper.SetDefault("EXTDB_DATABASE_TYPE", "")
 
+	// BW defaults
+	viper.SetDefault("BW_DIR", "")
+	viper.SetDefault("BW_EXTENSIONS", ".java,.md,.bw,.txt,.xml")
+	viper.SetDefault("BW_MAX_WORKERS", 5)
+	viper.SetDefault("BW_MAX_TOKENS", 16000)
+	viper.SetDefault("BW_TOKEN_LIMIT", 30000)
+
 	// Oracle SQLcl defaults
 	viper.SetDefault("ORACLE_HOST", "localhost")
 	viper.SetDefault("ORACLE_PORT", "1521")
@@ -291,6 +308,13 @@ func Load() (*Config, error) {
 			OracleWalletPath: viper.GetString("ORACLE_WALLET_PATH"),
 			OracleTNSAdmin:  viper.GetString("ORACLE_TNS_ADMIN"),
 			OracleSQLclPath: viper.GetString("ORACLE_SQLCL_PATH"),
+		},
+		BW: BWConfig{
+			Dir:        viper.GetString("BW_DIR"),
+			Extensions: viper.GetString("BW_EXTENSIONS"),
+			MaxWorkers: viper.GetInt("BW_MAX_WORKERS"),
+			MaxTokens:  viper.GetInt("BW_MAX_TOKENS"),
+			TokenLimit: viper.GetInt("BW_TOKEN_LIMIT"),
 		},
 		Modernize: ModernizeConfig{
 			Port:          viper.GetString("MODERNIZE_PORT"),

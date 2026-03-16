@@ -342,6 +342,11 @@ func (w *BatchWriter) FixFalseDeadCode(ctx context.Context) (int, error) {
 // QueryProgramsMissingPass3 returns program IDs that lack riskScore (never processed by Pass 3).
 // All programs processed by Pass 3 receive a riskScore (even low-risk ones),
 // so riskScore IS NULL reliably indicates programs that were skipped or failed.
+// QueryAllProgramIDs returns all program IDs in the graph, sorted alphabetically.
+func (c *Client) QueryAllProgramIDs(ctx context.Context) ([]string, error) {
+	return c.queryIDList(ctx, "MATCH (p:Program) RETURN p.programId AS id ORDER BY p.programId")
+}
+
 func (c *Client) QueryProgramsMissingPass3(ctx context.Context) ([]string, error) {
 	return c.queryIDList(ctx, "MATCH (p:Program) WHERE p.riskScore IS NULL RETURN p.programId AS id")
 }

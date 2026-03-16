@@ -534,6 +534,55 @@ type ExternalDBResult struct {
 }
 
 const (
-	RelMapsToExtDB RelType = "MAPS_TO_EXT_DB"
-	RelHostedIn    RelType = "HOSTED_IN"
+	RelMapsToExtDB  RelType = "MAPS_TO_EXT_DB"
+	RelHostedIn     RelType = "HOSTED_IN"
+	RelBWContains   RelType = "BW_CONTAINS"
+	RelBWRelatesTo  RelType = "BW_RELATES_TO"
+	RelBWReferences RelType = "BW_REFERENCES"
 )
+
+// FileTypeBW classifies Businessware source files.
+const FileTypeBW FileType = "BW"
+
+// BWFile represents a Businessware source file node.
+type BWFile struct {
+	Path     string
+	FileType string
+	Summary  string
+}
+
+// BWEntity represents a flexible entity extracted by the LLM.
+type BWEntity struct {
+	Name        string
+	EntityType  string
+	Description string
+	SourceFile  string
+	MergeID     string         // sourceFile + "." + name (dedup key)
+	Properties  map[string]any
+}
+
+// BWRelationship represents a relationship between two BW entities.
+type BWRelationship struct {
+	FromEntity   string
+	ToEntity     string
+	RelationType string
+	Description  string
+	Confidence   float64
+}
+
+// BWCobolReference represents a cross-link from a BW entity to a COBOL program or copybook.
+type BWCobolReference struct {
+	EntityName    string
+	TargetName    string
+	TargetType    string // "Program" or "Copybook"
+	ReferenceType string
+	Description   string
+}
+
+// BWResult aggregates extraction results for one Businessware file.
+type BWResult struct {
+	File            BWFile
+	Entities        []BWEntity
+	Relationships   []BWRelationship
+	CobolReferences []BWCobolReference
+}

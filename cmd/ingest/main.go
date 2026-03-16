@@ -10,6 +10,7 @@ import (
 
 	"cobol-ingestor/internal/auth"
 	"cobol-ingestor/internal/cache"
+	"cobol-ingestor/internal/chunker"
 	"cobol-ingestor/internal/claude"
 	"cobol-ingestor/internal/config"
 	"cobol-ingestor/internal/extdb"
@@ -17,6 +18,7 @@ import (
 	"cobol-ingestor/internal/llm"
 	"cobol-ingestor/internal/modernize"
 	n4j "cobol-ingestor/internal/neo4j"
+	"cobol-ingestor/internal/parser"
 	"cobol-ingestor/internal/pipeline"
 	"cobol-ingestor/internal/scanner"
 
@@ -39,6 +41,19 @@ var (
 	dir      string
 	passFlag int
 )
+
+// bw flags
+var (
+	bwDir        string
+	bwExtensions string
+	bwMaxWorkers int
+)
+
+var bwCmd = &cobra.Command{
+	Use:   "bw",
+	Short: "Ingest Businessware files (Java, docs, config) and extract entities into the graph",
+	RunE:  runBW,
+}
 
 // external-db flags
 var (
@@ -182,6 +197,12 @@ func init() {
 
 	authCmd.AddCommand(authLoginCmd, authLogoutCmd, authStatusCmd, authModelsCmd)
 	rootCmd.AddCommand(authCmd)
+
+	bwCmd.Flags().StringVar(&bwDir, "dir", "", "Root directory of Businessware files")
+	bwCmd.Flags().StringVar(&bwExtensions, "extensions", "", "Comma-separated file extensions (default: .java,.md,.bw,.txt,.xml)")
+	bwCmd.Flags().IntVar(&bwMaxWorkers, "max-workers", 0, "Max concurrent analysis workers (default: 5)")
+	_ = bwCmd.MarkFlagRequired("dir")
+	rootCmd.AddCommand(bwCmd)
 
 	extDBCmd.Flags().StringVar(&extDBMCPCmd, "db-mcp-cmd", "", "Shell command to start external DB MCP server (e.g. 'npx -y @modelcontextprotocol/server-postgres postgres://...')")
 	extDBCmd.Flags().StringVar(&extDBMCPURL, "db-mcp-url", "", "HTTP endpoint for external DB MCP server")
@@ -328,6 +349,299 @@ func runIngest(cmd *cobra.Command, args []string) error {
 	}
 
 	return pipe.Run(ctx, scanResult, passFlag)
+}
+
+func runBW(cmd *cobra.Command, args []string) error {
+	logger, _ := zap.NewProduction()
+	defer logger.Sync()
+
+	cfg, err := config.Load()
+	if err != nil {
+		return fmt.Errorf("loading config: %w", err)
+	}
+
+	// Override config with flags
+	cfg.BW.Dir = bwDir
+	if bwExtensions != "" {
+		cfg.BW.Extensions = bwExtensions
+	}
+	if bwMaxWorkers > 0 {
+		cfg.BW.MaxWorkers = bwMaxWorkers
+	}
+	if cfg.BW.MaxWorkers <= 0 {
+		cfg.BW.MaxWorkers = 5
+	}
+	if cfg.BW.MaxTokens <= 0 {
+		cfg.BW.MaxTokens = 16000
+	}
+	if cfg.BW.TokenLimit <= 0 {
+		cfg.BW.TokenLimit = 30000
+	}
+
+	ctx := context.Background()
+
+	// Parse extensions
+	var extensions []string
+	for _, ext := range strings.Split(cfg.BW.Extensions, ",") {
+		ext = strings.TrimSpace(ext)
+		if ext != "" {
+			extensions = append(extensions, ext)
+		}
+	}
+
+	logger.Info("starting BW ingestion",
+		zap.String("dir", cfg.BW.Dir),
+		zap.Strings("extensions", extensions),
+		zap.Int("max_workers", cfg.BW.MaxWorkers),
+	)
+
+	// Scan BW files
+	scanResult, err := scanner.ScanBW(ctx, cfg.BW.Dir, extensions, logger)
+	if err != nil {
+		return fmt.Errorf("scanning BW files: %w", err)
+	}
+	if len(scanResult.Files) == 0 {
+		fmt.Println("No Businessware files found.")
+		return nil
+	}
+
+	// Connect to Neo4j + run migrations
+	neo4jClient, err := n4j.NewClient(ctx, cfg.Neo4j, logger)
+	if err != nil {
+		return fmt.Errorf("connecting to neo4j: %w", err)
+	}
+	defer neo4jClient.Close(ctx)
+
+	if err := neo4jClient.VerifyConnectivity(ctx); err != nil {
+		return fmt.Errorf("neo4j connectivity check: %w", err)
+	}
+
+	migrationsDir := filepath.Join("migrations", "neo4j")
+	if err := neo4jClient.RunMigrations(ctx, migrationsDir); err != nil {
+		return fmt.Errorf("running migrations: %w", err)
+	}
+
+	// Open cache (use pass 99 to avoid collision with main pipeline)
+	fileCache, err := cache.New(cfg.Ingest.CacheDB)
+	if err != nil {
+		return fmt.Errorf("opening cache: %w", err)
+	}
+	defer fileCache.Close()
+
+	// Resolve Copilot token if needed
+	if cfg.LLM.Provider == "copilot" && cfg.LLM.CopilotGitHubToken == "" {
+		if st, loadErr := auth.LoadToken(); loadErr == nil && st != nil {
+			cfg.LLM.CopilotGitHubToken = st.GitHubToken
+		}
+		if cfg.LLM.CopilotGitHubToken == "" {
+			logger.Info("no copilot token found, starting device flow")
+			token, devErr := auth.RunDeviceFlow(ctx)
+			if devErr != nil {
+				return fmt.Errorf("copilot device flow: %w", devErr)
+			}
+			_ = auth.SaveToken(token)
+			cfg.LLM.CopilotGitHubToken = token
+		}
+	}
+
+	// Create LLM provider + Claude client
+	provider, err := llm.NewProvider(cfg)
+	if err != nil {
+		return fmt.Errorf("creating LLM provider: %w", err)
+	}
+	defer provider.Close()
+
+	if cfg.LLM.Provider == "copilot" {
+		resolved, resolveErr := llm.ResolveCopilotModels(ctx, provider, cfg.Claude.OpusModel, cfg.Claude.SonnetModel)
+		if resolveErr != nil {
+			logger.Warn("copilot model discovery failed", zap.Error(resolveErr))
+		} else {
+			cfg.Claude.OpusModel = resolved.OpusModel
+			cfg.Claude.SonnetModel = resolved.SonnetModel
+		}
+	}
+
+	claudeClient, err := claude.NewClient(provider, cfg.Claude, logger)
+	if err != nil {
+		return fmt.Errorf("creating claude client: %w", err)
+	}
+
+	writer := n4j.NewBatchWriter(neo4jClient, cfg.Ingest.BatchSize, logger)
+
+	// Query existing COBOL program IDs for prompt context
+	existingPrograms := queryProgramIDs(ctx, neo4jClient, logger)
+
+	// Process files with worker pool
+	const bwPassNumber = 99
+	type bwWorkItem struct {
+		file   graph.FileInfo
+		chunks []chunker.BWChunk
+	}
+
+	// Build work items, skipping cached files
+	var workItems []bwWorkItem
+	skipped := 0
+	for _, f := range scanResult.Files {
+		changed, cacheErr := fileCache.IsChangedForPass(f.Path, f.Hash, bwPassNumber)
+		if cacheErr != nil {
+			logger.Warn("cache check failed", zap.String("file", f.Path), zap.Error(cacheErr))
+			changed = true
+		}
+		if !changed {
+			skipped++
+			continue
+		}
+
+		content, readErr := os.ReadFile(f.Path)
+		if readErr != nil {
+			logger.Error("failed to read file", zap.String("file", f.Path), zap.Error(readErr))
+			continue
+		}
+
+		chunks, chunkErr := chunker.ChunkBWFile(f.Path, content, cfg.BW.TokenLimit)
+		if chunkErr != nil {
+			logger.Error("failed to chunk file", zap.String("file", f.Path), zap.Error(chunkErr))
+			continue
+		}
+
+		workItems = append(workItems, bwWorkItem{file: f, chunks: chunks})
+	}
+
+	logger.Info("BW work plan",
+		zap.Int("to_process", len(workItems)),
+		zap.Int("skipped_cached", skipped),
+		zap.Int("total_files", len(scanResult.Files)),
+	)
+
+	// Process with bounded concurrency
+	sem := make(chan struct{}, cfg.BW.MaxWorkers)
+	type bwResult struct {
+		file   graph.FileInfo
+		result *graph.BWResult
+		err    error
+	}
+	resultCh := make(chan bwResult, len(workItems))
+
+	for _, item := range workItems {
+		sem <- struct{}{}
+		go func(wi bwWorkItem) {
+			defer func() { <-sem }()
+
+			// For multi-chunk files, concatenate results
+			var allEntities []graph.BWEntity
+			var allRels []graph.BWRelationship
+			var allRefs []graph.BWCobolReference
+			var summary string
+
+			fileType := classifyBWExtension(wi.file.Path)
+
+			for _, chunk := range wi.chunks {
+				resp, analyzeErr := claudeClient.AnalyzeBW(ctx, wi.file.Path, fileType, chunk.Content, existingPrograms, cfg.BW.MaxTokens)
+				if analyzeErr != nil {
+					resultCh <- bwResult{file: wi.file, err: fmt.Errorf("analyzing %s chunk %d: %w", wi.file.Path, chunk.Index, analyzeErr)}
+					return
+				}
+
+				parsed, parseErr := parser.ParseBWResponse(resp, wi.file.Path)
+				if parseErr != nil {
+					resultCh <- bwResult{file: wi.file, err: fmt.Errorf("parsing %s chunk %d: %w", wi.file.Path, chunk.Index, parseErr)}
+					return
+				}
+
+				allEntities = append(allEntities, parsed.Entities...)
+				allRels = append(allRels, parsed.Relationships...)
+				allRefs = append(allRefs, parsed.CobolReferences...)
+				if summary == "" {
+					summary = parsed.File.Summary
+				}
+			}
+
+			merged := &graph.BWResult{
+				File: graph.BWFile{
+					Path:     wi.file.Path,
+					FileType: fileType,
+					Summary:  summary,
+				},
+				Entities:        allEntities,
+				Relationships:   allRels,
+				CobolReferences: allRefs,
+			}
+
+			resultCh <- bwResult{file: wi.file, result: merged}
+		}(item)
+	}
+
+	// Collect results and write to Neo4j
+	processed := 0
+	errors := 0
+	totalEntities := 0
+	totalRefs := 0
+	for range len(workItems) {
+		res := <-resultCh
+		if res.err != nil {
+			logger.Error("BW processing failed", zap.String("file", res.file.Path), zap.Error(res.err))
+			errors++
+			continue
+		}
+
+		if writeErr := writer.WriteBWResult(ctx, res.result); writeErr != nil {
+			logger.Error("failed to write BW result", zap.String("file", res.file.Path), zap.Error(writeErr))
+			errors++
+			continue
+		}
+
+		// Mark as cached
+		if cacheErr := fileCache.MarkProcessedForPass(res.file.Path, res.file.Hash, bwPassNumber); cacheErr != nil {
+			logger.Warn("failed to update cache", zap.String("file", res.file.Path), zap.Error(cacheErr))
+		}
+
+		processed++
+		totalEntities += len(res.result.Entities)
+		totalRefs += len(res.result.CobolReferences)
+	}
+
+	fmt.Printf("\nBusinessware Ingestion Complete\n")
+	fmt.Printf("  Files processed: %d\n", processed)
+	fmt.Printf("  Files skipped:   %d (cached)\n", skipped)
+	fmt.Printf("  Errors:          %d\n", errors)
+	fmt.Printf("  Entities:        %d extracted\n", totalEntities)
+	fmt.Printf("  COBOL refs:      %d cross-links\n", totalRefs)
+	fmt.Printf("\nResults persisted to Neo4j. Query with:\n")
+	fmt.Printf("  MATCH (f:BWFile)-[:BW_CONTAINS]->(e:BWEntity) RETURN f.path, e.name, e.entityType LIMIT 20\n")
+
+	return nil
+}
+
+// queryProgramIDs fetches all existing COBOL program IDs from Neo4j for BW prompt context.
+func queryProgramIDs(ctx context.Context, client *n4j.Client, logger *zap.Logger) string {
+	ids, err := client.QueryAllProgramIDs(ctx)
+	if err != nil {
+		logger.Warn("failed to query program IDs", zap.Error(err))
+		return "(none found)"
+	}
+	if len(ids) == 0 {
+		return "(none found)"
+	}
+	return strings.Join(ids, ", ")
+}
+
+// classifyBWExtension returns a human-readable file type from a path's extension.
+func classifyBWExtension(path string) string {
+	ext := strings.ToLower(filepath.Ext(path))
+	switch ext {
+	case ".java":
+		return "Java"
+	case ".md":
+		return "Markdown"
+	case ".xml":
+		return "XML"
+	case ".bw":
+		return "Businessware"
+	case ".txt":
+		return "Text"
+	default:
+		return "Unknown"
+	}
 }
 
 func runExternalDB(cmd *cobra.Command, args []string) error {

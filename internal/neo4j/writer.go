@@ -183,6 +183,10 @@ func mergeKeyForLabel(label string) string {
 		return "name"
 	case "ExternalDBTable":
 		return "name"
+	case "BWFile":
+		return "path"
+	case "BWEntity":
+		return "mergeId"
 	default:
 		return "id"
 	}
