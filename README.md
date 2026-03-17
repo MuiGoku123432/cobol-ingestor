@@ -158,9 +158,3 @@ api/
 ```bash
 go test ./... -v -race
 ```
-
-## License
-
-This project is licensed under the Business Source License 1.1. See [LICENSE](license.md) for details.
-
-After March 5, 2032 the code converts to the Apache License 2.0.
