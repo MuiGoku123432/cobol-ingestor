@@ -6,6 +6,7 @@
   import SwarmView from './lib/components/chat/SwarmView.svelte';
   import SettingsView from './lib/components/settings/SettingsView.svelte';
   import GraphView from './lib/components/graph/GraphView.svelte';
+  import StrategyView from './lib/components/strategy/StrategyView.svelte';
 
   let currentView = $state('ingest');
 </script>
@@ -19,6 +20,8 @@
       <ChatView />
     {:else if currentView === 'swarm'}
       <SwarmView />
+    {:else if currentView === 'strategy'}
+      <StrategyView />
     {:else if currentView === 'graph'}
       <GraphView />
     {:else if currentView === 'settings'}

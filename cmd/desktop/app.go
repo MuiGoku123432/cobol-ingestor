@@ -22,11 +22,12 @@ type App struct {
 	cfg    *config.Config
 
 	// Services exposed to frontend via Wails bindings
-	Neo4jService  *Neo4jService
-	IngestService *IngestService
-	ChatService   *ChatService
-	ConfigService *ConfigService
-	QueryStore    *QueryStoreService
+	Neo4jService    *Neo4jService
+	IngestService   *IngestService
+	ChatService     *ChatService
+	ConfigService   *ConfigService
+	QueryStore      *QueryStoreService
+	StrategyService *StrategyService
 }
 
 func NewApp(logger *zap.Logger) *App {
@@ -36,6 +37,7 @@ func NewApp(logger *zap.Logger) *App {
 	a.ChatService = &ChatService{app: a}
 	a.ConfigService = &ConfigService{app: a}
 	a.QueryStore = &QueryStoreService{app: a}
+	a.StrategyService = &StrategyService{app: a}
 	return a
 }
 
