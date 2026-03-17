@@ -82,9 +82,27 @@ func RunStrategy(ctx context.Context, p StrategyParams) (*StrategyPlan, error) {
 		Criticality:       p.Context.Criticality,
 		DowntimeTolerance: p.Context.DowntimeTolerance,
 		AdditionalNotes:   p.Context.AdditionalNotes,
+
+		// Current Stack
+		CurrentDatabase:      p.Context.CurrentDatabase,
+		CurrentDatabaseOther: p.Context.CurrentDatabaseOther,
+		CurrentMiddleware:    p.Context.CurrentMiddleware,
+		CurrentMiddlewareOther: p.Context.CurrentMiddlewareOther,
+		CurrentBatch:         p.Context.CurrentBatch,
+		CurrentMonitoring:    p.Context.CurrentMonitoring,
+
+		// Target Stack (expanded)
+		TargetDatabase:       p.Context.TargetDatabase,
+		TargetMessaging:      p.Context.TargetMessaging,
+		TargetAPIStyle:       p.Context.TargetAPIStyle,
+		TargetContainerization: p.Context.TargetContainerization,
+		TargetCICD:           p.Context.TargetCICD,
 	}
 
-	tools := GetToolDefinitions()
+	tools, err := DiscoverTools(ctx, p.MCPClient)
+	if err != nil {
+		return nil, fmt.Errorf("discover tools: %w", err)
+	}
 	cache := newToolCache()
 
 	// Run all 5 agents in parallel

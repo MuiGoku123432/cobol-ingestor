@@ -16,14 +16,15 @@ type sectionDef struct {
 var sections = []sectionDef{
 	{Marker: "<!-- SECTION: executive-summary -->", Filename: "01-executive-summary.md"},
 	{Marker: "<!-- SECTION: strategy-overview -->", Filename: "02-strategy-overview.md"},
-	{Marker: "<!-- SECTION: codebase-assessment -->", Filename: "03-codebase-assessment.md"},
-	{Marker: "<!-- SECTION: wave-plan -->", Filename: "04-wave-plan.md"},
-	{Marker: "<!-- SECTION: risk-assessment -->", Filename: "05-risk-assessment.md"},
-	{Marker: "<!-- SECTION: effort-estimates -->", Filename: "06-effort-estimates.md"},
-	{Marker: "<!-- SECTION: data-migration -->", Filename: "07-data-migration.md"},
-	{Marker: "<!-- SECTION: integration-strategy -->", Filename: "08-integration-strategy.md"},
-	{Marker: "<!-- SECTION: testing-strategy -->", Filename: "09-testing-strategy.md"},
-	{Marker: "<!-- SECTION: timeline-roadmap -->", Filename: "10-timeline-roadmap.md"},
+	{Marker: "<!-- SECTION: transition-architecture -->", Filename: "03-transition-architecture.md"},
+	{Marker: "<!-- SECTION: codebase-assessment -->", Filename: "04-codebase-assessment.md"},
+	{Marker: "<!-- SECTION: wave-plan -->", Filename: "05-wave-plan.md"},
+	{Marker: "<!-- SECTION: risk-assessment -->", Filename: "06-risk-assessment.md"},
+	{Marker: "<!-- SECTION: effort-estimates -->", Filename: "07-effort-estimates.md"},
+	{Marker: "<!-- SECTION: data-migration -->", Filename: "08-data-migration.md"},
+	{Marker: "<!-- SECTION: integration-strategy -->", Filename: "09-integration-strategy.md"},
+	{Marker: "<!-- SECTION: testing-strategy -->", Filename: "10-testing-strategy.md"},
+	{Marker: "<!-- SECTION: timeline-roadmap -->", Filename: "11-timeline-roadmap.md"},
 }
 
 // GenerateStrategyDocs splits the coordinator synthesis into separate files.

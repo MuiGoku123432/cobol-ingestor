@@ -59,6 +59,21 @@ type StrategyContext struct {
 	Criticality       string   `json:"criticality"`
 	DowntimeTolerance string   `json:"downtimeTolerance"`
 	AdditionalNotes   string   `json:"additionalNotes"`
+
+	// Current Stack
+	CurrentDatabase      []string `json:"currentDatabase"`
+	CurrentDatabaseOther string   `json:"currentDatabaseOther,omitempty"`
+	CurrentMiddleware    []string `json:"currentMiddleware"`
+	CurrentMiddlewareOther string `json:"currentMiddlewareOther,omitempty"`
+	CurrentBatch         string   `json:"currentBatch"`
+	CurrentMonitoring    string   `json:"currentMonitoring"`
+
+	// Target Stack (expanded)
+	TargetDatabase       string `json:"targetDatabase"`
+	TargetMessaging      string `json:"targetMessaging"`
+	TargetAPIStyle       string `json:"targetApiStyle"`
+	TargetContainerization string `json:"targetContainerization"`
+	TargetCICD           string `json:"targetCicd"`
 }
 
 // StrategyPlan holds the complete output of the strategy analysis.

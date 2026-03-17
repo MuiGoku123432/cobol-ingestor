@@ -45,6 +45,75 @@ func GetQuestions() []Question {
 			},
 		},
 
+		// Group: Current Stack
+		{
+			ID:          "current_database",
+			Group:       "Current Stack",
+			Text:        "What databases does the COBOL system use?",
+			Description: "Select all database technologies currently in use.",
+			Type:        QuestionTypeMultiSelect,
+			Options: []Option{
+				{Value: "db2", Label: "DB2"},
+				{Value: "ims_db", Label: "IMS DB"},
+				{Value: "vsam", Label: "VSAM"},
+				{Value: "oracle", Label: "Oracle"},
+				{Value: "sql_server", Label: "SQL Server"},
+				{Value: "postgresql", Label: "PostgreSQL"},
+				{Value: "other", Label: "Other"},
+			},
+		},
+		{
+			ID:        "current_database_other",
+			Group:     "Current Stack",
+			Text:      "Specify the other database(s)",
+			Type:      QuestionTypeText,
+			DependsOn: &Dependency{QuestionID: "current_database", Values: []string{"other"}},
+		},
+		{
+			ID:          "current_middleware",
+			Group:       "Current Stack",
+			Text:        "What middleware/transaction monitors are in use?",
+			Description: "Select all middleware technologies currently in use.",
+			Type:        QuestionTypeMultiSelect,
+			Options: []Option{
+				{Value: "cics", Label: "CICS"},
+				{Value: "ims_tm", Label: "IMS TM"},
+				{Value: "mq_series", Label: "MQ Series"},
+				{Value: "tibco", Label: "TIBCO"},
+				{Value: "none", Label: "None"},
+				{Value: "other", Label: "Other"},
+			},
+		},
+		{
+			ID:        "current_middleware_other",
+			Group:     "Current Stack",
+			Text:      "Specify the other middleware",
+			Type:      QuestionTypeText,
+			DependsOn: &Dependency{QuestionID: "current_middleware", Values: []string{"other"}},
+		},
+		{
+			ID:          "current_batch",
+			Group:       "Current Stack",
+			Text:        "What batch scheduling system is used?",
+			Description: "The job scheduler for batch COBOL processing.",
+			Type:        QuestionTypeSingleSelect,
+			Options: []Option{
+				{Value: "jcl_jes", Label: "JCL/JES"},
+				{Value: "control_m", Label: "Control-M"},
+				{Value: "autosys", Label: "Autosys"},
+				{Value: "tws", Label: "TWS"},
+				{Value: "other", Label: "Other"},
+				{Value: "none", Label: "None"},
+			},
+		},
+		{
+			ID:          "current_monitoring",
+			Group:       "Current Stack",
+			Text:        "What monitoring/APM tools are in use?",
+			Description: "Current application performance monitoring tools (e.g., Datadog, Splunk, Dynatrace).",
+			Type:        QuestionTypeText,
+		},
+
 		// Group: Target Platform
 		{
 			ID:          "target_language",
@@ -90,6 +159,73 @@ func GetQuestions() []Question {
 				{Value: "on-premise", Label: "On-premise"},
 				{Value: "hybrid", Label: "Hybrid"},
 			},
+		},
+		{
+			ID:          "target_database",
+			Group:       "Target Platform",
+			Text:        "What is the target database?",
+			Description: "The primary database for the modernized system.",
+			Type:        QuestionTypeSingleSelect,
+			Options: []Option{
+				{Value: "postgresql", Label: "PostgreSQL"},
+				{Value: "mysql", Label: "MySQL"},
+				{Value: "aurora", Label: "Aurora"},
+				{Value: "sql_server", Label: "SQL Server"},
+				{Value: "cosmosdb", Label: "CosmosDB"},
+				{Value: "dynamodb", Label: "DynamoDB"},
+				{Value: "cloud_sql", Label: "Cloud SQL"},
+				{Value: "keep_existing", Label: "Keep existing"},
+			},
+		},
+		{
+			ID:          "target_messaging",
+			Group:       "Target Platform",
+			Text:        "What messaging/event system do you want to use?",
+			Description: "For async communication between modernized services.",
+			Type:        QuestionTypeSingleSelect,
+			Options: []Option{
+				{Value: "kafka", Label: "Kafka"},
+				{Value: "rabbitmq", Label: "RabbitMQ"},
+				{Value: "sqs_sns", Label: "SQS/SNS"},
+				{Value: "azure_service_bus", Label: "Azure Service Bus"},
+				{Value: "pubsub", Label: "Pub/Sub"},
+				{Value: "none", Label: "None"},
+			},
+		},
+		{
+			ID:          "target_api_style",
+			Group:       "Target Platform",
+			Text:        "What API style do you prefer?",
+			Description: "The primary API paradigm for the modernized system.",
+			Type:        QuestionTypeSingleSelect,
+			Options: []Option{
+				{Value: "rest", Label: "REST"},
+				{Value: "grpc", Label: "gRPC"},
+				{Value: "graphql", Label: "GraphQL"},
+				{Value: "event_driven", Label: "Event-driven"},
+			},
+		},
+		{
+			ID:          "target_containerization",
+			Group:       "Target Platform",
+			Text:        "What containerization/orchestration platform?",
+			Description: "How the modernized services will be deployed.",
+			Type:        QuestionTypeSingleSelect,
+			Options: []Option{
+				{Value: "kubernetes", Label: "Kubernetes"},
+				{Value: "ecs_fargate", Label: "ECS/Fargate"},
+				{Value: "cloud_run", Label: "Cloud Run"},
+				{Value: "docker_compose", Label: "Docker Compose"},
+				{Value: "vms", Label: "VMs"},
+				{Value: "none", Label: "None"},
+			},
+		},
+		{
+			ID:          "target_cicd",
+			Group:       "Target Platform",
+			Text:        "What CI/CD pipeline do you use or prefer?",
+			Description: "E.g., GitHub Actions, Jenkins, Azure DevOps, GitLab CI, etc.",
+			Type:        QuestionTypeText,
 		},
 
 		// Group: Constraints
@@ -257,6 +393,14 @@ func ValidateAnswers(answers map[string][]string) (*StrategyContext, error) {
 	ctx.Strategy = firstVal(answers, "strategy_type")
 	ctx.HybridStrategies = answers["hybrid_strategies"]
 
+	// Current Stack
+	ctx.CurrentDatabase = answers["current_database"]
+	ctx.CurrentDatabaseOther = firstVal(answers, "current_database_other")
+	ctx.CurrentMiddleware = answers["current_middleware"]
+	ctx.CurrentMiddlewareOther = firstVal(answers, "current_middleware_other")
+	ctx.CurrentBatch = firstVal(answers, "current_batch")
+	ctx.CurrentMonitoring = firstVal(answers, "current_monitoring")
+
 	// Target Platform
 	ctx.TargetLang = firstVal(answers, "target_language")
 	ctx.TargetLangOther = firstVal(answers, "target_language_other")
@@ -265,6 +409,11 @@ func ValidateAnswers(answers map[string][]string) (*StrategyContext, error) {
 	}
 	ctx.TargetFramework = firstVal(answers, "target_framework")
 	ctx.TargetPlatform = firstVal(answers, "target_platform")
+	ctx.TargetDatabase = firstVal(answers, "target_database")
+	ctx.TargetMessaging = firstVal(answers, "target_messaging")
+	ctx.TargetAPIStyle = firstVal(answers, "target_api_style")
+	ctx.TargetContainerization = firstVal(answers, "target_containerization")
+	ctx.TargetCICD = firstVal(answers, "target_cicd")
 
 	// Constraints
 	ctx.Timeline = firstVal(answers, "timeline")
