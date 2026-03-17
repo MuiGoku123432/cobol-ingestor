@@ -11,6 +11,8 @@ import (
 	"github.com/joho/godotenv"
 )
 
+const appConfigDirName = "cobol-graph"
+
 // ConfigService manages application configuration for the desktop UI.
 type ConfigService struct {
 	app *App
@@ -46,6 +48,24 @@ type ConfigDTO struct {
 	// Chat
 	ChatModel     string `json:"chatModel"`
 	ChatMaxTokens int    `json:"chatMaxTokens"`
+
+	// BusinessWare
+	BWDir        string `json:"bwDir"`
+	BWExtensions string `json:"bwExtensions"`
+	BWMaxWorkers int    `json:"bwMaxWorkers"`
+	BWTokenLimit int    `json:"bwTokenLimit"`
+
+	// Oracle / External DB
+	OracleHost       string `json:"oracleHost"`
+	OraclePort       string `json:"oraclePort"`
+	OracleService    string `json:"oracleService"`
+	OracleUser       string `json:"oracleUser"`
+	OraclePassword   string `json:"oraclePassword"`
+	OracleWalletPath string `json:"oracleWalletPath"`
+	OracleSQLclPath  string `json:"oracleSqlclPath"`
+	ExtDBName        string `json:"extDbName"`
+	ExtDBType        string `json:"extDbType"`
+	ExtDBMaxIter     int    `json:"extDbMaxIterations"`
 }
 
 // GetConfig returns the current configuration with secrets masked.
@@ -72,6 +92,20 @@ func (s *ConfigService) GetConfig() ConfigDTO {
 		StripSeqColumns:    cfg.Ingest.StripSequenceColumns,
 		ChatModel:          cfg.Modernize.ChatModel,
 		ChatMaxTokens:      cfg.Modernize.ChatMaxTokens,
+		BWDir:              cfg.BW.Dir,
+		BWExtensions:       cfg.BW.Extensions,
+		BWMaxWorkers:       cfg.BW.MaxWorkers,
+		BWTokenLimit:       cfg.BW.TokenLimit,
+		OracleHost:         cfg.ExternalDB.OracleHost,
+		OraclePort:         cfg.ExternalDB.OraclePort,
+		OracleService:      cfg.ExternalDB.OracleService,
+		OracleUser:         cfg.ExternalDB.OracleUser,
+		OraclePassword:     maskSecret(cfg.ExternalDB.OraclePassword),
+		OracleWalletPath:   cfg.ExternalDB.OracleWalletPath,
+		OracleSQLclPath:    cfg.ExternalDB.OracleSQLclPath,
+		ExtDBName:          cfg.ExternalDB.DatabaseName,
+		ExtDBType:          cfg.ExternalDB.DatabaseType,
+		ExtDBMaxIter:       cfg.ExternalDB.MaxIterations,
 	}
 }
 
@@ -106,6 +140,30 @@ func (s *ConfigService) SaveConfig(dto ConfigDTO) error {
 	setIfNotMasked(existing, "STRIP_SEQUENCE_COLUMNS", fmt.Sprintf("%t", dto.StripSeqColumns))
 	setIfNotMasked(existing, "MODERNIZE_CHAT_MODEL", dto.ChatModel)
 	setIfNotMasked(existing, "MODERNIZE_CHAT_MAX_TOKENS", fmt.Sprintf("%d", dto.ChatMaxTokens))
+
+	// BusinessWare
+	setIfNotMasked(existing, "BW_DIR", dto.BWDir)
+	setIfNotMasked(existing, "BW_EXTENSIONS", dto.BWExtensions)
+	if dto.BWMaxWorkers > 0 {
+		existing["BW_MAX_WORKERS"] = fmt.Sprintf("%d", dto.BWMaxWorkers)
+	}
+	if dto.BWTokenLimit > 0 {
+		existing["BW_TOKEN_LIMIT"] = fmt.Sprintf("%d", dto.BWTokenLimit)
+	}
+
+	// Oracle / External DB
+	setIfNotMasked(existing, "ORACLE_HOST", dto.OracleHost)
+	setIfNotMasked(existing, "ORACLE_PORT", dto.OraclePort)
+	setIfNotMasked(existing, "ORACLE_SERVICE", dto.OracleService)
+	setIfNotMasked(existing, "ORACLE_USER", dto.OracleUser)
+	setIfNotMasked(existing, "ORACLE_PASSWORD", dto.OraclePassword)
+	setIfNotMasked(existing, "ORACLE_WALLET_PATH", dto.OracleWalletPath)
+	setIfNotMasked(existing, "ORACLE_SQLCL_PATH", dto.OracleSQLclPath)
+	setIfNotMasked(existing, "EXTDB_DATABASE_NAME", dto.ExtDBName)
+	setIfNotMasked(existing, "EXTDB_DATABASE_TYPE", dto.ExtDBType)
+	if dto.ExtDBMaxIter > 0 {
+		existing["EXTDB_MAX_ITERATIONS"] = fmt.Sprintf("%d", dto.ExtDBMaxIter)
+	}
 
 	if err := godotenv.Write(existing, envPath); err != nil {
 		return fmt.Errorf("writing .env: %w", err)
@@ -150,7 +208,16 @@ func (s *ConfigService) GetEnvPath() string {
 }
 
 func (s *ConfigService) envPath() string {
-	// Look for .env next to the executable, fallback to cwd
+	// Use OS-native config directory:
+	//   macOS:   ~/Library/Application Support/cobol-graph/.env
+	//   Windows: %AppData%\cobol-graph\.env
+	//   Linux:   $XDG_CONFIG_HOME/cobol-graph/.env (or ~/.config/cobol-graph/.env)
+	if configDir, err := os.UserConfigDir(); err == nil {
+		appDir := filepath.Join(configDir, appConfigDirName)
+		_ = os.MkdirAll(appDir, 0700)
+		return filepath.Join(appDir, ".env")
+	}
+	// Fallback: next to executable, then cwd
 	if exe, err := os.Executable(); err == nil {
 		p := filepath.Join(filepath.Dir(exe), ".env")
 		if _, err := os.Stat(p); err == nil {

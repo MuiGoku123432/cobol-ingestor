@@ -8,6 +8,7 @@ import (
 
 	n4j "cobol-ingestor/internal/neo4j"
 
+	"github.com/neo4j/neo4j-go-driver/v5/neo4j/dbtype"
 	"go.uber.org/zap"
 )
 
@@ -427,6 +428,130 @@ func (s *Neo4jService) GetNodeDetail(nodeID, nodeLabel string) (map[string]any, 
 			"type": nodeLabel,
 			"id":   nodeID,
 		}, nil
+	}
+}
+
+// CypherResult holds the result of a raw Cypher query execution.
+type CypherResult struct {
+	Columns []string           `json:"columns"`
+	Rows    []map[string]any   `json:"rows"`
+	Graph   *GraphData         `json:"graph,omitempty"`
+	IsGraph bool               `json:"isGraph"`
+}
+
+// ExecuteCypher runs a raw Cypher query and returns both tabular and graph results.
+func (s *Neo4jService) ExecuteCypher(query string) (*CypherResult, error) {
+	if s.client == nil {
+		return nil, fmt.Errorf("not connected to Neo4j")
+	}
+	ctx := context.Background()
+	session := s.client.NewSession(ctx)
+	defer session.Close(ctx)
+
+	// Auto-append LIMIT if not present
+	upperQ := strings.ToUpper(strings.TrimSpace(query))
+	if !strings.Contains(upperQ, "LIMIT") {
+		query = query + " LIMIT 500"
+	}
+
+	result, err := session.Run(ctx, query, nil)
+	if err != nil {
+		return nil, fmt.Errorf("cypher query: %w", err)
+	}
+
+	cr := &CypherResult{}
+	nodeMap := map[string]GraphNode{}
+	var rels []GraphRelationship
+	relIdx := 0
+
+	records, err := result.Collect(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("collecting results: %w", err)
+	}
+
+	if len(records) > 0 {
+		cr.Columns = records[0].Keys
+	}
+
+	for _, rec := range records {
+		row := map[string]any{}
+		for _, key := range rec.Keys {
+			val, _ := rec.Get(key)
+			row[key] = extractValue(val)
+
+			// Check for graph-like types
+			s.extractGraphElements(val, nodeMap, &rels, &relIdx)
+		}
+		cr.Rows = append(cr.Rows, row)
+	}
+
+	if len(nodeMap) > 0 {
+		cr.IsGraph = true
+		nodes := make([]GraphNode, 0, len(nodeMap))
+		for _, n := range nodeMap {
+			nodes = append(nodes, n)
+		}
+		cr.Graph = &GraphData{Nodes: nodes, Relationships: rels}
+	}
+
+	return cr, nil
+}
+
+// extractValue converts Neo4j driver types to JSON-friendly values.
+func extractValue(val any) any {
+	if val == nil {
+		return nil
+	}
+	switch v := val.(type) {
+	case dbtype.Node:
+		props := v.Props
+		props["_labels"] = v.Labels
+		return props
+	case dbtype.Relationship:
+		props := v.Props
+		props["_type"] = v.Type
+		return props
+	default:
+		return val
+	}
+}
+
+func (s *Neo4jService) extractGraphElements(val any, nodeMap map[string]GraphNode, rels *[]GraphRelationship, relIdx *int) {
+	switch v := val.(type) {
+	case dbtype.Node:
+		id := fmt.Sprint(v.ElementId)
+		if _, exists := nodeMap[id]; !exists {
+			label := "Unknown"
+			if len(v.Labels) > 0 {
+				label = v.Labels[0]
+			}
+			caption := id
+			if pid, ok := v.Props["programId"]; ok {
+				caption = fmt.Sprint(pid)
+			} else if name, ok := v.Props["name"]; ok {
+				caption = fmt.Sprint(name)
+			}
+			nodeMap[id] = GraphNode{
+				ID: id, Label: label, Caption: caption,
+				Size: nodeSize(label), Color: nodeColor(label),
+			}
+		}
+	case dbtype.Relationship:
+		*rels = append(*rels, GraphRelationship{
+			ID:      fmt.Sprintf("crel-%d", *relIdx),
+			From:    fmt.Sprint(v.StartElementId),
+			To:      fmt.Sprint(v.EndElementId),
+			Caption: v.Type,
+			Type:    v.Type,
+		})
+		*relIdx++
+	case dbtype.Path:
+		for _, node := range v.Nodes {
+			s.extractGraphElements(node, nodeMap, rels, relIdx)
+		}
+		for _, rel := range v.Relationships {
+			s.extractGraphElements(rel, nodeMap, rels, relIdx)
+		}
 	}
 }
 

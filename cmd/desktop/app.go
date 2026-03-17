@@ -10,6 +10,7 @@ import (
 	"cobol-ingestor/internal/modernize"
 	n4j "cobol-ingestor/internal/neo4j"
 
+	"github.com/joho/godotenv"
 	"go.uber.org/zap"
 )
 
@@ -25,6 +26,7 @@ type App struct {
 	IngestService *IngestService
 	ChatService   *ChatService
 	ConfigService *ConfigService
+	QueryStore    *QueryStoreService
 }
 
 func NewApp(logger *zap.Logger) *App {
@@ -33,6 +35,7 @@ func NewApp(logger *zap.Logger) *App {
 	a.IngestService = &IngestService{app: a}
 	a.ChatService = &ChatService{app: a}
 	a.ConfigService = &ConfigService{app: a}
+	a.QueryStore = &QueryStoreService{app: a}
 	return a
 }
 
@@ -40,6 +43,9 @@ func NewApp(logger *zap.Logger) *App {
 // emission throughout the application lifetime.
 func (a *App) startup(ctx context.Context) {
 	a.ctx = ctx
+
+	// Load .env from system config dir before config.Load() picks up env vars
+	_ = godotenv.Load(a.ConfigService.envPath())
 
 	cfg, err := config.Load()
 	if err != nil {
@@ -65,6 +71,12 @@ func (a *App) startup(ctx context.Context) {
 	// Initialize provider state for chat (deferred if copilot)
 	a.ChatService.initProvider()
 
+	// Initialize query store
+	queriesDB := filepath.Join(a.cfg.DataDir, "queries.db")
+	if err := a.QueryStore.open(queriesDB); err != nil {
+		a.logger.Error("query store init", zap.Error(err))
+	}
+
 	// Initialize session store
 	sessionsDB := filepath.Join(a.cfg.DataDir, "sessions.db")
 	store, err := modernize.NewSQLiteSessionStore(sessionsDB, 50)
@@ -83,6 +95,7 @@ func (a *App) shutdown(ctx context.Context) {
 	if a.ChatService.sessionStore != nil {
 		a.ChatService.sessionStore.Close()
 	}
+	a.QueryStore.Close()
 	a.Neo4jService.disconnect(ctx)
 }
 

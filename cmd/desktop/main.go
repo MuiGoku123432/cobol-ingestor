@@ -33,6 +33,7 @@ func main() {
 			app.IngestService,
 			app.ChatService,
 			app.ConfigService,
+			app.QueryStore,
 		},
 	})
 	if err != nil {

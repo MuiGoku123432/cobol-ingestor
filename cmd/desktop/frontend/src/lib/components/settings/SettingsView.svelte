@@ -246,6 +246,82 @@
       </div>
     </section>
 
+    <!-- BusinessWare -->
+    <section>
+      <h2>BusinessWare</h2>
+      <div class="field">
+        <label>Source Directory</label>
+        <input type="text" bind:value={config.bwDir} placeholder="/path/to/businessware/sources" />
+      </div>
+      <div class="field">
+        <label>File Extensions</label>
+        <input type="text" bind:value={config.bwExtensions} placeholder=".java,.md,.bw,.txt,.xml" />
+      </div>
+      <div class="field-row">
+        <div class="field">
+          <label>Max Workers</label>
+          <input type="number" bind:value={config.bwMaxWorkers} min="1" max="50" />
+        </div>
+        <div class="field">
+          <label>Token Limit</label>
+          <input type="number" bind:value={config.bwTokenLimit} min="1000" />
+        </div>
+      </div>
+    </section>
+
+    <!-- Oracle / External DB -->
+    <section>
+      <h2>Oracle / External DB</h2>
+      <div class="field-row">
+        <div class="field flex-2">
+          <label>Host</label>
+          <input type="text" bind:value={config.oracleHost} placeholder="localhost" />
+        </div>
+        <div class="field">
+          <label>Port</label>
+          <input type="text" bind:value={config.oraclePort} placeholder="1521" />
+        </div>
+      </div>
+      <div class="field">
+        <label>Service Name</label>
+        <input type="text" bind:value={config.oracleService} placeholder="ORCL" />
+      </div>
+      <div class="field-row">
+        <div class="field">
+          <label>User</label>
+          <input type="text" bind:value={config.oracleUser} />
+        </div>
+        <div class="field">
+          <label>Password</label>
+          <input type="password" bind:value={config.oraclePassword} />
+        </div>
+      </div>
+      <div class="field">
+        <label>Wallet Path</label>
+        <input type="text" bind:value={config.oracleWalletPath} placeholder="/path/to/wallet" />
+      </div>
+      <div class="field">
+        <label>SQLcl Path</label>
+        <input type="text" bind:value={config.oracleSqlclPath} placeholder="sql (auto-detected if empty)" />
+      </div>
+      <div class="field-row">
+        <div class="field">
+          <label>Database Name</label>
+          <input type="text" bind:value={config.extDbName} placeholder="MY_DATABASE" />
+        </div>
+        <div class="field">
+          <label>Database Type</label>
+          <select bind:value={config.extDbType}>
+            <option value="">Select...</option>
+            <option value="oracle">Oracle</option>
+            <option value="postgres">PostgreSQL</option>
+            <option value="mysql">MySQL</option>
+            <option value="sqlserver">SQL Server</option>
+          </select>
+        </div>
+      </div>
+    </section>
+
     <div class="save-row">
       <button class="btn-primary" onclick={saveConfig} disabled={saving}>
         {saving ? 'Saving...' : 'Save Configuration'}

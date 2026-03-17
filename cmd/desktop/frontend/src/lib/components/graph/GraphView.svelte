@@ -1,7 +1,10 @@
 <script lang="ts">
   import NVL from '@neo4j-nvl/base';
+  import ContextMenu from './ContextMenu.svelte';
+  import CypherPanel from './CypherPanel.svelte';
 
   let container: HTMLDivElement;
+  let minimapContainer: HTMLDivElement;
   let nvl: NVL | null = null;
 
   let domains: { name: string; description: string }[] = $state([]);
@@ -10,8 +13,25 @@
   let error = $state('');
 
   let selectedNode: any = $state(null);
+  let selectedNodeId: string | null = $state(null);
   let nodeDetail: any = $state(null);
   let detailLoading = $state(false);
+
+  // Context menu state
+  let ctxMenuVisible = $state(false);
+  let ctxMenuX = $state(0);
+  let ctxMenuY = $state(0);
+  let ctxMenuNodeId = $state('');
+  let ctxMenuNodeLabel = $state('');
+
+  // Navigation breadcrumb trail
+  let navHistory: { id: string; label: string; caption: string }[] = $state([]);
+
+  // Minimap
+  let showMinimap = $state(false);
+
+  // Cypher panel
+  let cypherVisible = $state(false);
 
   const colorMap: Record<string, string> = {
     Program: '#238636',
@@ -24,25 +44,9 @@
 
   async function loadDomains() {
     try {
-      domains = await window.go.main.Neo4jService.GetBusinessDomains();
+      domains = await (window as any).go.main.Neo4jService.GetBusinessDomains();
     } catch {
       domains = [];
-    }
-  }
-
-  async function loadGraph(domain: string) {
-    loading = true;
-    error = '';
-    selectedNode = null;
-    nodeDetail = null;
-
-    try {
-      const data = await window.go.main.Neo4jService.GetCallGraph(domain);
-      renderGraph(data);
-    } catch (e: any) {
-      error = e?.message || String(e);
-    } finally {
-      loading = false;
     }
   }
 
@@ -52,6 +56,11 @@
       nvl = null;
     }
     if (!container) return;
+
+    // Track labels
+    for (const n of data.nodes || []) {
+      nodeLabelMap[n.id] = n.label;
+    }
 
     const nvlNodes = (data.nodes || []).map((n: any) => ({
       id: n.id,
@@ -67,7 +76,7 @@
       captions: [{ value: r.caption }],
     }));
 
-    nvl = new NVL(container, nvlNodes, nvlRels, {
+    const nvlOptions: any = {
       layout: 'force-directed',
       mouseCallbacks: {
         onNodeClick: (_node: any, _nodes: any[], hit: any) => {
@@ -77,21 +86,54 @@
           if (hit) handleNodeDoubleClick(hit);
         },
         onCanvasClick: () => {
-          selectedNode = null;
-          nodeDetail = null;
+          clearSelection();
+          ctxMenuVisible = false;
+        },
+        onNodeRightClick: (_node: any, _nodes: any[], hit: any, evt: any) => {
+          if (hit) handleNodeRightClick(hit, evt);
         },
       },
-    });
+    };
+
+    if (showMinimap && minimapContainer) {
+      nvlOptions.minimapContainer = minimapContainer;
+    }
+
+    nvl = new NVL(container, nvlNodes, nvlRels, nvlOptions);
+  }
+
+  function clearSelection() {
+    if (selectedNodeId && nvl) {
+      nvl.updateElementsInGraph([{ id: selectedNodeId, activated: false }], []);
+    }
+    selectedNode = null;
+    selectedNodeId = null;
+    nodeDetail = null;
   }
 
   async function handleNodeClick(node: any) {
+    // Clear previous selection highlight
+    if (selectedNodeId && nvl) {
+      nvl.updateElementsInGraph([{ id: selectedNodeId, activated: false }], []);
+    }
+
     selectedNode = node;
+    selectedNodeId = node.id;
+
+    // Highlight selected node
+    if (nvl) {
+      nvl.updateElementsInGraph([{
+        id: node.id,
+        activated: true,
+      }], []);
+    }
+
     detailLoading = true;
     nodeDetail = null;
 
     try {
       const label = findNodeLabel(node.id);
-      nodeDetail = await window.go.main.Neo4jService.GetNodeDetail(node.id, label);
+      nodeDetail = await (window as any).go.main.Neo4jService.GetNodeDetail(node.id, label);
     } catch {
       nodeDetail = { error: 'Failed to load details' };
     } finally {
@@ -102,7 +144,19 @@
   async function handleNodeDoubleClick(node: any) {
     try {
       const label = findNodeLabel(node.id);
-      const data = await window.go.main.Neo4jService.GetNodeNeighbors(node.id, label);
+      const caption = node.captions?.[0]?.value || node.id;
+
+      // Add to breadcrumb trail
+      if (!navHistory.find((h) => h.id === node.id)) {
+        navHistory = [...navHistory, { id: node.id, label, caption }];
+      }
+
+      const data = await (window as any).go.main.Neo4jService.GetNodeNeighbors(node.id, label);
+
+      // Track new node labels
+      for (const n of data.nodes || []) {
+        nodeLabelMap[n.id] = n.label;
+      }
 
       const newNodes = (data.nodes || []).map((n: any) => ({
         id: n.id,
@@ -126,6 +180,48 @@
     }
   }
 
+  function handleNodeRightClick(node: any, evt: any) {
+    const event = evt?.originalEvent || evt;
+    if (event?.preventDefault) event.preventDefault();
+    ctxMenuX = event?.clientX || 0;
+    ctxMenuY = event?.clientY || 0;
+    ctxMenuNodeId = node.id;
+    ctxMenuNodeLabel = findNodeLabel(node.id);
+    ctxMenuVisible = true;
+  }
+
+  function handleContextAction(action: string, nodeId: string, nodeLabel: string) {
+    if (!nvl) return;
+
+    switch (action) {
+      case 'expand':
+        handleNodeDoubleClick({ id: nodeId, captions: [{ value: nodeId }] });
+        break;
+      case 'details':
+        handleNodeClick({ id: nodeId });
+        break;
+      case 'center':
+        nvl.fit([nodeId]);
+        break;
+      case 'pin':
+        nvl.pinNode(nodeId);
+        break;
+      case 'unpin':
+        nvl.unPinNode(nodeId);
+        break;
+      case 'hide':
+        nvl.removeNodesWithIds([nodeId]);
+        if (selectedNodeId === nodeId) {
+          clearSelection();
+        }
+        break;
+    }
+  }
+
+  function navigateToBreadcrumb(id: string) {
+    if (nvl) nvl.fit([id]);
+  }
+
   // Track node labels from loaded data
   let nodeLabelMap: Record<string, string> = {};
 
@@ -133,19 +229,15 @@
     return nodeLabelMap[id] || 'Program';
   }
 
-  // Wrap loadGraph to also track node labels
   async function loadAndTrackGraph(domain: string) {
     loading = true;
     error = '';
-    selectedNode = null;
-    nodeDetail = null;
+    clearSelection();
+    navHistory = [];
 
     try {
-      const data = await window.go.main.Neo4jService.GetCallGraph(domain);
+      const data = await (window as any).go.main.Neo4jService.GetCallGraph(domain);
       nodeLabelMap = {};
-      for (const n of data.nodes || []) {
-        nodeLabelMap[n.id] = n.label;
-      }
       renderGraph(data);
     } catch (e: any) {
       error = e?.message || String(e);
@@ -154,12 +246,87 @@
     }
   }
 
+  // Zoom controls
+  function zoomIn() {
+    if (nvl) nvl.setZoom(nvl.getScale() * 1.25);
+  }
+
+  function zoomOut() {
+    if (nvl) nvl.setZoom(nvl.getScale() / 1.25);
+  }
+
   function fitGraph() {
     if (nvl) nvl.fit();
   }
 
+  function resetZoom() {
+    if (nvl) nvl.resetZoom();
+  }
+
   function resetGraph() {
     loadAndTrackGraph(selectedDomain);
+  }
+
+  function toggleMinimap() {
+    showMinimap = !showMinimap;
+    // Need to re-render to apply minimap container
+    if (nvl) {
+      resetGraph();
+    }
+  }
+
+  function handleCypherGraph(data: { nodes: any[]; relationships: any[] }) {
+    nodeLabelMap = {};
+    renderGraph(data);
+  }
+
+  // Keyboard shortcuts
+  function handleKeydown(e: KeyboardEvent) {
+    const target = e.target as HTMLElement;
+    const inInput = target.tagName === 'INPUT' || target.tagName === 'TEXTAREA' || target.tagName === 'SELECT';
+
+    // Ctrl/Cmd+Q — toggle Cypher panel (always)
+    if ((e.ctrlKey || e.metaKey) && e.key === 'q') {
+      e.preventDefault();
+      cypherVisible = !cypherVisible;
+      return;
+    }
+
+    // Skip other shortcuts when in input
+    if (inInput) return;
+
+    switch (e.key) {
+      case 'f':
+      case 'F':
+        e.preventDefault();
+        fitGraph();
+        break;
+      case '+':
+      case '=':
+        e.preventDefault();
+        zoomIn();
+        break;
+      case '-':
+        e.preventDefault();
+        zoomOut();
+        break;
+      case 'Escape':
+        if (ctxMenuVisible) {
+          ctxMenuVisible = false;
+        } else if (cypherVisible) {
+          cypherVisible = false;
+        } else if (selectedNode) {
+          clearSelection();
+        }
+        break;
+      case 'Delete':
+      case 'Backspace':
+        if (selectedNodeId && nvl) {
+          nvl.removeNodesWithIds([selectedNodeId]);
+          clearSelection();
+        }
+        break;
+    }
   }
 
   $effect(() => {
@@ -174,6 +341,8 @@
     };
   });
 </script>
+
+<svelte:window onkeydown={handleKeydown} />
 
 <div class="graph-view">
   <div class="toolbar">
@@ -190,65 +359,106 @@
         {/each}
       </select>
     </div>
+
+    {#if navHistory.length > 0}
+      <div class="breadcrumbs">
+        {#each navHistory as crumb, i}
+          {#if i > 0}<span class="breadcrumb-sep">&rsaquo;</span>{/if}
+          <button class="breadcrumb" onclick={() => navigateToBreadcrumb(crumb.id)} title={crumb.label}>
+            {crumb.caption}
+          </button>
+        {/each}
+      </div>
+    {/if}
+
     <div class="toolbar-right">
-      <button onclick={fitGraph} title="Fit to view">Fit</button>
+      <button onclick={() => { cypherVisible = !cypherVisible; }} title="Cypher query (Ctrl+Q)" class:active={cypherVisible}>Cypher</button>
+      <button onclick={toggleMinimap} title="Toggle minimap" class:active={showMinimap}>Map</button>
+      <button onclick={fitGraph} title="Fit to view (F)">Fit</button>
       <button onclick={resetGraph} title="Reset graph">Reset</button>
     </div>
   </div>
 
-  <div class="graph-body">
-    <div class="canvas-area">
-      {#if loading}
-        <div class="overlay">Loading graph...</div>
-      {/if}
-      {#if error}
-        <div class="overlay error">{error}</div>
-      {/if}
-      <div class="nvl-container" bind:this={container}></div>
-      <div class="legend">
-        {#each Object.entries(colorMap) as [label, color]}
-          <span class="legend-item">
-            <span class="legend-dot" style="background:{color}"></span>
-            {label}
-          </span>
-        {/each}
+  <div class="graph-content">
+    <div class="graph-body">
+      <div class="canvas-area" oncontextmenu={(e) => e.preventDefault()}>
+        {#if loading}
+          <div class="overlay">Loading graph...</div>
+        {/if}
+        {#if error}
+          <div class="overlay error">{error}</div>
+        {/if}
+        <div class="nvl-container" bind:this={container}></div>
+
+        <!-- Zoom controls -->
+        <div class="zoom-controls">
+          <button onclick={zoomIn} title="Zoom in (+)">+</button>
+          <button onclick={zoomOut} title="Zoom out (-)">-</button>
+          <button onclick={fitGraph} title="Fit to view (F)">&#8596;</button>
+          <button onclick={resetZoom} title="Reset zoom">&#8634;</button>
+        </div>
+
+        <!-- Minimap -->
+        {#if showMinimap}
+          <div class="minimap" bind:this={minimapContainer}></div>
+        {/if}
+
+        <div class="legend">
+          {#each Object.entries(colorMap) as [label, color]}
+            <span class="legend-item">
+              <span class="legend-dot" style="background:{color}"></span>
+              {label}
+            </span>
+          {/each}
+        </div>
       </div>
+
+      {#if selectedNode}
+        <aside class="detail-panel">
+          <div class="detail-header">
+            <h3>{selectedNode.id || 'Node Detail'}</h3>
+            <button class="close-btn" onclick={() => clearSelection()}>&times;</button>
+          </div>
+          <div class="detail-body">
+            {#if detailLoading}
+              <p class="muted">Loading...</p>
+            {:else if nodeDetail}
+              {#if nodeDetail.error}
+                <p class="muted">{nodeDetail.error}</p>
+              {:else}
+                <dl>
+                  {#each Object.entries(nodeDetail) as [key, value]}
+                    <dt>{key}</dt>
+                    <dd>
+                      {#if Array.isArray(value)}
+                        {value.length} items
+                      {:else if typeof value === 'object' && value !== null}
+                        <pre>{JSON.stringify(value, null, 2)}</pre>
+                      {:else}
+                        {String(value)}
+                      {/if}
+                    </dd>
+                  {/each}
+                </dl>
+              {/if}
+            {/if}
+          </div>
+        </aside>
+      {/if}
     </div>
 
-    {#if selectedNode}
-      <aside class="detail-panel">
-        <div class="detail-header">
-          <h3>{selectedNode.id || 'Node Detail'}</h3>
-          <button class="close-btn" onclick={() => { selectedNode = null; nodeDetail = null; }}>&times;</button>
-        </div>
-        <div class="detail-body">
-          {#if detailLoading}
-            <p class="muted">Loading...</p>
-          {:else if nodeDetail}
-            {#if nodeDetail.error}
-              <p class="muted">{nodeDetail.error}</p>
-            {:else}
-              <dl>
-                {#each Object.entries(nodeDetail) as [key, value]}
-                  <dt>{key}</dt>
-                  <dd>
-                    {#if Array.isArray(value)}
-                      {value.length} items
-                    {:else if typeof value === 'object' && value !== null}
-                      <pre>{JSON.stringify(value, null, 2)}</pre>
-                    {:else}
-                      {String(value)}
-                    {/if}
-                  </dd>
-                {/each}
-              </dl>
-            {/if}
-          {/if}
-        </div>
-      </aside>
-    {/if}
+    <CypherPanel bind:visible={cypherVisible} onrungraph={handleCypherGraph} />
   </div>
 </div>
+
+<ContextMenu
+  x={ctxMenuX}
+  y={ctxMenuY}
+  nodeId={ctxMenuNodeId}
+  nodeLabel={ctxMenuNodeLabel}
+  bind:visible={ctxMenuVisible}
+  onaction={handleContextAction}
+/>
 
 <style>
   .graph-view {
@@ -307,6 +517,51 @@
     background: #30363d;
   }
 
+  .toolbar button.active {
+    background: #58a6ff;
+    color: #0d1117;
+    border-color: #58a6ff;
+  }
+
+  /* Breadcrumbs */
+  .breadcrumbs {
+    display: flex;
+    align-items: center;
+    gap: 4px;
+    flex: 1;
+    min-width: 0;
+    padding: 0 12px;
+    overflow-x: auto;
+  }
+
+  .breadcrumb {
+    background: none;
+    border: none;
+    color: #58a6ff;
+    font-size: 12px;
+    cursor: pointer;
+    padding: 2px 4px;
+    border-radius: 3px;
+    white-space: nowrap;
+  }
+
+  .breadcrumb:hover {
+    background: #21262d;
+  }
+
+  .breadcrumb-sep {
+    color: #484f58;
+    font-size: 14px;
+  }
+
+  /* Layout */
+  .graph-content {
+    display: flex;
+    flex-direction: column;
+    flex: 1;
+    min-height: 0;
+  }
+
   .graph-body {
     display: flex;
     flex: 1;
@@ -338,6 +593,49 @@
 
   .overlay.error {
     color: #f85149;
+  }
+
+  /* Zoom controls */
+  .zoom-controls {
+    position: absolute;
+    bottom: 50px;
+    right: 12px;
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+    z-index: 10;
+  }
+
+  .zoom-controls button {
+    width: 32px;
+    height: 32px;
+    background: #21262d;
+    color: #e1e4e8;
+    border: 1px solid #30363d;
+    border-radius: 4px;
+    font-size: 16px;
+    cursor: pointer;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+  }
+
+  .zoom-controls button:hover {
+    background: #30363d;
+  }
+
+  /* Minimap */
+  .minimap {
+    position: absolute;
+    bottom: 50px;
+    right: 56px;
+    width: 150px;
+    height: 100px;
+    background: rgba(13, 17, 23, 0.85);
+    border: 1px solid #30363d;
+    border-radius: 4px;
+    z-index: 10;
+    overflow: hidden;
   }
 
   .legend {
