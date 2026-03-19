@@ -9,15 +9,21 @@ type GetProgramInput struct {
 }
 
 type SearchProgramsInput struct {
-	Query string `json:"query" jsonschema:"Search query (supports fuzzy matching)"`
-	Limit int    `json:"limit,omitempty" jsonschema:"Max results (default 20)"`
+	Query    string `json:"query" jsonschema:"Search query (supports fuzzy matching)"`
+	Limit    int    `json:"limit,omitempty" jsonschema:"Max results (default 20)"`
+	Codebase string `json:"codebase,omitempty" jsonschema:"Filter to a specific codebase"`
 }
 
 type ListProgramsInput struct {
 	Search   string `json:"search,omitempty" jsonschema:"Filter programs by ID substring"`
 	Page     int    `json:"page,omitempty" jsonschema:"Page number (default 1)"`
 	PageSize int    `json:"pageSize,omitempty" jsonschema:"Results per page (default 20)"`
+	Codebase string `json:"codebase,omitempty" jsonschema:"Filter to a specific codebase"`
 }
+
+type ListCodebasesInput struct{}
+
+type GetCrossCodebaseCallsInput struct{}
 
 type GetCallChainInput struct {
 	ProgramID string `json:"programId" jsonschema:"The program ID to trace"`

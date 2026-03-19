@@ -107,6 +107,7 @@ type Neo4jConfig struct {
 
 type IngestConfig struct {
 	RootDir         string
+	Codebase        string // INGEST_CODEBASE — codebase identifier for multi-codebase support (default "default")
 	BatchSize       int
 	CacheDB         string
 	TokenLimit      int
@@ -174,6 +175,7 @@ func Load() (*Config, error) {
 	viper.SetDefault("NEO4J_DATABASE", "cobol")
 
 	// Ingest defaults
+	viper.SetDefault("INGEST_CODEBASE", "default")
 	viper.SetDefault("INGEST_BATCH_SIZE", 500)
 	viper.SetDefault("INGEST_CACHE_DB", "./cache.sqlite")
 	viper.SetDefault("INGEST_TOKEN_LIMIT", 30000)
@@ -272,6 +274,7 @@ func Load() (*Config, error) {
 		},
 		Ingest: IngestConfig{
 			RootDir:         viper.GetString("INGEST_ROOT_DIR"),
+			Codebase:        viper.GetString("INGEST_CODEBASE"),
 			BatchSize:       viper.GetInt("INGEST_BATCH_SIZE"),
 			CacheDB:         viper.GetString("INGEST_CACHE_DB"),
 			TokenLimit:      viper.GetInt("INGEST_TOKEN_LIMIT"),

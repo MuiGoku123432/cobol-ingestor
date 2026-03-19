@@ -190,7 +190,7 @@ func (s *IngestService) runPipeline(ctx context.Context, dir string, passFlag in
 		return fmt.Errorf("creating claude client: %w", err)
 	}
 
-	writer := n4j.NewBatchWriter(neo4jClient, cfg.Ingest.BatchSize, logger)
+	writer := n4j.NewBatchWriter(neo4jClient, cfg.Ingest.BatchSize, "default", logger)
 
 	pipe := &pipeline.Pipeline{
 		Config:      cfg,
@@ -399,7 +399,7 @@ func (s *IngestService) runBWPipeline(ctx context.Context, dir, extensionsStr st
 		return fmt.Errorf("creating claude client: %w", err)
 	}
 
-	writer := n4j.NewBatchWriter(neo4jClient, cfg.Ingest.BatchSize, logger)
+	writer := n4j.NewBatchWriter(neo4jClient, cfg.Ingest.BatchSize, "default", logger)
 
 	// Query existing COBOL program IDs for prompt context
 	existingPrograms := queryProgramIDs(ctx, neo4jClient, logger)
@@ -666,12 +666,11 @@ func (s *IngestService) runOracleAnalysis(ctx context.Context) error {
 
 	// Create in-process MCP client for COBOL graph
 	s.emit("progress", map[string]any{"phase": "init", "message": "Initializing COBOL graph MCP..."})
-	reader := s.app.Neo4jService.reader
 	var batchWriter *n4j.BatchWriter
 	if s.app.Neo4jService.client != nil {
-		batchWriter = n4j.NewBatchWriter(s.app.Neo4jService.client, 500, logger)
+		batchWriter = n4j.NewBatchWriter(s.app.Neo4jService.client, 500, "default", logger)
 	}
-	server := mcpkg.NewServer(reader, batchWriter)
+	server := mcpkg.NewServer(s.app.Neo4jService.client, batchWriter)
 	graphClient, err := modernize.NewMCPClientInProcess(ctx, server)
 	if err != nil {
 		return fmt.Errorf("creating in-process graph MCP: %w", err)
@@ -706,7 +705,7 @@ func (s *IngestService) runOracleAnalysis(ctx context.Context) error {
 		logger.Warn("migrations failed (may already be applied)", zap.Error(err))
 	}
 
-	writer := n4j.NewBatchWriter(neo4jClient, cfg.Ingest.BatchSize, logger)
+	writer := n4j.NewBatchWriter(neo4jClient, cfg.Ingest.BatchSize, "default", logger)
 	if err := writer.WriteExternalDBResult(ctx, result); err != nil {
 		return fmt.Errorf("writing results to neo4j: %w", err)
 	}

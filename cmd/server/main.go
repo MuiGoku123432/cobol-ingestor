@@ -58,7 +58,7 @@ func main() {
 
 	// Set up pipeline for async jobs (optional — may fail if no API key)
 	var pipe *pipeline.Pipeline
-	writer := n4j.NewBatchWriter(neo4jClient, cfg.Ingest.BatchSize, logger)
+	writer := n4j.NewBatchWriter(neo4jClient, cfg.Ingest.BatchSize, "default", logger)
 	provider, providerErr := llm.NewProvider(cfg)
 	if providerErr == nil {
 		claudeClient, claudeErr := claude.NewClient(provider, cfg.Claude, logger)

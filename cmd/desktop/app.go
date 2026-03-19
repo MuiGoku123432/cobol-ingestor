@@ -104,16 +104,13 @@ func (a *App) shutdown(ctx context.Context) {
 // initMCP creates an in-process MCP client connected to the Neo4j reader.
 // Called after Neo4j connects successfully.
 func (a *App) initMCP() error {
-	reader := a.Neo4jService.reader
-	if reader == nil {
+	if a.Neo4jService.client == nil {
 		return nil
 	}
 	var writer *n4j.BatchWriter
-	if a.Neo4jService.client != nil {
-		writer = n4j.NewBatchWriter(a.Neo4jService.client, 500, a.logger)
-	}
+	writer = n4j.NewBatchWriter(a.Neo4jService.client, 500, "default", a.logger)
 
-	server := mcpkg.NewServer(reader, writer)
+	server := mcpkg.NewServer(a.Neo4jService.client, writer)
 	mcpClient, err := modernize.NewMCPClientInProcess(a.ctx, server)
 	if err != nil {
 		return err

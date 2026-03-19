@@ -38,8 +38,9 @@ var ingestCmd = &cobra.Command{
 }
 
 var (
-	dir      string
-	passFlag int
+	dir           string
+	passFlag      int
+	codebaseFlag  string
 )
 
 // bw flags
@@ -192,6 +193,7 @@ var authModelsCmd = &cobra.Command{
 func init() {
 	ingestCmd.Flags().StringVar(&dir, "dir", "", "Root directory of COBOL source files")
 	ingestCmd.Flags().IntVar(&passFlag, "pass", 0, "Which pass to run: 0=all, 1=Pass 1, 2=Pass 2, 3=Pass 3")
+	ingestCmd.Flags().StringVar(&codebaseFlag, "codebase", "default", "Codebase identifier for multi-codebase support")
 	_ = ingestCmd.MarkFlagRequired("dir")
 	rootCmd.AddCommand(ingestCmd)
 
@@ -234,10 +236,15 @@ func runIngest(cmd *cobra.Command, args []string) error {
 	}
 
 	cfg.Ingest.RootDir = dir
+	cfg.Ingest.Codebase = codebaseFlag
+	if codebaseFlag != "default" {
+		cfg.Ingest.CacheDB = fmt.Sprintf("cache-%s.sqlite", codebaseFlag)
+	}
 	ctx := context.Background()
 
 	logger.Info("starting ingestion",
 		zap.String("dir", cfg.Ingest.RootDir),
+		zap.String("codebase", cfg.Ingest.Codebase),
 		zap.Int("max_workers", cfg.Ingest.MaxWorkers),
 		zap.Int("pass", passFlag),
 	)
@@ -337,7 +344,7 @@ func runIngest(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("creating claude client: %w", err)
 	}
 
-	writer := n4j.NewBatchWriter(neo4jClient, cfg.Ingest.BatchSize, logger)
+	writer := n4j.NewBatchWriter(neo4jClient, cfg.Ingest.BatchSize, cfg.Ingest.Codebase, logger)
 
 	pipe := &pipeline.Pipeline{
 		Config:      cfg,
@@ -466,7 +473,7 @@ func runBW(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("creating claude client: %w", err)
 	}
 
-	writer := n4j.NewBatchWriter(neo4jClient, cfg.Ingest.BatchSize, logger)
+	writer := n4j.NewBatchWriter(neo4jClient, cfg.Ingest.BatchSize, "default", logger)
 
 	// Query existing COBOL program IDs for prompt context
 	existingPrograms := queryProgramIDs(ctx, neo4jClient, logger)
@@ -809,7 +816,7 @@ func runExternalDB(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("running migrations: %w", err)
 	}
 
-	writer := n4j.NewBatchWriter(neo4jClient, cfg.Ingest.BatchSize, logger)
+	writer := n4j.NewBatchWriter(neo4jClient, cfg.Ingest.BatchSize, "default", logger)
 	if err := writer.WriteExternalDBResult(ctx, result); err != nil {
 		return fmt.Errorf("writing results to neo4j: %w", err)
 	}

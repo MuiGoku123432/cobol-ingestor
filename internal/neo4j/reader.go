@@ -88,18 +88,19 @@ func (c *Client) ListPrograms(ctx context.Context, filter Filter, page, pageSize
 	defer session.Close(ctx)
 
 	skip := (page - 1) * pageSize
+	cbFilter := codebaseOrFilter(filter.Codebase, c.codebase)
 
 	// Count query
-	countCypher := "MATCH (p:Program) RETURN count(p) AS total"
-	listCypher := "MATCH (p:Program) " +
+	countCypher := "MATCH (p:Program)" + codebaseWhere("p", cbFilter) + " RETURN count(p) AS total"
+	listCypher := "MATCH (p:Program)" + codebaseWhere("p", cbFilter) + " " +
 		"OPTIONAL MATCH (p)-[:CALLS]->(callee:Program) " +
 		"RETURN p.programId AS programId, p.filePath AS filePath, p.language AS language, " +
 		"p.deadCode AS deadCode, p.executionMode AS executionMode, p.lineCount AS lineCount, count(callee) AS callCount " +
 		"ORDER BY p.programId SKIP $skip LIMIT $limit"
 
 	if filter.Search != "" {
-		countCypher = "MATCH (p:Program) WHERE p.programId CONTAINS $search RETURN count(p) AS total"
-		listCypher = "MATCH (p:Program) WHERE p.programId CONTAINS $search " +
+		countCypher = "MATCH (p:Program) WHERE p.programId CONTAINS $search" + codebaseWhereAnd("p", cbFilter) + " RETURN count(p) AS total"
+		listCypher = "MATCH (p:Program) WHERE p.programId CONTAINS $search" + codebaseWhereAnd("p", cbFilter) + " " +
 			"OPTIONAL MATCH (p)-[:CALLS]->(callee:Program) " +
 			"RETURN p.programId AS programId, p.filePath AS filePath, p.language AS language, " +
 			"p.deadCode AS deadCode, p.executionMode AS executionMode, p.lineCount AS lineCount, count(callee) AS callCount " +
@@ -342,17 +343,18 @@ func (c *Client) ListCopybooks(ctx context.Context, filter Filter, page, pageSiz
 	defer session.Close(ctx)
 
 	skip := (page - 1) * pageSize
+	cbFilter := codebaseOrFilter(filter.Codebase, c.codebase)
 	params := map[string]any{"skip": int64(skip), "limit": int64(pageSize), "search": filter.Search}
 
-	countCypher := "MATCH (cb:Copybook) RETURN count(cb) AS total"
-	listCypher := "MATCH (cb:Copybook) " +
+	countCypher := "MATCH (cb:Copybook) WHERE 1=1" + codebasesWhereAnd("cb", cbFilter) + " RETURN count(cb) AS total"
+	listCypher := "MATCH (cb:Copybook) WHERE 1=1" + codebasesWhereAnd("cb", cbFilter) + " " +
 		"OPTIONAL MATCH (p:Program)-[:INCLUDES]->(cb) " +
 		"RETURN cb.name AS name, count(p) AS usageCount " +
 		"ORDER BY cb.name SKIP $skip LIMIT $limit"
 
 	if filter.Search != "" {
-		countCypher = "MATCH (cb:Copybook) WHERE cb.name CONTAINS $search RETURN count(cb) AS total"
-		listCypher = "MATCH (cb:Copybook) WHERE cb.name CONTAINS $search " +
+		countCypher = "MATCH (cb:Copybook) WHERE cb.name CONTAINS $search" + codebasesWhereAnd("cb", cbFilter) + " RETURN count(cb) AS total"
+		listCypher = "MATCH (cb:Copybook) WHERE cb.name CONTAINS $search" + codebasesWhereAnd("cb", cbFilter) + " " +
 			"OPTIONAL MATCH (p:Program)-[:INCLUDES]->(cb) " +
 			"RETURN cb.name AS name, count(p) AS usageCount " +
 			"ORDER BY cb.name SKIP $skip LIMIT $limit"
@@ -404,22 +406,22 @@ func (c *Client) GetDashboardStats(ctx context.Context) (*DashboardStats, error)
 		cypher string
 		dest   *int
 	}{
-		{"MATCH (p:Program) RETURN count(p) AS c", &stats.ProgramCount},
-		{"MATCH (cb:Copybook) RETURN count(cb) AS c", &stats.CopybookCount},
-		{"MATCH (p:Paragraph) RETURN count(p) AS c", &stats.ParagraphCount},
-		{"MATCH (s:Section) RETURN count(s) AS c", &stats.SectionCount},
-		{"MATCH (d:DataItem) RETURN count(d) AS c", &stats.DataItemCount},
-		{"MATCH (f:File) RETURN count(f) AS c", &stats.FileCount},
-		{"MATCH (s:SQLStatement) RETURN count(s) AS c", &stats.SQLStatementCount},
-		{"MATCH (c:CICSTransaction) RETURN count(c) AS c", &stats.CICSTransactionCount},
-		{"MATCH (e:ExternalInterface) RETURN count(e) AS c", &stats.ExternalInterfaceCount},
-		{"MATCH (c:Condition) RETURN count(c) AS c", &stats.ConditionCount},
-		{"MATCH (p:Parameter) RETURN count(p) AS c", &stats.ParameterCount},
-		{"MATCH ()-[r]->() RETURN count(r) AS c", &stats.RelationshipCount},
-		{"MATCH (p:Program) WHERE NOT ()-[:CALLS]->(p) RETURN count(p) AS c", &stats.OrphanCount},
-		{"MATCH (d:BusinessDomain) RETURN count(d) AS c", &stats.DomainCount},
-		{"MATCH (dd:DDCard) RETURN count(dd) AS c", &stats.DDCardCount},
-		{"MATCH (t:DBTable) RETURN count(t) AS c", &stats.DBTableCount},
+		{"MATCH (p:Program)" + codebaseWhere("p", c.codebase) + " RETURN count(p) AS c", &stats.ProgramCount},
+		{"MATCH (cb:Copybook) WHERE 1=1" + codebasesWhereAnd("cb", c.codebase) + " RETURN count(cb) AS c", &stats.CopybookCount},
+		{"MATCH (p:Paragraph)" + codebaseWhere("p", c.codebase) + " RETURN count(p) AS c", &stats.ParagraphCount},
+		{"MATCH (s:Section)" + codebaseWhere("s", c.codebase) + " RETURN count(s) AS c", &stats.SectionCount},
+		{"MATCH (d:DataItem)" + codebaseWhere("d", c.codebase) + " RETURN count(d) AS c", &stats.DataItemCount},
+		{"MATCH (f:File) WHERE 1=1" + codebasesWhereAnd("f", c.codebase) + " RETURN count(f) AS c", &stats.FileCount},
+		{"MATCH (s:SQLStatement)" + codebaseWhere("s", c.codebase) + " RETURN count(s) AS c", &stats.SQLStatementCount},
+		{"MATCH (c:CICSTransaction)" + codebaseWhere("c", c.codebase) + " RETURN count(c) AS c", &stats.CICSTransactionCount},
+		{"MATCH (e:ExternalInterface)" + codebaseWhere("e", c.codebase) + " RETURN count(e) AS c", &stats.ExternalInterfaceCount},
+		{"MATCH (c:Condition)" + codebaseWhere("c", c.codebase) + " RETURN count(c) AS c", &stats.ConditionCount},
+		{"MATCH (p:Parameter)" + codebaseWhere("p", c.codebase) + " RETURN count(p) AS c", &stats.ParameterCount},
+		{"MATCH (p:Program)" + codebaseWhere("p", c.codebase) + " WITH p MATCH (p)-[r]->() RETURN count(r) AS c", &stats.RelationshipCount},
+		{"MATCH (p:Program) WHERE NOT ()-[:CALLS]->(p)" + codebaseWhereAnd("p", c.codebase) + " RETURN count(p) AS c", &stats.OrphanCount},
+		{"MATCH (d:BusinessDomain) WHERE 1=1" + codebasesWhereAnd("d", c.codebase) + " RETURN count(d) AS c", &stats.DomainCount},
+		{"MATCH (dd:DDCard)" + codebaseWhere("dd", c.codebase) + " RETURN count(dd) AS c", &stats.DDCardCount},
+		{"MATCH (t:DBTable) WHERE 1=1" + codebasesWhereAnd("t", c.codebase) + " RETURN count(t) AS c", &stats.DBTableCount},
 	}
 
 	for _, q := range queries {
@@ -488,7 +490,7 @@ func (c *Client) ListBusinessDomains(ctx context.Context) ([]BusinessDomainSumma
 	defer session.Close(ctx)
 
 	result, err := session.Run(ctx,
-		"MATCH (d:BusinessDomain) "+
+		"MATCH (d:BusinessDomain) WHERE 1=1"+codebasesWhereAnd("d", c.codebase)+" "+
 			"OPTIONAL MATCH (p:Program)-[:BELONGS_TO]->(d) "+
 			"RETURN d.name AS name, d.description AS description, count(p) AS programCount "+
 			"ORDER BY d.name", nil)
@@ -671,7 +673,7 @@ func (c *Client) ListBridgePrograms(ctx context.Context) ([]BridgeProgramInfo, e
 	defer session.Close(ctx)
 
 	result, err := session.Run(ctx,
-		"MATCH (p:Program) WHERE p.isBridge = true RETURN p.programId AS programId, p.bridgeDomains AS domains, p.bridgeReason AS reason", nil)
+		"MATCH (p:Program) WHERE p.isBridge = true"+codebaseWhereAnd("p", c.codebase)+" RETURN p.programId AS programId, p.bridgeDomains AS domains, p.bridgeReason AS reason", nil)
 	if err != nil {
 		return nil, fmt.Errorf("bridge programs query: %w", err)
 	}
@@ -703,7 +705,7 @@ func (c *Client) ListCopybookRisks(ctx context.Context) ([]CopybookRiskInfo, err
 	defer session.Close(ctx)
 
 	result, err := session.Run(ctx,
-		"MATCH (cb:Copybook) WHERE cb.riskLevel IS NOT NULL RETURN cb.name AS name, cb.riskLevel AS riskLevel, cb.programCount AS programCount, cb.riskReason AS riskReason ORDER BY cb.riskLevel", nil)
+		"MATCH (cb:Copybook) WHERE cb.riskLevel IS NOT NULL"+codebasesWhereAnd("cb", c.codebase)+" RETURN cb.name AS name, cb.riskLevel AS riskLevel, cb.programCount AS programCount, cb.riskReason AS riskReason ORDER BY cb.riskLevel", nil)
 	if err != nil {
 		return nil, fmt.Errorf("copybook risks query: %w", err)
 	}
@@ -726,7 +728,7 @@ func (c *Client) ListModernizationCandidates(ctx context.Context) ([]Modernizati
 	defer session.Close(ctx)
 
 	result, err := session.Run(ctx,
-		"MATCH (p:Program) WHERE p.modernizationScore IS NOT NULL AND p.filePath IS NOT NULL RETURN p.programId AS programId, p.modernizationScore AS score, p.modernizationReason AS reason, p.modernizationApproach AS approach ORDER BY p.modernizationScore DESC", nil)
+		"MATCH (p:Program) WHERE p.modernizationScore IS NOT NULL AND p.filePath IS NOT NULL"+codebaseWhereAnd("p", c.codebase)+" RETURN p.programId AS programId, p.modernizationScore AS score, p.modernizationReason AS reason, p.modernizationApproach AS approach ORDER BY p.modernizationScore DESC", nil)
 	if err != nil {
 		return nil, fmt.Errorf("modernization candidates query: %w", err)
 	}
@@ -749,7 +751,7 @@ func (c *Client) ListRiskPrograms(ctx context.Context, minScore float64) ([]Risk
 	defer session.Close(ctx)
 
 	result, err := session.Run(ctx,
-		"MATCH (p:Program) WHERE p.riskScore >= $min AND p.filePath IS NOT NULL RETURN p.programId AS programId, p.riskScore AS riskScore, p.riskType AS riskType, p.riskDetails AS riskDetails ORDER BY p.riskScore DESC",
+		"MATCH (p:Program) WHERE p.riskScore >= $min AND p.filePath IS NOT NULL"+codebaseWhereAnd("p", c.codebase)+" RETURN p.programId AS programId, p.riskScore AS riskScore, p.riskType AS riskType, p.riskDetails AS riskDetails ORDER BY p.riskScore DESC",
 		map[string]any{"min": minScore})
 	if err != nil {
 		return nil, fmt.Errorf("risk programs query: %w", err)
@@ -773,7 +775,7 @@ func (c *Client) ListVolumeEstimates(ctx context.Context) ([]VolumeEstimateInfo,
 	defer session.Close(ctx)
 
 	result, err := session.Run(ctx,
-		"MATCH (p:Program) WHERE p.volumeEstimate IS NOT NULL RETURN p.programId AS programId, p.volumeEstimate AS estimate, p.volumeReason AS reason ORDER BY p.programId", nil)
+		"MATCH (p:Program) WHERE p.volumeEstimate IS NOT NULL"+codebaseWhereAnd("p", c.codebase)+" RETURN p.programId AS programId, p.volumeEstimate AS estimate, p.volumeReason AS reason ORDER BY p.programId", nil)
 	if err != nil {
 		return nil, fmt.Errorf("volume estimates query: %w", err)
 	}
@@ -951,7 +953,7 @@ func (c *Client) GetDataHierarchy(ctx context.Context, programID string) ([]Data
 }
 
 func (c *Client) GetValidationReport(ctx context.Context) (*ValidationResult, error) {
-	w := NewBatchWriter(c, 500, zap.NewNop())
+	w := NewBatchWriter(c, 500, "default", zap.NewNop())
 	return w.RunValidation(ctx)
 }
 
@@ -1025,7 +1027,7 @@ func (c *Client) GetMigrationSequence(ctx context.Context) ([]MigrationStep, err
 
 	// Get all modernization candidates with their call targets (also candidates)
 	result, err := session.Run(ctx,
-		"MATCH (p:Program) WHERE p.modernizationScore IS NOT NULL "+
+		"MATCH (p:Program) WHERE p.modernizationScore IS NOT NULL"+codebaseWhereAnd("p", c.codebase)+" "+
 			"OPTIONAL MATCH (p)-[:CALLS]->(callee:Program) WHERE callee.modernizationScore IS NOT NULL "+
 			"OPTIONAL MATCH (p)-[:BELONGS_TO]->(d:BusinessDomain) "+
 			"RETURN p.programId AS programId, p.modernizationScore AS score, "+
@@ -1246,7 +1248,7 @@ func (c *Client) GetEffortEstimates(ctx context.Context) ([]EffortEstimate, erro
 	defer session.Close(ctx)
 
 	result, err := session.Run(ctx,
-		"MATCH (p:Program) "+
+		"MATCH (p:Program)"+codebaseWhere("p", c.codebase)+" "+
 			"OPTIONAL MATCH (para:Paragraph)-[:BELONGS_TO]->(p) "+
 			"OPTIONAL MATCH (p)-[:INCLUDES]->(cb:Copybook) "+
 			"OPTIONAL MATCH (d:DataItem {programId: p.programId}) "+
@@ -1506,4 +1508,50 @@ func (c *Client) GetIDMSImpact(ctx context.Context, recordName string) (*IDMSImp
 	}
 
 	return info, nil
+}
+
+// ListCodebases returns all distinct codebase identifiers in the graph.
+func (c *Client) ListCodebases(ctx context.Context) ([]string, error) {
+	session := c.NewSession(ctx)
+	defer session.Close(ctx)
+
+	result, err := session.Run(ctx,
+		"MATCH (n) WHERE n.codebase IS NOT NULL RETURN DISTINCT n.codebase AS cb ORDER BY cb", nil)
+	if err != nil {
+		return nil, fmt.Errorf("listing codebases: %w", err)
+	}
+
+	var codebases []string
+	for result.Next(ctx) {
+		if val := getStr(result.Record(), "cb"); val != "" {
+			codebases = append(codebases, val)
+		}
+	}
+	return codebases, nil
+}
+
+// GetCrossCodebaseCalls finds CALLS relationships between programs in different codebases.
+func (c *Client) GetCrossCodebaseCalls(ctx context.Context) ([]CrossCodebaseCall, error) {
+	session := c.NewSession(ctx)
+	defer session.Close(ctx)
+
+	result, err := session.Run(ctx,
+		"MATCH (a:Program)-[:CALLS]->(b:Program) "+
+			"WHERE a.codebase IS NOT NULL AND b.codebase IS NOT NULL AND a.codebase <> b.codebase "+
+			"RETURN a.programId AS callerId, a.codebase AS callerCB, b.programId AS calleeId, b.codebase AS calleeCB", nil)
+	if err != nil {
+		return nil, fmt.Errorf("cross-codebase calls query: %w", err)
+	}
+
+	var calls []CrossCodebaseCall
+	for result.Next(ctx) {
+		rec := result.Record()
+		calls = append(calls, CrossCodebaseCall{
+			CallerID:       getStr(rec, "callerId"),
+			CallerCodebase: getStr(rec, "callerCB"),
+			CalleeID:       getStr(rec, "calleeId"),
+			CalleeCodebase: getStr(rec, "calleeCB"),
+		})
+	}
+	return calls, nil
 }

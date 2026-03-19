@@ -11,7 +11,7 @@ func (c *Client) ListJCLJobs(ctx context.Context) ([]JCLJobInfo, error) {
 	defer session.Close(ctx)
 
 	result, err := session.Run(ctx,
-		"MATCH (j:JCLJob) "+
+		"MATCH (j:JCLJob)"+codebaseWhere("j", c.codebase)+" "+
 			"OPTIONAL MATCH (s:JCLStep)-[:STEP_OF]->(j) "+
 			"RETURN j.jobName AS jobName, j.class AS class, j.msgclass AS msgclass, count(s) AS stepCount "+
 			"ORDER BY j.jobName", nil)
@@ -174,7 +174,7 @@ func (c *Client) ListDBTables(ctx context.Context) ([]DBTableInfo, error) {
 	defer session.Close(ctx)
 
 	result, err := session.Run(ctx,
-		"MATCH (t:DBTable) "+
+		"MATCH (t:DBTable) WHERE 1=1"+codebasesWhereAnd("t", c.codebase)+" "+
 			"OPTIONAL MATCH (p:Program)-[:ACCESSES]->(t) "+
 			"RETURN t.name AS name, t.schema AS schema, count(p) AS accessCount "+
 			"ORDER BY t.name", nil)
