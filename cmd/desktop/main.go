@@ -35,6 +35,8 @@ func main() {
 			app.ConfigService,
 			app.QueryStore,
 			app.StrategyService,
+			app.BrowserService,
+			app.ExportService,
 		},
 	})
 	if err != nil {
