@@ -345,10 +345,11 @@ func (s *IngestService) runBWPipeline(ctx context.Context, dir, extensionsStr st
 
 	// Scan BW files
 	s.emit("progress", map[string]any{"phase": "scanning", "message": "Scanning BusinessWare files..."})
-	scanResult, err := scanner.ScanBW(ctx, cfg.BW.Dir, extensions, logger)
+	bwScanResult, err := scanner.ScanBW(ctx, cfg.BW.Dir, extensions, logger)
 	if err != nil {
 		return fmt.Errorf("scanning BW files: %w", err)
 	}
+	scanResult := bwScanResult.ScanResult
 	if len(scanResult.Files) == 0 {
 		return fmt.Errorf("no BusinessWare files found in %s", cfg.BW.Dir)
 	}
@@ -424,7 +425,13 @@ func (s *IngestService) runBWPipeline(ctx context.Context, dir, extensionsStr st
 			continue
 		}
 
-		content, readErr := os.ReadFile(f.Path)
+		var content []byte
+		var readErr error
+		if jarContent, ok := bwScanResult.JARContents[f.Path]; ok {
+			content = jarContent
+		} else {
+			content, readErr = os.ReadFile(f.Path)
+		}
 		if readErr != nil {
 			logger.Error("failed to read file", zap.String("file", f.Path), zap.Error(readErr))
 			continue
@@ -737,6 +744,8 @@ func classifyBWExtension(path string) string {
 	switch ext {
 	case ".java":
 		return "Java"
+	case ".class":
+		return "Java Bytecode"
 	case ".md":
 		return "Markdown"
 	case ".xml":
@@ -745,6 +754,22 @@ func classifyBWExtension(path string) string {
 		return "Businessware"
 	case ".txt":
 		return "Text"
+	case ".properties":
+		return "Properties"
+	case ".json":
+		return "JSON"
+	case ".yml", ".yaml":
+		return "YAML"
+	case ".mf":
+		return "Manifest"
+	case ".vsdx":
+		return "Visio Diagram"
+	case ".drawio":
+		return "DrawIO Diagram"
+	case ".svg":
+		return "SVG Diagram"
+	case ".puml", ".plantuml":
+		return "PlantUML Diagram"
 	default:
 		return "Unknown"
 	}

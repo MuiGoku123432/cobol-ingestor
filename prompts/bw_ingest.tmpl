@@ -1,4 +1,4 @@
-You are analyzing a Businessware enterprise artifact file. The file may contain natural language documentation, Java source code, XML configuration, workflow definitions, screen layouts, business rules, or other enterprise content.
+You are analyzing a Businessware enterprise artifact file. The file may contain natural language documentation, Java source code, XML configuration, workflow definitions, screen layouts, business rules, architecture diagrams, or other enterprise content.
 
 ## File Information
 - **File name:** {{.FileName}}
@@ -9,6 +9,12 @@ The following COBOL program IDs exist in the codebase. If the file references an
 
 {{.ExistingPrograms}}
 
+## JAR Archive Context
+
+If the file path contains `!/` (e.g., `app.jar!/com/example/Foo.class`), the file was extracted from a JAR archive. The content before `!/` is the JAR file path; the content after is the internal entry path.
+
+For `.class` files, the content is disassembled bytecode (either from `javap` or a Go-native parser). Treat it like Java source — extract classes, methods, fields, inheritance, and relationships just as you would for `.java` files.
+
 ## Instructions
 
 1. **Extract entities** — Identify all meaningful entities in this file. Entity types are free-form; use whatever best describes the entity. Examples: `Class`, `Method`, `Interface`, `BusinessRule`, `Workflow`, `Screen`, `Configuration`, `DataMapping`, `Service`, `Endpoint`, `Table`, `Field`, etc.
@@ -16,6 +22,17 @@ The following COBOL program IDs exist in the codebase. If the file references an
 2. **Extract relationships** — Identify relationships between the entities you extracted. Relationship types are also free-form. Examples: `implements`, `calls`, `depends_on`, `maps_to`, `validates`, `triggers`, `contains`, `extends`, etc.
 
 3. **Identify COBOL references** — If any entity references a known COBOL program or copybook (from the list above), include it in `cobolReferences`. Reference types: `calls`, `replaces`, `wraps`, `maps_to`, `reads_from`, `writes_to`, etc.
+{{if .IsDiagram}}
+## Diagram-Specific Guidance
+
+This file is an architecture/design diagram that has been pre-processed into structured text. When analyzing:
+
+- **Shapes** represent entities — systems, processes, databases, screens, data stores, or components. Create an entity for each meaningful shape.
+- **Connections/edges** represent relationships — data flow, control flow, dependencies, or associations. Create a relationship for each connection.
+- **Labels** on shapes and connections often reference COBOL programs, copybooks, files, or transactions — check against the known programs list above.
+- Suggested entity types for diagram elements: `System`, `Process`, `Database`, `Screen`, `DataStore`, `Component`, `DiagramPage`, `Entity`, `Relationship` (for ER diagrams)
+- If the diagram has multiple pages, each page may represent a different view — include a `DiagramPage` entity for each page with a summary of its content.
+{{end}}
 
 ## Response Format
 

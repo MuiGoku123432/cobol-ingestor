@@ -260,10 +260,11 @@ func (c *Client) AnalyzeRepair(ctx context.Context, repairType, programID, graph
 // AnalyzeBW sends a Businessware file to Claude Opus for entity/relationship extraction.
 func (c *Client) AnalyzeBW(ctx context.Context, fileName, fileType, content, existingPrograms string, maxTokens int) (string, error) {
 	var userMsg bytes.Buffer
-	if err := c.bwTmpl.Execute(&userMsg, map[string]string{
+	if err := c.bwTmpl.Execute(&userMsg, map[string]any{
 		"FileName":         fileName,
 		"FileType":         fileType,
 		"ExistingPrograms": existingPrograms,
+		"IsDiagram":        isDiagramType(fileType),
 	}); err != nil {
 		return "", fmt.Errorf("rendering bw template: %w", err)
 	}
@@ -276,10 +277,20 @@ func (c *Client) AnalyzeBW(ctx context.Context, fileName, fileType, content, exi
 		Model:     c.opusModel,
 		MaxTokens: maxTokens,
 		Messages: []llm.Message{
-			{Role: llm.RoleSystem, Content: "You are an enterprise software analyst. You extract entities, relationships, and COBOL cross-references from Businessware artifacts (Java code, documentation, configuration files). Return structured JSON."},
+			{Role: llm.RoleSystem, Content: "You are an enterprise software analyst. You extract entities, relationships, and COBOL cross-references from Businessware artifacts (Java code, documentation, configuration files, architecture diagrams). Return structured JSON."},
 			{Role: llm.RoleUser, Content: userMsg.String() + "\n\n---\n\n" + content},
 		},
 	})
+}
+
+// isDiagramType returns true if the file type represents a diagram format.
+func isDiagramType(fileType string) bool {
+	switch fileType {
+	case "Visio Diagram", "DrawIO Diagram", "SVG Diagram", "PlantUML Diagram":
+		return true
+	default:
+		return false
+	}
 }
 
 // completeWithRetry calls the LLM provider with exponential backoff retries.

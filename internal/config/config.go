@@ -26,10 +26,11 @@ type Config struct {
 // BWConfig holds settings for Businessware ingestion.
 type BWConfig struct {
 	Dir        string // BW_DIR — root directory of Businessware files
-	Extensions string // BW_EXTENSIONS — comma-separated file extensions (default ".java,.md,.bw,.txt,.xml")
+	Extensions string // BW_EXTENSIONS — comma-separated file extensions (default ".java,.md,.bw,.txt,.xml,.vsdx,.drawio,.svg,.puml,.plantuml,.jar")
 	MaxWorkers int    // BW_MAX_WORKERS — concurrent analysis workers (default 5)
 	MaxTokens  int    // BW_MAX_TOKENS — max output tokens per LLM call (default 16000)
 	TokenLimit int    // BW_TOKEN_LIMIT — input chunking token limit (default 30000)
+	JavapPath  string // BW_JAVAP_PATH — path to javap binary (auto-detected if empty)
 }
 
 // ExternalDBConfig holds settings for external database gap analysis via MCP.
@@ -211,7 +212,7 @@ func Load() (*Config, error) {
 
 	// BW defaults
 	viper.SetDefault("BW_DIR", "")
-	viper.SetDefault("BW_EXTENSIONS", ".java,.md,.bw,.txt,.xml")
+	viper.SetDefault("BW_EXTENSIONS", ".java,.md,.bw,.txt,.xml,.vsdx,.drawio,.svg,.puml,.plantuml,.jar")
 	viper.SetDefault("BW_MAX_WORKERS", 5)
 	viper.SetDefault("BW_MAX_TOKENS", 16000)
 	viper.SetDefault("BW_TOKEN_LIMIT", 30000)
@@ -318,6 +319,7 @@ func Load() (*Config, error) {
 			MaxWorkers: viper.GetInt("BW_MAX_WORKERS"),
 			MaxTokens:  viper.GetInt("BW_MAX_TOKENS"),
 			TokenLimit: viper.GetInt("BW_TOKEN_LIMIT"),
+			JavapPath:  viper.GetString("BW_JAVAP_PATH"),
 		},
 		Modernize: ModernizeConfig{
 			Port:          viper.GetString("MODERNIZE_PORT"),
