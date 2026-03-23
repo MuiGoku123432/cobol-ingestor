@@ -28,6 +28,8 @@ type App struct {
 	ConfigService   *ConfigService
 	QueryStore      *QueryStoreService
 	StrategyService *StrategyService
+	BrowserService  *BrowserService
+	ExportService   *ExportService
 }
 
 func NewApp(logger *zap.Logger) *App {
@@ -38,6 +40,8 @@ func NewApp(logger *zap.Logger) *App {
 	a.ConfigService = &ConfigService{app: a}
 	a.QueryStore = &QueryStoreService{app: a}
 	a.StrategyService = &StrategyService{app: a}
+	a.BrowserService = &BrowserService{app: a}
+	a.ExportService = &ExportService{app: a}
 	return a
 }
 
