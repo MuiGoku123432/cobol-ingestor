@@ -7,6 +7,7 @@ const (
 	FileTypeCOBOL    FileType = "COBOL"
 	FileTypeCopybook FileType = "COPYBOOK"
 	FileTypeJCL      FileType = "JCL"
+	FileTypePending  FileType = "PENDING" // awaiting content-based classification
 )
 
 // FileInfo represents a discovered source file.

@@ -120,6 +120,7 @@ type IngestConfig struct {
 	OverlapLines    int
 	Pass3BatchSize        int
 	StripSequenceColumns  bool // STRIP_SEQUENCE_COLUMNS — strip columns 1-6 and 73-80 from fixed-format COBOL
+	ContentDetect         bool // CONTENT_DETECT — enable content-based detection of COBOL/copybook/JCL in .txt files
 }
 
 // WorkersForPass returns the worker count for a specific pass, falling back to MaxWorkers.
@@ -188,6 +189,7 @@ func Load() (*Config, error) {
 	viper.SetDefault("PASS2_OVERLAP_LINES", 20)
 	viper.SetDefault("PASS3_BATCH_SIZE", 50)
 	viper.SetDefault("STRIP_SEQUENCE_COLUMNS", true)
+	viper.SetDefault("CONTENT_DETECT", false)
 
 	// API defaults
 	viper.SetDefault("API_PORT", "8080")
@@ -287,6 +289,7 @@ func Load() (*Config, error) {
 			OverlapLines:    viper.GetInt("PASS2_OVERLAP_LINES"),
 			Pass3BatchSize:       viper.GetInt("PASS3_BATCH_SIZE"),
 			StripSequenceColumns: viper.GetBool("STRIP_SEQUENCE_COLUMNS"),
+			ContentDetect:        viper.GetBool("CONTENT_DETECT"),
 		},
 		API: APIConfig{
 			Port:     viper.GetString("API_PORT"),
