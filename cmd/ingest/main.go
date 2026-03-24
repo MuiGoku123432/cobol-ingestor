@@ -38,9 +38,10 @@ var ingestCmd = &cobra.Command{
 }
 
 var (
-	dir           string
-	passFlag      int
-	codebaseFlag  string
+	dir            string
+	passFlag       int
+	codebaseFlag   string
+	contentDetect  bool
 )
 
 // bw flags
@@ -194,6 +195,7 @@ func init() {
 	ingestCmd.Flags().StringVar(&dir, "dir", "", "Root directory of COBOL source files")
 	ingestCmd.Flags().IntVar(&passFlag, "pass", 0, "Which pass to run: 0=all, 1=Pass 1, 2=Pass 2, 3=Pass 3")
 	ingestCmd.Flags().StringVar(&codebaseFlag, "codebase", "default", "Codebase identifier for multi-codebase support")
+	ingestCmd.Flags().BoolVar(&contentDetect, "content-detect", false, "Enable content-based detection of COBOL/copybook/JCL in .txt files")
 	_ = ingestCmd.MarkFlagRequired("dir")
 	rootCmd.AddCommand(ingestCmd)
 
@@ -250,7 +252,10 @@ func runIngest(cmd *cobra.Command, args []string) error {
 	)
 
 	// Scan filesystem
-	scanResult, err := scanner.Scan(ctx, cfg.Ingest.RootDir, logger)
+	detect := contentDetect || cfg.Ingest.ContentDetect
+	scanResult, err := scanner.Scan(ctx, cfg.Ingest.RootDir, logger, scanner.ScanOptions{
+		ContentDetect: detect,
+	})
 	if err != nil {
 		return fmt.Errorf("scanning: %w", err)
 	}
@@ -336,6 +341,13 @@ func runIngest(cmd *cobra.Command, args []string) error {
 				zap.String("sonnet", resolved.SonnetModel),
 				zap.Int("claude_models_found", len(resolved.AllModels)),
 			)
+		}
+	}
+
+	// Classify .txt files if content detection is enabled
+	if detect && len(scanResult.Snippets) > 0 {
+		if err := scanner.ClassifyPendingFiles(ctx, scanResult, provider, cfg.Claude.SonnetModel, logger); err != nil {
+			logger.Warn("content classification had errors", zap.Error(err))
 		}
 	}
 
