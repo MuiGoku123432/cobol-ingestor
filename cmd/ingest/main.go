@@ -346,7 +346,7 @@ func runIngest(cmd *cobra.Command, args []string) error {
 
 	// Classify .txt files if content detection is enabled
 	if detect && len(scanResult.Snippets) > 0 {
-		if err := scanner.ClassifyPendingFiles(ctx, scanResult, provider, cfg.Claude.SonnetModel, logger); err != nil {
+		if err := scanner.ClassifyPendingFiles(ctx, scanResult, provider, cfg.Claude.SonnetModel, logger, fileCache); err != nil {
 			logger.Warn("content classification had errors", zap.Error(err))
 		}
 	}
