@@ -2,8 +2,12 @@ package scanner
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
+	"regexp"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"testing"
 
 	"cobol-ingestor/internal/graph"
@@ -73,13 +77,16 @@ func TestClassifyByContent_Empty(t *testing.T) {
 	assert.False(t, ok)
 }
 
-// mockProvider implements llm.Provider for testing.
+// mockProvider implements llm.Provider for testing. Thread-safe.
 type mockProvider struct {
-	responses []string
+	mu        sync.Mutex
+	responses []string // sequential responses (for single-batch tests)
 	calls     int
 }
 
 func (m *mockProvider) Complete(_ context.Context, req llm.CompletionRequest) (*llm.CompletionResponse, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
 	if m.calls >= len(m.responses) {
 		return nil, fmt.Errorf("no more mock responses")
 	}
@@ -88,9 +95,33 @@ func (m *mockProvider) Complete(_ context.Context, req llm.CompletionRequest) (*
 	return &llm.CompletionResponse{Content: resp}, nil
 }
 
-func (m *mockProvider) Name() string                              { return "mock" }
-func (m *mockProvider) HealthCheck(_ context.Context) error       { return nil }
-func (m *mockProvider) Close() error                              { return nil }
+func (m *mockProvider) Name() string                        { return "mock" }
+func (m *mockProvider) HealthCheck(_ context.Context) error { return nil }
+func (m *mockProvider) Close() error                        { return nil }
+
+// dynamicMockProvider responds based on the prompt content — classifies everything as COBOL.
+type dynamicMockProvider struct {
+	callCount atomic.Int32
+}
+
+var fileHeaderRe = regexp.MustCompile(`=== File: (.+?) ===`)
+
+func (m *dynamicMockProvider) Complete(_ context.Context, req llm.CompletionRequest) (*llm.CompletionResponse, error) {
+	m.callCount.Add(1)
+	// Parse filenames from prompt and return COBOL for each
+	prompt := req.Messages[0].Content
+	matches := fileHeaderRe.FindAllStringSubmatch(prompt, -1)
+	var items []llmClassification
+	for _, match := range matches {
+		items = append(items, llmClassification{File: match[1], Type: "COBOL"})
+	}
+	body, _ := json.Marshal(items)
+	return &llm.CompletionResponse{Content: string(body)}, nil
+}
+
+func (m *dynamicMockProvider) Name() string                        { return "dynamic-mock" }
+func (m *dynamicMockProvider) HealthCheck(_ context.Context) error { return nil }
+func (m *dynamicMockProvider) Close() error                        { return nil }
 
 func TestClassifyPendingFiles_Heuristic(t *testing.T) {
 	logger := zap.NewNop()
@@ -208,7 +239,6 @@ func TestClassifyPendingFiles_Batching(t *testing.T) {
 	// Create 25 pending files -> should result in ceil(25/12) = 3 batches
 	var files []graph.FileInfo
 	snippets := make(map[string][]string)
-	var responses []string
 
 	for i := 0; i < 25; i++ {
 		path := fmt.Sprintf("/tmp/FILE%02d.txt", i)
@@ -216,27 +246,42 @@ func TestClassifyPendingFiles_Batching(t *testing.T) {
 		snippets[path] = []string{"IDENTIFICATION DIVISION.", "PROGRAM-ID. TEST."}
 	}
 
-	// Build expected responses for each batch
-	for batchStart := 0; batchStart < 25; batchStart += classifyBatchSize {
-		batchEnd := batchStart + classifyBatchSize
-		if batchEnd > 25 {
-			batchEnd = 25
-		}
-		var items []string
-		for i := batchStart; i < batchEnd; i++ {
-			items = append(items, fmt.Sprintf(`{"file": "FILE%02d.txt", "type": "COBOL"}`, i))
-		}
-		responses = append(responses, "["+strings.Join(items, ",")+"]")
-	}
-
 	result := &ScanResult{Files: files, Snippets: snippets}
-	mock := &mockProvider{responses: responses}
+	mock := &dynamicMockProvider{}
 
 	err := ClassifyPendingFiles(context.Background(), result, mock, "test-model", logger)
 	require.NoError(t, err)
 
-	assert.Equal(t, 3, mock.calls, "should have made 3 batch calls")
+	assert.Equal(t, int32(3), mock.callCount.Load(), "should have made 3 batch calls")
 	assert.Len(t, result.Files, 25, "all files should remain (classified as COBOL)")
+	for _, f := range result.Files {
+		assert.Equal(t, graph.FileTypeCOBOL, f.Type)
+	}
+}
+
+func TestClassifyPendingFiles_Batching_Large(t *testing.T) {
+	logger := zap.NewNop()
+
+	// Simulate a large codebase: 500 pending .txt files
+	const n = 500
+	var files []graph.FileInfo
+	snippets := make(map[string][]string, n)
+
+	for i := 0; i < n; i++ {
+		path := fmt.Sprintf("/tmp/PROG%04d.txt", i)
+		files = append(files, graph.FileInfo{Path: path, Type: graph.FileTypePending})
+		snippets[path] = []string{"IDENTIFICATION DIVISION.", "PROGRAM-ID. TEST."}
+	}
+
+	result := &ScanResult{Files: files, Snippets: snippets}
+	mock := &dynamicMockProvider{}
+
+	err := ClassifyPendingFiles(context.Background(), result, mock, "test-model", logger)
+	require.NoError(t, err)
+
+	expectedBatches := (n + classifyBatchSize - 1) / classifyBatchSize // ceil division
+	assert.Equal(t, int32(expectedBatches), mock.callCount.Load())
+	assert.Len(t, result.Files, n)
 	for _, f := range result.Files {
 		assert.Equal(t, graph.FileTypeCOBOL, f.Type)
 	}
@@ -279,6 +324,32 @@ func TestClassifyPendingFiles_LLM_UnknownRemoved(t *testing.T) {
 	assert.Empty(t, result.Files, "UNKNOWN files should be removed")
 }
 
+func TestClassifyPendingFiles_LLM_FallbackOnError(t *testing.T) {
+	logger := zap.NewNop()
+
+	result := &ScanResult{
+		Files: []graph.FileInfo{
+			{Path: "/tmp/COBOL1.txt", Type: graph.FileTypePending},
+		},
+		Snippets: map[string][]string{
+			"/tmp/COBOL1.txt": {
+				"       IDENTIFICATION DIVISION.",
+				"       PROGRAM-ID. TEST.",
+				"       PROCEDURE DIVISION.",
+			},
+		},
+	}
+
+	// Provider returns an error -> should fall back to heuristic
+	mock := &mockProvider{responses: nil} // will error immediately
+
+	err := ClassifyPendingFiles(context.Background(), result, mock, "test-model", logger)
+	assert.Error(t, err, "should report the LLM error")
+	// But the file should still be classified via heuristic fallback
+	assert.Len(t, result.Files, 1)
+	assert.Equal(t, graph.FileTypeCOBOL, result.Files[0].Type)
+}
+
 func TestMapClassificationType(t *testing.T) {
 	assert.Equal(t, graph.FileTypeCOBOL, mapClassificationType("COBOL"))
 	assert.Equal(t, graph.FileTypeCOBOL, mapClassificationType("cobol"))
@@ -287,4 +358,43 @@ func TestMapClassificationType(t *testing.T) {
 	assert.Equal(t, graph.FileTypeJCL, mapClassificationType("JCL"))
 	assert.Equal(t, graph.FileType("UNKNOWN"), mapClassificationType("UNKNOWN"))
 	assert.Equal(t, graph.FileType("UNKNOWN"), mapClassificationType("something-else"))
+}
+
+func TestParseClassifyResponse(t *testing.T) {
+	tests := []struct {
+		name    string
+		input   string
+		wantLen int
+		wantErr bool
+	}{
+		{"plain json", `[{"file":"a.txt","type":"COBOL"}]`, 1, false},
+		{"markdown fence", "```json\n[{\"file\":\"a.txt\",\"type\":\"JCL\"}]\n```", 1, false},
+		{"empty array", "[]", 0, false},
+		{"invalid json", "not json", 0, true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			result, err := parseClassifyResponse(tt.input)
+			if tt.wantErr {
+				assert.Error(t, err)
+			} else {
+				require.NoError(t, err)
+				assert.Len(t, result, tt.wantLen)
+			}
+		})
+	}
+}
+
+func TestBuildClassifyPrompt(t *testing.T) {
+	batch := []string{"/tmp/A.txt", "/tmp/B.txt"}
+	snippets := map[string][]string{
+		"/tmp/A.txt": {"line1", "line2"},
+		"/tmp/B.txt": {"line3"},
+	}
+	prompt := buildClassifyPrompt(batch, snippets)
+	assert.Contains(t, prompt, "=== File: A.txt ===")
+	assert.Contains(t, prompt, "=== File: B.txt ===")
+	assert.Contains(t, prompt, "line1")
+	assert.Contains(t, prompt, "line3")
+	assert.True(t, strings.HasPrefix(prompt, "Classify"))
 }
