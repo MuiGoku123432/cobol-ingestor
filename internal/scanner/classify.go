@@ -8,6 +8,7 @@ import (
 	"regexp"
 	"sort"
 	"strings"
+	"sync"
 
 	"cobol-ingestor/internal/graph"
 	"cobol-ingestor/internal/llm"
@@ -17,6 +18,9 @@ import (
 
 // classifyBatchSize is the number of files sent per LLM classification call.
 const classifyBatchSize = 12
+
+// classifyMaxWorkers is the max concurrent LLM classification requests.
+const classifyMaxWorkers = 5
 
 // ClassifyPendingFiles resolves FileTypePending entries in result using LLM
 // classification (when provider is non-nil) or heuristic fallback.
@@ -85,116 +89,172 @@ func classifyWithLLM(ctx context.Context, result *ScanResult, pathIdx map[string
 	}
 	sort.Strings(paths)
 
-	var firstErr error
-	for batchStart := 0; batchStart < len(paths); batchStart += classifyBatchSize {
-		batchEnd := batchStart + classifyBatchSize
-		if batchEnd > len(paths) {
-			batchEnd = len(paths)
+	// Build batches with pre-copied snippets (avoids concurrent map reads)
+	type classifyBatch struct {
+		paths    []string
+		snippets map[string][]string
+	}
+	var batches []classifyBatch
+	for i := 0; i < len(paths); i += classifyBatchSize {
+		end := i + classifyBatchSize
+		if end > len(paths) {
+			end = len(paths)
 		}
-		batch := paths[batchStart:batchEnd]
-
-		// Build prompt
-		var sb strings.Builder
-		sb.WriteString("Classify each file snippet as one of: COBOL, COPYBOOK, JCL, or UNKNOWN.\n\n")
-		sb.WriteString("Rules:\n")
-		sb.WriteString("- COBOL: Complete COBOL programs with IDENTIFICATION/PROCEDURE DIVISION\n")
-		sb.WriteString("- COPYBOOK: COBOL data definitions or code fragments meant to be INCLUDEd (no PROGRAM-ID)\n")
-		sb.WriteString("- JCL: IBM Job Control Language (lines starting with //, JOB/EXEC/DD statements)\n")
-		sb.WriteString("- UNKNOWN: Not mainframe source code\n\n")
-		sb.WriteString("Respond with ONLY a JSON array: [{\"file\": \"filename\", \"type\": \"COBOL|COPYBOOK|JCL|UNKNOWN\"}]\n\n")
-
-		for _, p := range batch {
-			name := filepath.Base(p)
-			sb.WriteString(fmt.Sprintf("=== File: %s ===\n", name))
-			if snippet, ok := result.Snippets[p]; ok {
-				for _, line := range snippet {
-					sb.WriteString(line)
-					sb.WriteString("\n")
-				}
-			}
-			sb.WriteString("\n")
+		batchPaths := paths[i:end]
+		batchSnippets := make(map[string][]string, len(batchPaths))
+		for _, p := range batchPaths {
+			batchSnippets[p] = result.Snippets[p]
 		}
-
-		resp, err := provider.Complete(ctx, llm.CompletionRequest{
-			Model: model,
-			Messages: []llm.Message{
-				{Role: llm.RoleUser, Content: sb.String()},
-			},
-			MaxTokens:   1024,
-			Temperature: 0,
-		})
-		if err != nil {
-			logger.Error("LLM classification batch failed, falling back to heuristic",
-				zap.Int("batch_start", batchStart),
-				zap.Error(err),
-			)
-			if firstErr == nil {
-				firstErr = err
-			}
-			// Fall back to heuristic for this batch
-			batchPathIdx := make(map[string]int, len(batch))
-			for _, p := range batch {
-				batchPathIdx[p] = pathIdx[p]
-			}
-			classifyWithHeuristic(result, batchPathIdx, logger)
-			continue
-		}
-
-		// Parse JSON from response (strip markdown fences if present)
-		body := strings.TrimSpace(resp.Content)
-		if strings.HasPrefix(body, "```") {
-			if idx := strings.Index(body[3:], "\n"); idx >= 0 {
-				body = body[3+idx+1:]
-			}
-			if strings.HasSuffix(body, "```") {
-				body = body[:len(body)-3]
-			}
-			body = strings.TrimSpace(body)
-		}
-
-		var classifications []llmClassification
-		if err := json.Unmarshal([]byte(body), &classifications); err != nil {
-			logger.Error("failed to parse LLM classification response, falling back to heuristic",
-				zap.Error(err),
-				zap.String("response", resp.Content),
-			)
-			if firstErr == nil {
-				firstErr = fmt.Errorf("parsing LLM response: %w", err)
-			}
-			batchPathIdx := make(map[string]int, len(batch))
-			for _, p := range batch {
-				batchPathIdx[p] = pathIdx[p]
-			}
-			classifyWithHeuristic(result, batchPathIdx, logger)
-			continue
-		}
-
-		// Map filename back to full path
-		nameToPath := make(map[string]string, len(batch))
-		for _, p := range batch {
-			nameToPath[filepath.Base(p)] = p
-		}
-
-		for _, c := range classifications {
-			p, ok := nameToPath[c.File]
-			if !ok {
-				continue
-			}
-			idx, ok := pathIdx[p]
-			if !ok {
-				continue
-			}
-			ft := mapClassificationType(c.Type)
-			result.Files[idx].Type = ft
-			delete(result.Snippets, p)
-			logger.Info("LLM classified file",
-				zap.String("file", c.File),
-				zap.String("type", string(ft)),
-			)
-		}
+		batches = append(batches, classifyBatch{paths: batchPaths, snippets: batchSnippets})
 	}
 
+	logger.Info("LLM classification starting",
+		zap.Int("files", len(paths)),
+		zap.Int("batches", len(batches)),
+		zap.Int("workers", classifyMaxWorkers),
+	)
+
+	// Mutex protects result.Files and result.Snippets during concurrent updates
+	var mu sync.Mutex
+	var firstErr error
+	var errOnce sync.Once
+
+	sem := make(chan struct{}, classifyMaxWorkers)
+	var wg sync.WaitGroup
+
+	for batchIdx, b := range batches {
+		wg.Add(1)
+		go func(batchIdx int, batch []string, batchSnippets map[string][]string) {
+			defer wg.Done()
+
+			sem <- struct{}{}
+			defer func() { <-sem }()
+
+			if ctx.Err() != nil {
+				return
+			}
+
+			// Build prompt using pre-copied snippets
+			prompt := buildClassifyPrompt(batch, batchSnippets)
+
+			resp, err := provider.Complete(ctx, llm.CompletionRequest{
+				Model: model,
+				Messages: []llm.Message{
+					{Role: llm.RoleUser, Content: prompt},
+				},
+				MaxTokens:   1024,
+				Temperature: 0,
+			})
+			if err != nil {
+				logger.Error("LLM classification batch failed, falling back to heuristic",
+					zap.Int("batch", batchIdx),
+					zap.Error(err),
+				)
+				errOnce.Do(func() { firstErr = err })
+				batchPathIdx := make(map[string]int, len(batch))
+				for _, p := range batch {
+					batchPathIdx[p] = pathIdx[p]
+				}
+				mu.Lock()
+				classifyWithHeuristic(result, batchPathIdx, logger)
+				mu.Unlock()
+				return
+			}
+
+			// Parse JSON from response
+			classifications, parseErr := parseClassifyResponse(resp.Content)
+			if parseErr != nil {
+				logger.Error("failed to parse LLM classification response, falling back to heuristic",
+					zap.Int("batch", batchIdx),
+					zap.Error(parseErr),
+					zap.String("response", resp.Content),
+				)
+				errOnce.Do(func() { firstErr = fmt.Errorf("parsing LLM response: %w", parseErr) })
+				batchPathIdx := make(map[string]int, len(batch))
+				for _, p := range batch {
+					batchPathIdx[p] = pathIdx[p]
+				}
+				mu.Lock()
+				classifyWithHeuristic(result, batchPathIdx, logger)
+				mu.Unlock()
+				return
+			}
+
+			// Map filename back to full path
+			nameToPath := make(map[string]string, len(batch))
+			for _, p := range batch {
+				nameToPath[filepath.Base(p)] = p
+			}
+
+			mu.Lock()
+			for _, c := range classifications {
+				p, ok := nameToPath[c.File]
+				if !ok {
+					continue
+				}
+				idx, ok := pathIdx[p]
+				if !ok {
+					continue
+				}
+				ft := mapClassificationType(c.Type)
+				result.Files[idx].Type = ft
+				delete(result.Snippets, p)
+				logger.Info("LLM classified file",
+					zap.String("file", c.File),
+					zap.String("type", string(ft)),
+				)
+			}
+			mu.Unlock()
+		}(batchIdx, b.paths, b.snippets)
+	}
+
+	wg.Wait()
 	return firstErr
+}
+
+// buildClassifyPrompt builds the classification prompt for a batch of files.
+func buildClassifyPrompt(batch []string, snippets map[string][]string) string {
+	var sb strings.Builder
+	sb.WriteString("Classify each file snippet as one of: COBOL, COPYBOOK, JCL, or UNKNOWN.\n\n")
+	sb.WriteString("Rules:\n")
+	sb.WriteString("- COBOL: Complete COBOL programs with IDENTIFICATION/PROCEDURE DIVISION\n")
+	sb.WriteString("- COPYBOOK: COBOL data definitions or code fragments meant to be INCLUDEd (no PROGRAM-ID)\n")
+	sb.WriteString("- JCL: IBM Job Control Language (lines starting with //, JOB/EXEC/DD statements)\n")
+	sb.WriteString("- UNKNOWN: Not mainframe source code\n\n")
+	sb.WriteString("Respond with ONLY a JSON array: [{\"file\": \"filename\", \"type\": \"COBOL|COPYBOOK|JCL|UNKNOWN\"}]\n\n")
+
+	for _, p := range batch {
+		name := filepath.Base(p)
+		sb.WriteString(fmt.Sprintf("=== File: %s ===\n", name))
+		if snippet, ok := snippets[p]; ok {
+			for _, line := range snippet {
+				sb.WriteString(line)
+				sb.WriteString("\n")
+			}
+		}
+		sb.WriteString("\n")
+	}
+	return sb.String()
+}
+
+// parseClassifyResponse extracts classifications from the LLM response body.
+func parseClassifyResponse(content string) ([]llmClassification, error) {
+	body := strings.TrimSpace(content)
+	if strings.HasPrefix(body, "```") {
+		if idx := strings.Index(body[3:], "\n"); idx >= 0 {
+			body = body[3+idx+1:]
+		}
+		if strings.HasSuffix(body, "```") {
+			body = body[:len(body)-3]
+		}
+		body = strings.TrimSpace(body)
+	}
+
+	var classifications []llmClassification
+	if err := json.Unmarshal([]byte(body), &classifications); err != nil {
+		return nil, err
+	}
+	return classifications, nil
 }
 
 func classifyWithHeuristic(result *ScanResult, pathIdx map[string]int, logger *zap.Logger) {
