@@ -48,6 +48,20 @@ func New(dbPath string) (*Cache, error) {
 		return nil, fmt.Errorf("creating pass_cache table: %w", err)
 	}
 
+	// Classification cache table
+	if _, err := db.Exec(`
+		CREATE TABLE IF NOT EXISTS classify_cache (
+			file_path      TEXT PRIMARY KEY,
+			content_hash   TEXT NOT NULL,
+			file_type      TEXT NOT NULL,
+			classifier     TEXT NOT NULL,
+			classified_at  DATETIME NOT NULL
+		)
+	`); err != nil {
+		db.Close()
+		return nil, fmt.Errorf("creating classify_cache table: %w", err)
+	}
+
 	return &Cache{db: db}, nil
 }
 
@@ -219,6 +233,102 @@ func (c *Cache) BatchIsChangedForPass(pathHashes map[string]string, pass int) ([
 	}
 
 	return changed, nil
+}
+
+// ClassifyResult holds a cached classification outcome.
+type ClassifyResult struct {
+	FileType   string
+	Classifier string // "LLM" or "HEURISTIC"
+}
+
+// ClassifyEntry is an input to BatchMarkClassified.
+type ClassifyEntry struct {
+	Path, Hash, FileType, Classifier string
+}
+
+// BatchLookupClassification returns cached classifications where the hash still matches.
+// hits contains entries whose hash is current; misses lists paths that are absent or stale.
+func (c *Cache) BatchLookupClassification(pathHashes map[string]string) (hits map[string]ClassifyResult, misses []string, err error) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	hits = make(map[string]ClassifyResult, len(pathHashes))
+	if len(pathHashes) == 0 {
+		return hits, nil, nil
+	}
+
+	paths := make([]string, 0, len(pathHashes))
+	for p := range pathHashes {
+		paths = append(paths, p)
+	}
+
+	placeholders := make([]string, len(paths))
+	args := make([]any, len(paths))
+	for i, p := range paths {
+		placeholders[i] = "?"
+		args[i] = p
+	}
+
+	query := "SELECT file_path, content_hash, file_type, classifier FROM classify_cache WHERE file_path IN (" +
+		strings.Join(placeholders, ",") + ")"
+	rows, err := c.db.Query(query, args...)
+	if err != nil {
+		return nil, nil, fmt.Errorf("batch classify lookup: %w", err)
+	}
+	defer rows.Close()
+
+	cached := make(map[string]struct {
+		hash, fileType, classifier string
+	})
+	for rows.Next() {
+		var path, hash, ft, cls string
+		if err := rows.Scan(&path, &hash, &ft, &cls); err != nil {
+			return nil, nil, fmt.Errorf("scanning classify row: %w", err)
+		}
+		cached[path] = struct{ hash, fileType, classifier string }{hash, ft, cls}
+	}
+
+	for _, p := range paths {
+		entry, ok := cached[p]
+		if !ok || entry.hash != pathHashes[p] {
+			misses = append(misses, p)
+		} else {
+			hits[p] = ClassifyResult{FileType: entry.fileType, Classifier: entry.classifier}
+		}
+	}
+
+	return hits, misses, nil
+}
+
+// BatchMarkClassified upserts classification results into the cache.
+func (c *Cache) BatchMarkClassified(entries []ClassifyEntry) error {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	if len(entries) == 0 {
+		return nil
+	}
+
+	tx, err := c.db.Begin()
+	if err != nil {
+		return fmt.Errorf("begin classify tx: %w", err)
+	}
+	defer tx.Rollback() //nolint:errcheck
+
+	stmt, err := tx.Prepare("INSERT OR REPLACE INTO classify_cache (file_path, content_hash, file_type, classifier, classified_at) VALUES (?, ?, ?, ?, ?)")
+	if err != nil {
+		return fmt.Errorf("prepare classify insert: %w", err)
+	}
+	defer stmt.Close()
+
+	now := time.Now().UTC()
+	for _, e := range entries {
+		if _, err := stmt.Exec(e.Path, e.Hash, e.FileType, e.Classifier, now); err != nil {
+			return fmt.Errorf("inserting classify entry: %w", err)
+		}
+	}
+
+	return tx.Commit()
 }
 
 // Close closes the underlying database connection.

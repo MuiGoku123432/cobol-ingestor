@@ -4,12 +4,14 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"path/filepath"
 	"regexp"
 	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
 
+	"cobol-ingestor/internal/cache"
 	"cobol-ingestor/internal/graph"
 	"cobol-ingestor/internal/llm"
 
@@ -31,6 +33,31 @@ func TestClassifyByContent_COBOL(t *testing.T) {
 	ft, ok := classifyByContent(lines)
 	assert.True(t, ok)
 	assert.Equal(t, graph.FileTypeCOBOL, ft)
+}
+
+func TestClassifyByContent_COBOL_NoProgramID(t *testing.T) {
+	// 3+ division headers but no PROGRAM-ID — should still classify as COBOL
+	lines := []string{
+		"       ENVIRONMENT DIVISION.",
+		"       DATA DIVISION.",
+		"       WORKING-STORAGE SECTION.",
+		"       PROCEDURE DIVISION.",
+		"           PERFORM MAIN-LOGIC.",
+		"           STOP RUN.",
+	}
+	ft, ok := classifyByContent(lines)
+	assert.True(t, ok)
+	assert.Equal(t, graph.FileTypeCOBOL, ft)
+}
+
+func TestClassifyByContent_WeakCOBOL(t *testing.T) {
+	// Only 1 COBOL signal, no PROGRAM-ID -> should fallback to COPYBOOK
+	lines := []string{
+		"       PERFORM SOME-PARAGRAPH.",
+	}
+	ft, ok := classifyByContent(lines)
+	assert.True(t, ok)
+	assert.Equal(t, graph.FileTypeCopybook, ft)
 }
 
 func TestClassifyByContent_JCL(t *testing.T) {
@@ -59,6 +86,17 @@ func TestClassifyByContent_Copybook(t *testing.T) {
 	assert.Equal(t, graph.FileTypeCopybook, ft)
 }
 
+func TestClassifyByContent_Copybook_Relaxed(t *testing.T) {
+	// Only 2 copybook signals (below old threshold of 3) — should now classify
+	lines := []string{
+		"01 WS-RECORD.",
+		"   05 WS-FIELD PIC X(10).",
+	}
+	ft, ok := classifyByContent(lines)
+	assert.True(t, ok)
+	assert.Equal(t, graph.FileTypeCopybook, ft)
+}
+
 func TestClassifyByContent_PlainText(t *testing.T) {
 	lines := []string{
 		"This is a plain text file.",
@@ -75,6 +113,58 @@ func TestClassifyByContent_Empty(t *testing.T) {
 
 	_, ok = classifyByContent([]string{})
 	assert.False(t, ok)
+}
+
+func TestIsLevelNumber_AllLevels(t *testing.T) {
+	// All valid COBOL levels: 01-49, 66, 77, 88
+	validLevels := []string{
+		"01 ", "02 ", "03 ", "04 ", "05 ", "06 ", "07 ", "08 ", "09 ",
+		"10 ", "11 ", "12 ", "13 ", "14 ", "15 ", "20 ", "25 ",
+		"30 ", "35 ", "40 ", "45 ", "49 ",
+		"66 ", "77 ", "88 ",
+	}
+	for _, lvl := range validLevels {
+		assert.True(t, isLevelNumber(lvl+"WS-FIELD"), "expected level %q to match", lvl)
+	}
+
+	// Invalid levels
+	invalidLevels := []string{"00 ", "50 ", "51 ", "67 ", "78 ", "89 ", "99 "}
+	for _, lvl := range invalidLevels {
+		assert.False(t, isLevelNumber(lvl+"WS-FIELD"), "expected level %q to NOT match", lvl)
+	}
+}
+
+func TestTrimCommentHeader(t *testing.T) {
+	lines := []string{
+		"      * Copyright 2024 ACME Corp",
+		"      * All rights reserved.",
+		"      *",
+		"",
+		"       IDENTIFICATION DIVISION.",
+		"       PROGRAM-ID. TEST.",
+	}
+	trimmed := trimCommentHeader(lines)
+	require.Len(t, trimmed, 2)
+	assert.Contains(t, trimmed[0], "IDENTIFICATION DIVISION")
+}
+
+func TestTrimCommentHeader_AllComments(t *testing.T) {
+	lines := []string{
+		"      * Only comments",
+		"      * Nothing else",
+	}
+	trimmed := trimCommentHeader(lines)
+	// When all lines are comments, return original so LLM has something
+	assert.Equal(t, lines, trimmed)
+}
+
+func TestTrimCommentHeader_NoComments(t *testing.T) {
+	lines := []string{
+		"       IDENTIFICATION DIVISION.",
+		"       PROGRAM-ID. TEST.",
+	}
+	trimmed := trimCommentHeader(lines)
+	assert.Equal(t, lines, trimmed)
 }
 
 // mockProvider implements llm.Provider for testing. Thread-safe.
@@ -108,8 +198,14 @@ var fileHeaderRe = regexp.MustCompile(`=== File: (.+?) ===`)
 
 func (m *dynamicMockProvider) Complete(_ context.Context, req llm.CompletionRequest) (*llm.CompletionResponse, error) {
 	m.callCount.Add(1)
-	// Parse filenames from prompt and return COBOL for each
-	prompt := req.Messages[0].Content
+	// Parse filenames from prompt (may be in user message or second message)
+	var prompt string
+	for _, msg := range req.Messages {
+		if msg.Role == llm.RoleUser {
+			prompt = msg.Content
+			break
+		}
+	}
 	matches := fileHeaderRe.FindAllStringSubmatch(prompt, -1)
 	var items []llmClassification
 	for _, match := range matches {
@@ -158,7 +254,7 @@ func TestClassifyPendingFiles_Heuristic(t *testing.T) {
 		},
 	}
 
-	err := ClassifyPendingFiles(context.Background(), result, nil, "", logger)
+	err := ClassifyPendingFiles(context.Background(), result, nil, "", logger, nil)
 	require.NoError(t, err)
 
 	// README.txt should be removed (UNKNOWN), COBOL/JCL/Copybook should be classified
@@ -197,7 +293,7 @@ func TestClassifyPendingFiles_LLM(t *testing.T) {
 		},
 	}
 
-	err := ClassifyPendingFiles(context.Background(), result, mock, "test-model", logger)
+	err := ClassifyPendingFiles(context.Background(), result, mock, "test-model", logger, nil)
 	require.NoError(t, err)
 
 	assert.Len(t, result.Files, 2)
@@ -228,7 +324,7 @@ func TestClassifyPendingFiles_LLM_MarkdownFence(t *testing.T) {
 		},
 	}
 
-	err := ClassifyPendingFiles(context.Background(), result, mock, "test-model", logger)
+	err := ClassifyPendingFiles(context.Background(), result, mock, "test-model", logger, nil)
 	require.NoError(t, err)
 	assert.Equal(t, graph.FileTypeCOBOL, result.Files[0].Type)
 }
@@ -236,7 +332,7 @@ func TestClassifyPendingFiles_LLM_MarkdownFence(t *testing.T) {
 func TestClassifyPendingFiles_Batching(t *testing.T) {
 	logger := zap.NewNop()
 
-	// Create 25 pending files -> should result in ceil(25/12) = 3 batches
+	// Create 25 pending files -> should result in ceil(25/8) = 4 batches
 	var files []graph.FileInfo
 	snippets := make(map[string][]string)
 
@@ -249,10 +345,10 @@ func TestClassifyPendingFiles_Batching(t *testing.T) {
 	result := &ScanResult{Files: files, Snippets: snippets}
 	mock := &dynamicMockProvider{}
 
-	err := ClassifyPendingFiles(context.Background(), result, mock, "test-model", logger)
+	err := ClassifyPendingFiles(context.Background(), result, mock, "test-model", logger, nil)
 	require.NoError(t, err)
 
-	assert.Equal(t, int32(3), mock.callCount.Load(), "should have made 3 batch calls")
+	assert.Equal(t, int32(4), mock.callCount.Load(), "should have made 4 batch calls")
 	assert.Len(t, result.Files, 25, "all files should remain (classified as COBOL)")
 	for _, f := range result.Files {
 		assert.Equal(t, graph.FileTypeCOBOL, f.Type)
@@ -276,7 +372,7 @@ func TestClassifyPendingFiles_Batching_Large(t *testing.T) {
 	result := &ScanResult{Files: files, Snippets: snippets}
 	mock := &dynamicMockProvider{}
 
-	err := ClassifyPendingFiles(context.Background(), result, mock, "test-model", logger)
+	err := ClassifyPendingFiles(context.Background(), result, mock, "test-model", logger, nil)
 	require.NoError(t, err)
 
 	expectedBatches := (n + classifyBatchSize - 1) / classifyBatchSize // ceil division
@@ -296,7 +392,7 @@ func TestClassifyPendingFiles_NoPending(t *testing.T) {
 		},
 	}
 
-	err := ClassifyPendingFiles(context.Background(), result, nil, "", logger)
+	err := ClassifyPendingFiles(context.Background(), result, nil, "", logger, nil)
 	require.NoError(t, err)
 	assert.Len(t, result.Files, 1)
 }
@@ -319,7 +415,7 @@ func TestClassifyPendingFiles_LLM_UnknownRemoved(t *testing.T) {
 		},
 	}
 
-	err := ClassifyPendingFiles(context.Background(), result, mock, "test-model", logger)
+	err := ClassifyPendingFiles(context.Background(), result, mock, "test-model", logger, nil)
 	require.NoError(t, err)
 	assert.Empty(t, result.Files, "UNKNOWN files should be removed")
 }
@@ -343,7 +439,7 @@ func TestClassifyPendingFiles_LLM_FallbackOnError(t *testing.T) {
 	// Provider returns an error -> should fall back to heuristic
 	mock := &mockProvider{responses: nil} // will error immediately
 
-	err := ClassifyPendingFiles(context.Background(), result, mock, "test-model", logger)
+	err := ClassifyPendingFiles(context.Background(), result, mock, "test-model", logger, nil)
 	assert.Error(t, err, "should report the LLM error")
 	// But the file should still be classified via heuristic fallback
 	assert.Len(t, result.Files, 1)
@@ -357,7 +453,15 @@ func TestMapClassificationType(t *testing.T) {
 	assert.Equal(t, graph.FileTypeCopybook, mapClassificationType("COPYBOOK"))
 	assert.Equal(t, graph.FileTypeJCL, mapClassificationType("JCL"))
 	assert.Equal(t, graph.FileType("UNKNOWN"), mapClassificationType("UNKNOWN"))
-	assert.Equal(t, graph.FileType("UNKNOWN"), mapClassificationType("something-else"))
+	// Open-ended: unknown types pass through as uppercase
+	assert.Equal(t, graph.FileType("BMS"), mapClassificationType("BMS"))
+	assert.Equal(t, graph.FileType("BMS"), mapClassificationType("bms"))
+	assert.Equal(t, graph.FileType("DCLGEN"), mapClassificationType("DCLGEN"))
+	assert.Equal(t, graph.FileType("ASM"), mapClassificationType("asm"))
+	assert.Equal(t, graph.FileType("REXX"), mapClassificationType("rexx"))
+	assert.Equal(t, graph.FileType("SOMETHING-ELSE"), mapClassificationType("something-else"))
+	assert.Equal(t, graph.FileType("UNKNOWN"), mapClassificationType(""))
+	assert.Equal(t, graph.FileType("UNKNOWN"), mapClassificationType("  "))
 }
 
 func TestParseClassifyResponse(t *testing.T) {
@@ -396,5 +500,166 @@ func TestBuildClassifyPrompt(t *testing.T) {
 	assert.Contains(t, prompt, "=== File: B.txt ===")
 	assert.Contains(t, prompt, "line1")
 	assert.Contains(t, prompt, "line3")
-	assert.True(t, strings.HasPrefix(prompt, "Classify"))
+	assert.Contains(t, prompt, "mainframe source type")
+	assert.Contains(t, prompt, "Tiebreaker")
+	assert.Contains(t, prompt, "BMS")
+	assert.Contains(t, prompt, "DCLGEN")
+	assert.True(t, strings.HasPrefix(prompt, "Classify each file snippet"))
+}
+
+// panicProvider panics if Complete is called — used to verify cache hits avoid LLM calls.
+type panicProvider struct{}
+
+func (p *panicProvider) Complete(_ context.Context, _ llm.CompletionRequest) (*llm.CompletionResponse, error) {
+	panic("LLM should not be called when cache hits cover all files")
+}
+func (p *panicProvider) Name() string                        { return "panic" }
+func (p *panicProvider) HealthCheck(_ context.Context) error { return nil }
+func (p *panicProvider) Close() error                        { return nil }
+
+func TestClassifyPendingFiles_CacheHit(t *testing.T) {
+	logger := zap.NewNop()
+	dbPath := filepath.Join(t.TempDir(), "classify_hit.sqlite")
+	c, err := cache.New(dbPath)
+	require.NoError(t, err)
+	defer c.Close()
+
+	// Pre-populate cache
+	require.NoError(t, c.BatchMarkClassified([]cache.ClassifyEntry{
+		{Path: "/tmp/FILE1.txt", Hash: "hash1", FileType: "COBOL", Classifier: "LLM"},
+		{Path: "/tmp/FILE2.txt", Hash: "hash2", FileType: "JCL", Classifier: "LLM"},
+	}))
+
+	result := &ScanResult{
+		Files: []graph.FileInfo{
+			{Path: "/tmp/FILE1.txt", Type: graph.FileTypePending, Hash: "hash1"},
+			{Path: "/tmp/FILE2.txt", Type: graph.FileTypePending, Hash: "hash2"},
+		},
+		Snippets: map[string][]string{
+			"/tmp/FILE1.txt": {"IDENTIFICATION DIVISION."},
+			"/tmp/FILE2.txt": {"//JOB1 JOB"},
+		},
+	}
+
+	// panicProvider ensures LLM is never called
+	err = ClassifyPendingFiles(context.Background(), result, &panicProvider{}, "test-model", logger, c)
+	require.NoError(t, err)
+
+	assert.Len(t, result.Files, 2)
+	typeMap := map[string]graph.FileType{}
+	for _, f := range result.Files {
+		typeMap[f.Path] = f.Type
+	}
+	assert.Equal(t, graph.FileTypeCOBOL, typeMap["/tmp/FILE1.txt"])
+	assert.Equal(t, graph.FileTypeJCL, typeMap["/tmp/FILE2.txt"])
+}
+
+func TestClassifyPendingFiles_CacheMiss_ThenPopulated(t *testing.T) {
+	logger := zap.NewNop()
+	dbPath := filepath.Join(t.TempDir(), "classify_miss.sqlite")
+	c, err := cache.New(dbPath)
+	require.NoError(t, err)
+	defer c.Close()
+
+	result := &ScanResult{
+		Files: []graph.FileInfo{
+			{Path: "/tmp/FILE1.txt", Type: graph.FileTypePending, Hash: "hash1"},
+		},
+		Snippets: map[string][]string{
+			"/tmp/FILE1.txt": {"IDENTIFICATION DIVISION."},
+		},
+	}
+
+	mock := &mockProvider{
+		responses: []string{
+			`[{"file": "FILE1.txt", "type": "COBOL"}]`,
+		},
+	}
+
+	err = ClassifyPendingFiles(context.Background(), result, mock, "test-model", logger, c)
+	require.NoError(t, err)
+
+	assert.Len(t, result.Files, 1)
+	assert.Equal(t, graph.FileTypeCOBOL, result.Files[0].Type)
+
+	// Verify cache was populated
+	hits, misses, err := c.BatchLookupClassification(map[string]string{"/tmp/FILE1.txt": "hash1"})
+	require.NoError(t, err)
+	assert.Len(t, hits, 1)
+	assert.Empty(t, misses)
+	assert.Equal(t, "COBOL", hits["/tmp/FILE1.txt"].FileType)
+	assert.Equal(t, "LLM", hits["/tmp/FILE1.txt"].Classifier)
+}
+
+func TestClassifyPendingFiles_CacheStale(t *testing.T) {
+	logger := zap.NewNop()
+	dbPath := filepath.Join(t.TempDir(), "classify_stale.sqlite")
+	c, err := cache.New(dbPath)
+	require.NoError(t, err)
+	defer c.Close()
+
+	// Pre-populate cache with old hash
+	require.NoError(t, c.BatchMarkClassified([]cache.ClassifyEntry{
+		{Path: "/tmp/FILE1.txt", Hash: "old-hash", FileType: "JCL", Classifier: "LLM"},
+	}))
+
+	result := &ScanResult{
+		Files: []graph.FileInfo{
+			{Path: "/tmp/FILE1.txt", Type: graph.FileTypePending, Hash: "new-hash"},
+		},
+		Snippets: map[string][]string{
+			"/tmp/FILE1.txt": {"IDENTIFICATION DIVISION."},
+		},
+	}
+
+	mock := &mockProvider{
+		responses: []string{
+			`[{"file": "FILE1.txt", "type": "COBOL"}]`,
+		},
+	}
+
+	err = ClassifyPendingFiles(context.Background(), result, mock, "test-model", logger, c)
+	require.NoError(t, err)
+
+	assert.Len(t, result.Files, 1)
+	assert.Equal(t, graph.FileTypeCOBOL, result.Files[0].Type)
+	assert.Equal(t, 1, mock.calls, "LLM should be called for stale cache entry")
+
+	// Verify cache was updated with new hash
+	hits, _, err := c.BatchLookupClassification(map[string]string{"/tmp/FILE1.txt": "new-hash"})
+	require.NoError(t, err)
+	assert.Equal(t, "COBOL", hits["/tmp/FILE1.txt"].FileType)
+}
+
+func TestClassifyPendingFiles_OpenEndedType(t *testing.T) {
+	logger := zap.NewNop()
+
+	result := &ScanResult{
+		Files: []graph.FileInfo{
+			{Path: "/tmp/MAPDEF.txt", Type: graph.FileTypePending, Hash: "hash1"},
+			{Path: "/tmp/ASMMOD.txt", Type: graph.FileTypePending, Hash: "hash2"},
+		},
+		Snippets: map[string][]string{
+			"/tmp/MAPDEF.txt": {"DFHMSD TYPE=DSECT"},
+			"/tmp/ASMMOD.txt": {"         CSECT"},
+		},
+	}
+
+	mock := &mockProvider{
+		responses: []string{
+			`[{"file": "MAPDEF.txt", "type": "BMS"}, {"file": "ASMMOD.txt", "type": "ASM"}]`,
+		},
+	}
+
+	err := ClassifyPendingFiles(context.Background(), result, mock, "test-model", logger, nil)
+	require.NoError(t, err)
+
+	// BMS and ASM should be kept (not filtered as UNKNOWN)
+	assert.Len(t, result.Files, 2)
+	typeMap := map[string]graph.FileType{}
+	for _, f := range result.Files {
+		typeMap[f.Path] = f.Type
+	}
+	assert.Equal(t, graph.FileType("BMS"), typeMap["/tmp/MAPDEF.txt"])
+	assert.Equal(t, graph.FileType("ASM"), typeMap["/tmp/ASMMOD.txt"])
 }

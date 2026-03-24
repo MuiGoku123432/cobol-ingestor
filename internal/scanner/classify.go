@@ -10,6 +10,7 @@ import (
 	"strings"
 	"sync"
 
+	"cobol-ingestor/internal/cache"
 	"cobol-ingestor/internal/graph"
 	"cobol-ingestor/internal/llm"
 
@@ -17,7 +18,7 @@ import (
 )
 
 // classifyBatchSize is the number of files sent per LLM classification call.
-const classifyBatchSize = 12
+const classifyBatchSize = 8
 
 // classifyMaxWorkers is the max concurrent LLM classification requests.
 const classifyMaxWorkers = 5
@@ -25,7 +26,8 @@ const classifyMaxWorkers = 5
 // ClassifyPendingFiles resolves FileTypePending entries in result using LLM
 // classification (when provider is non-nil) or heuristic fallback.
 // Files classified as UNKNOWN are removed from result.Files.
-func ClassifyPendingFiles(ctx context.Context, result *ScanResult, provider llm.Provider, model string, logger *zap.Logger) error {
+// classifyCache is optional (nil skips caching).
+func ClassifyPendingFiles(ctx context.Context, result *ScanResult, provider llm.Provider, model string, logger *zap.Logger, classifyCache *cache.Cache) error {
 	// Collect indices of pending files
 	var pendingIdx []int
 	for i, f := range result.Files {
@@ -48,14 +50,74 @@ func ClassifyPendingFiles(ctx context.Context, result *ScanResult, provider llm.
 		pathIdx[result.Files[i].Path] = i
 	}
 
-	var classifyErr error
-	if provider != nil {
-		classifyErr = classifyWithLLM(ctx, result, pathIdx, provider, model, logger)
-	} else {
-		classifyWithHeuristic(result, pathIdx, logger)
+	// Cache lookup: resolve files that haven't changed since last classification
+	if classifyCache != nil {
+		pathHashes := make(map[string]string, len(pathIdx))
+		for path, idx := range pathIdx {
+			pathHashes[path] = result.Files[idx].Hash
+		}
+
+		hits, _, err := classifyCache.BatchLookupClassification(pathHashes)
+		if err != nil {
+			logger.Warn("classify cache lookup failed, proceeding without cache", zap.Error(err))
+		} else {
+			for path, cr := range hits {
+				idx := pathIdx[path]
+				result.Files[idx].Type = graph.FileType(cr.FileType)
+				delete(result.Snippets, path)
+				delete(pathIdx, path)
+				logger.Info("cached classification",
+					zap.String("file", filepath.Base(path)),
+					zap.String("type", cr.FileType),
+					zap.String("classifier", cr.Classifier),
+				)
+			}
+		}
+
+		if len(pathIdx) == 0 {
+			logger.Info("all pending files resolved from cache")
+			// Still need to filter UNKNOWN files from cache hits
+			return filterClassifiedFiles(result, logger)
+		}
 	}
 
-	// Remove files still marked as PENDING (failed classification) and UNKNOWN
+	// Track classifier per file for cache storage
+	classifiedBy := make(map[string]string, len(pathIdx))
+
+	var classifyErr error
+	if provider != nil {
+		classifyErr = classifyWithLLM(ctx, result, pathIdx, provider, model, logger, classifiedBy)
+	} else {
+		classifyWithHeuristic(result, pathIdx, logger, classifiedBy)
+	}
+
+	// Store newly classified files in cache
+	if classifyCache != nil {
+		var entries []cache.ClassifyEntry
+		for path, classifier := range classifiedBy {
+			idx, ok := pathIdx[path]
+			if !ok {
+				continue
+			}
+			entries = append(entries, cache.ClassifyEntry{
+				Path:       path,
+				Hash:       result.Files[idx].Hash,
+				FileType:   string(result.Files[idx].Type),
+				Classifier: classifier,
+			})
+		}
+		if len(entries) > 0 {
+			if err := classifyCache.BatchMarkClassified(entries); err != nil {
+				logger.Warn("failed to store classify cache", zap.Error(err))
+			}
+		}
+	}
+
+	return filterClassifiedFiles(result, logger, classifyErr)
+}
+
+// filterClassifiedFiles removes PENDING and UNKNOWN files from result.Files.
+func filterClassifiedFiles(result *ScanResult, logger *zap.Logger, errs ...error) error {
 	filtered := result.Files[:0]
 	for _, f := range result.Files {
 		if f.Type == graph.FileTypePending {
@@ -72,7 +134,12 @@ func ClassifyPendingFiles(ctx context.Context, result *ScanResult, provider llm.
 	}
 	result.Files = filtered
 
-	return classifyErr
+	for _, err := range errs {
+		if err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 // llmClassification is the JSON structure returned by the LLM.
@@ -81,7 +148,7 @@ type llmClassification struct {
 	Type string `json:"type"`
 }
 
-func classifyWithLLM(ctx context.Context, result *ScanResult, pathIdx map[string]int, provider llm.Provider, model string, logger *zap.Logger) error {
+func classifyWithLLM(ctx context.Context, result *ScanResult, pathIdx map[string]int, provider llm.Provider, model string, logger *zap.Logger, classifiedBy map[string]string) error {
 	// Collect pending paths in sorted order for deterministic batching
 	paths := make([]string, 0, len(pathIdx))
 	for p := range pathIdx {
@@ -140,6 +207,7 @@ func classifyWithLLM(ctx context.Context, result *ScanResult, pathIdx map[string
 			resp, err := provider.Complete(ctx, llm.CompletionRequest{
 				Model: model,
 				Messages: []llm.Message{
+					{Role: llm.RoleSystem, Content: "You are an expert IBM mainframe and COBOL analyst. Your task is to classify source code files from mainframe COBOL codebases. When uncertain, prefer COBOL or COPYBOOK over UNKNOWN — it is better to include a borderline file than to miss real mainframe source code."},
 					{Role: llm.RoleUser, Content: prompt},
 				},
 				MaxTokens:   1024,
@@ -156,7 +224,7 @@ func classifyWithLLM(ctx context.Context, result *ScanResult, pathIdx map[string
 					batchPathIdx[p] = pathIdx[p]
 				}
 				mu.Lock()
-				classifyWithHeuristic(result, batchPathIdx, logger)
+				classifyWithHeuristic(result, batchPathIdx, logger, classifiedBy)
 				mu.Unlock()
 				return
 			}
@@ -175,7 +243,7 @@ func classifyWithLLM(ctx context.Context, result *ScanResult, pathIdx map[string
 					batchPathIdx[p] = pathIdx[p]
 				}
 				mu.Lock()
-				classifyWithHeuristic(result, batchPathIdx, logger)
+				classifyWithHeuristic(result, batchPathIdx, logger, classifiedBy)
 				mu.Unlock()
 				return
 			}
@@ -199,6 +267,7 @@ func classifyWithLLM(ctx context.Context, result *ScanResult, pathIdx map[string
 				ft := mapClassificationType(c.Type)
 				result.Files[idx].Type = ft
 				delete(result.Snippets, p)
+				classifiedBy[p] = "LLM"
 				logger.Info("LLM classified file",
 					zap.String("file", c.File),
 					zap.String("type", string(ft)),
@@ -215,19 +284,26 @@ func classifyWithLLM(ctx context.Context, result *ScanResult, pathIdx map[string
 // buildClassifyPrompt builds the classification prompt for a batch of files.
 func buildClassifyPrompt(batch []string, snippets map[string][]string) string {
 	var sb strings.Builder
-	sb.WriteString("Classify each file snippet as one of: COBOL, COPYBOOK, JCL, or UNKNOWN.\n\n")
+	sb.WriteString("Classify each file snippet by its mainframe source type.\n\n")
+	sb.WriteString("Common types: COBOL, COPYBOOK, JCL, BMS, DCLGEN, ASM, PLI, REXX, NATURAL, PROC, CLIST\n")
+	sb.WriteString("Use UNKNOWN only for files that are not mainframe/programming source code.\n")
+	sb.WriteString("Return any type that accurately describes the source — you are not limited to the list above.\n\n")
 	sb.WriteString("Rules:\n")
-	sb.WriteString("- COBOL: Complete COBOL programs with IDENTIFICATION/PROCEDURE DIVISION\n")
-	sb.WriteString("- COPYBOOK: COBOL data definitions or code fragments meant to be INCLUDEd (no PROGRAM-ID)\n")
+	sb.WriteString("- COBOL: Any file containing COBOL statements, division headers (IDENTIFICATION, ENVIRONMENT, DATA, PROCEDURE), or COBOL verbs (PERFORM, MOVE, CALL, EVALUATE, COMPUTE, IF/ELSE/END-IF, EXEC SQL, EXEC CICS). Does NOT require all four divisions — partial programs and single-division files count as COBOL.\n")
+	sb.WriteString("- COPYBOOK: COBOL data definitions (level numbers with PIC/PICTURE), 88-level conditions, SQL host variable declarations (EXEC SQL INCLUDE), paragraph-level code fragments meant to be INCLUDEd — no PROGRAM-ID.\n")
 	sb.WriteString("- JCL: IBM Job Control Language (lines starting with //, JOB/EXEC/DD statements)\n")
-	sb.WriteString("- UNKNOWN: Not mainframe source code\n\n")
-	sb.WriteString("Respond with ONLY a JSON array: [{\"file\": \"filename\", \"type\": \"COBOL|COPYBOOK|JCL|UNKNOWN\"}]\n\n")
+	sb.WriteString("- BMS: Basic Mapping Support macro definitions (DFHMSD, DFHMDI, DFHMDF)\n")
+	sb.WriteString("- DCLGEN: DB2 DCLGEN output (EXEC SQL DECLARE TABLE, host variable copybooks)\n")
+	sb.WriteString("- UNKNOWN: Clearly not mainframe/programming source code (e.g., plain English docs, XML, HTML). When uncertain, prefer a specific type over UNKNOWN.\n\n")
+	sb.WriteString("Tiebreaker: If a file shows even one strong mainframe indicator, classify with a specific type, not UNKNOWN.\n\n")
+	sb.WriteString("Respond with ONLY a JSON array: [{\"file\": \"filename\", \"type\": \"<TYPE>\"}]\n\n")
 
 	for _, p := range batch {
 		name := filepath.Base(p)
 		sb.WriteString(fmt.Sprintf("=== File: %s ===\n", name))
 		if snippet, ok := snippets[p]; ok {
-			for _, line := range snippet {
+			trimmed := trimCommentHeader(snippet)
+			for _, line := range trimmed {
 				sb.WriteString(line)
 				sb.WriteString("\n")
 			}
@@ -235,6 +311,29 @@ func buildClassifyPrompt(batch []string, snippets map[string][]string) string {
 		sb.WriteString("\n")
 	}
 	return sb.String()
+}
+
+// trimCommentHeader strips leading COBOL comment lines (starting with '*' in column 7
+// or '*' after trimming) and blank lines, so the LLM sees actual code sooner.
+func trimCommentHeader(lines []string) []string {
+	i := 0
+	for i < len(lines) {
+		trimmed := strings.TrimSpace(lines[i])
+		if trimmed == "" {
+			i++
+			continue
+		}
+		// COBOL comment: '*' in column 7 (0-indexed col 6) or line starts with '*' after trim
+		if strings.HasPrefix(trimmed, "*") {
+			i++
+			continue
+		}
+		break
+	}
+	if i >= len(lines) {
+		return lines // all comments/blanks — return original so LLM has something
+	}
+	return lines[i:]
 }
 
 // parseClassifyResponse extracts classifications from the LLM response body.
@@ -257,17 +356,19 @@ func parseClassifyResponse(content string) ([]llmClassification, error) {
 	return classifications, nil
 }
 
-func classifyWithHeuristic(result *ScanResult, pathIdx map[string]int, logger *zap.Logger) {
+func classifyWithHeuristic(result *ScanResult, pathIdx map[string]int, logger *zap.Logger, classifiedBy map[string]string) {
 	for path, idx := range pathIdx {
 		snippet := result.Snippets[path]
 		if ft, ok := classifyByContent(snippet); ok {
 			result.Files[idx].Type = ft
+			classifiedBy[path] = "HEURISTIC"
 			logger.Info("heuristic classified file",
 				zap.String("file", filepath.Base(path)),
 				zap.String("type", string(ft)),
 			)
 		} else {
 			result.Files[idx].Type = "UNKNOWN"
+			classifiedBy[path] = "HEURISTIC"
 			logger.Debug("heuristic could not classify file",
 				zap.String("file", filepath.Base(path)),
 			)
@@ -278,6 +379,9 @@ func classifyWithHeuristic(result *ScanResult, pathIdx map[string]int, logger *z
 
 // jclPattern matches JCL statements: //NAME JOB|EXEC|DD
 var jclPattern = regexp.MustCompile(`^//\w+\s+(JOB|EXEC|DD)\s`)
+
+// levelNumberRe matches valid COBOL level numbers (01-49, 66, 77, 88).
+var levelNumberRe = regexp.MustCompile(`^(0[1-9]|[1-4][0-9]|66|77|88)\s+`)
 
 // classifyByContent uses heuristic scoring to determine file type from content lines.
 func classifyByContent(lines []string) (graph.FileType, bool) {
@@ -296,7 +400,7 @@ func classifyByContent(lines []string) (graph.FileType, bool) {
 			jclScore++
 		}
 
-		// COBOL detection
+		// COBOL division headers
 		if strings.Contains(upper, "IDENTIFICATION DIVISION") {
 			cobolScore++
 		}
@@ -314,7 +418,47 @@ func classifyByContent(lines []string) (graph.FileType, bool) {
 			cobolScore++
 		}
 
-		// Copybook detection: level numbers + PIC/REDEFINES
+		// COBOL section headers
+		if strings.Contains(upper, "WORKING-STORAGE SECTION") {
+			cobolScore++
+		}
+		if strings.Contains(upper, "LINKAGE SECTION") {
+			cobolScore++
+		}
+		if strings.Contains(upper, "FILE SECTION") {
+			cobolScore++
+		}
+
+		// COBOL statements / verbs
+		if strings.Contains(upper, "EXEC SQL") {
+			cobolScore++
+		}
+		if strings.Contains(upper, "EXEC CICS") {
+			cobolScore++
+		}
+		if strings.Contains(upper, "PERFORM ") {
+			cobolScore++
+		}
+		if strings.Contains(upper, "MOVE ") {
+			cobolScore++
+		}
+		if strings.Contains(upper, "CALL '") {
+			cobolScore++
+		}
+		if strings.Contains(upper, "EVALUATE ") {
+			cobolScore++
+		}
+		if strings.Contains(upper, "GOBACK") {
+			cobolScore++
+		}
+		if strings.Contains(upper, "STOP RUN") {
+			cobolScore++
+		}
+		if strings.Contains(upper, "COPY ") {
+			cobolScore++
+		}
+
+		// Copybook detection: level numbers + PIC/REDEFINES + data-definition keywords
 		if isLevelNumber(upper) {
 			copybookScore++
 		}
@@ -322,6 +466,18 @@ func classifyByContent(lines []string) (graph.FileType, bool) {
 			copybookScore++
 		}
 		if strings.Contains(upper, " REDEFINES ") {
+			copybookScore++
+		}
+		if strings.Contains(upper, " VALUE ") {
+			copybookScore++
+		}
+		if strings.Contains(upper, " OCCURS ") {
+			copybookScore++
+		}
+		if strings.Contains(upper, "COMP-3") || strings.Contains(upper, " COMP ") {
+			copybookScore++
+		}
+		if strings.Contains(upper, " FILLER ") {
 			copybookScore++
 		}
 	}
@@ -336,36 +492,35 @@ func classifyByContent(lines []string) (graph.FileType, bool) {
 		return graph.FileTypeCOBOL, true
 	}
 
-	// Copybook: level numbers/PIC but no PROGRAM-ID — 3+ matches
-	if copybookScore >= 3 && !hasProgramID {
+	// COBOL: 3+ strong signals even without PROGRAM-ID (partial programs)
+	if cobolScore >= 3 && !hasProgramID {
+		return graph.FileTypeCOBOL, true
+	}
+
+	// Copybook: level numbers/PIC but no PROGRAM-ID — 2+ matches
+	if copybookScore >= 2 && !hasProgramID {
+		return graph.FileTypeCopybook, true
+	}
+
+	// Weak fallback: any COBOL or copybook signal -> COPYBOOK (safer to over-include)
+	if (cobolScore >= 1 || copybookScore >= 1) && !hasProgramID {
 		return graph.FileTypeCopybook, true
 	}
 
 	return "", false
 }
 
-// isLevelNumber checks if a trimmed uppercase line starts with a COBOL level number.
+// isLevelNumber checks if a trimmed uppercase line starts with a valid COBOL level number.
 func isLevelNumber(upper string) bool {
-	prefixes := []string{"01 ", "02 ", "03 ", "04 ", "05 ", "10 ", "15 ", "20 ", "25 ",
-		"49 ", "66 ", "77 ", "88 "}
-	for _, p := range prefixes {
-		if strings.HasPrefix(upper, p) {
-			return true
-		}
-	}
-	return false
+	return levelNumberRe.MatchString(upper)
 }
 
 // mapClassificationType converts an LLM classification string to a graph.FileType.
+// Passes through any non-empty type as-is (uppercased), only defaulting to UNKNOWN if empty.
 func mapClassificationType(t string) graph.FileType {
-	switch strings.ToUpper(strings.TrimSpace(t)) {
-	case "COBOL":
-		return graph.FileTypeCOBOL
-	case "COPYBOOK":
-		return graph.FileTypeCopybook
-	case "JCL":
-		return graph.FileTypeJCL
-	default:
+	upper := strings.ToUpper(strings.TrimSpace(t))
+	if upper == "" {
 		return "UNKNOWN"
 	}
+	return graph.FileType(upper)
 }

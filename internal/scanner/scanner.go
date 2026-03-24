@@ -32,7 +32,7 @@ type ScanResult struct {
 }
 
 // snippetMaxLines is the number of lines captured for content-based classification.
-const snippetMaxLines = 50
+const snippetMaxLines = 100
 
 // Scan walks rootDir, classifies source files, and computes SHA-256 hashes.
 // Pass ScanOptions to enable content-based detection of .txt files.
