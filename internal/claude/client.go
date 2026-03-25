@@ -22,29 +22,27 @@ import (
 // due to max_tokens limits even after retry with increased limits.
 var ErrResponseTruncated = errors.New("LLM response truncated by max_tokens limit")
 
-// maxTokensCap is the upper limit for max_tokens when auto-retrying truncated responses.
-const maxTokensCap = 32000
-
 // Client wraps an LLM provider with retry, rate limiting, and prompt templates.
 type Client struct {
-	provider       llm.Provider
-	sonnetModel    string
-	opusModel      string
-	maxRetries     int
-	pass1MaxTokens int
-	pass2MaxTokens int
-	pass3MaxTokens int
-	pass4MaxTokens int
-	requestTimeout time.Duration
-	limiter        *rate.Limiter
-	logger         *zap.Logger
-	pass1Tmpl      *template.Template
-	pass2Tmpl      *template.Template
-	pass3Tmpl      *template.Template
-	jclTmpl        *template.Template
-	pass4Tmpl      *template.Template
-	pass5Tmpl      *template.Template
-	bwTmpl         *template.Template
+	provider           llm.Provider
+	sonnetModel        string
+	opusModel          string
+	maxRetries         int
+	pass1MaxTokens     int
+	pass2MaxTokens     int
+	pass3MaxTokens     int
+	pass4MaxTokens     int
+	maxOutputTokensCap int // upper limit for auto-retry max_tokens doubling
+	requestTimeout     time.Duration
+	limiter            *rate.Limiter
+	logger             *zap.Logger
+	pass1Tmpl          *template.Template
+	pass2Tmpl          *template.Template
+	pass3Tmpl          *template.Template
+	jclTmpl            *template.Template
+	pass4Tmpl          *template.Template
+	pass5Tmpl          *template.Template
+	bwTmpl             *template.Template
 }
 
 // NewClient creates a Claude API client using an LLM provider.
@@ -98,17 +96,23 @@ func NewClient(provider llm.Provider, cfg config.ClaudeConfig, logger *zap.Logge
 		requestTimeout = 10 * time.Minute
 	}
 
+	maxOutputCap := cfg.MaxOutputTokensCap
+	if maxOutputCap <= 0 {
+		maxOutputCap = 65536
+	}
+
 	return &Client{
-		provider:       provider,
-		sonnetModel:    cfg.SonnetModel,
-		opusModel:      cfg.OpusModel,
-		maxRetries:     cfg.MaxRetries,
-		pass1MaxTokens: cfg.Pass1MaxTokens,
-		pass2MaxTokens: cfg.Pass2MaxTokens,
-		pass3MaxTokens: cfg.Pass3MaxTokens,
-		pass4MaxTokens: cfg.Pass4MaxTokens,
-		requestTimeout: requestTimeout,
-		limiter:        limiter,
+		provider:           provider,
+		sonnetModel:        cfg.SonnetModel,
+		opusModel:          cfg.OpusModel,
+		maxRetries:         cfg.MaxRetries,
+		pass1MaxTokens:     cfg.Pass1MaxTokens,
+		pass2MaxTokens:     cfg.Pass2MaxTokens,
+		pass3MaxTokens:     cfg.Pass3MaxTokens,
+		pass4MaxTokens:     cfg.Pass4MaxTokens,
+		maxOutputTokensCap: maxOutputCap,
+		requestTimeout:     requestTimeout,
+		limiter:            limiter,
 		logger:      logger,
 		pass1Tmpl:   p1Tmpl,
 		pass2Tmpl:   p2Tmpl,
@@ -294,8 +298,23 @@ func isDiagramType(fileType string) bool {
 }
 
 // completeWithRetry calls the LLM provider with exponential backoff retries.
-// On truncation (StopReason == "max_tokens"), it auto-retries once with doubled max_tokens.
+// On truncation (StopReason == "max_tokens"), it iteratively doubles max_tokens
+// up to 3 times or the configured cap. On final truncation failure, the truncated
+// content is returned alongside ErrResponseTruncated for partial JSON recovery.
 func (c *Client) completeWithRetry(ctx context.Context, req llm.CompletionRequest) (string, error) {
+	// Phase 6: Log estimated input tokens for context window monitoring
+	var estimatedInputTokens int
+	for _, msg := range req.Messages {
+		estimatedInputTokens += len(msg.Content) * 10 / 32 // conservative estimate
+	}
+	if estimatedInputTokens > 150000 {
+		c.logger.Warn("estimated input tokens approaching context window limit",
+			zap.String("model", req.Model),
+			zap.Int("estimated_input_tokens", estimatedInputTokens),
+			zap.Int("warning_threshold", 150000),
+		)
+	}
+
 	var lastErr error
 	for attempt := range c.maxRetries {
 		if err := c.limiter.Wait(ctx); err != nil {
@@ -321,72 +340,90 @@ func (c *Client) completeWithRetry(ctx context.Context, req llm.CompletionReques
 			continue
 		}
 
+		// Phase 6: Log actual prompt tokens for calibration
+		if resp.PromptTokens > 0 {
+			c.logger.Debug("input token calibration",
+				zap.Int("estimated", estimatedInputTokens),
+				zap.Int("actual", resp.PromptTokens),
+			)
+		}
+
 		if resp.Content == "" {
 			return "", fmt.Errorf("no text content in LLM response")
 		}
 
-		// Handle truncated responses
+		// Handle truncated responses with iterative doubling (Phase 1)
 		if resp.Truncated {
-			doubled := req.MaxTokens * 2
-			if doubled > maxTokensCap {
-				doubled = maxTokensCap
-			}
-			if doubled <= req.MaxTokens {
-				// Already at or above cap, can't increase further
-				c.logger.Error("LLM response truncated at max_tokens cap",
+			truncatedContent := resp.Content
+			currentMax := req.MaxTokens
+
+			for doublingIter := range 3 {
+				doubled := currentMax * 2
+				if doubled > c.maxOutputTokensCap {
+					doubled = c.maxOutputTokensCap
+				}
+				if doubled <= currentMax {
+					// At cap, can't increase further — return truncated content for partial recovery
+					c.logger.Error("LLM response truncated at max_tokens cap, returning for partial recovery",
+						zap.String("model", req.Model),
+						zap.Int("max_tokens", currentMax),
+						zap.Int("output_tokens", resp.OutputTokens),
+						zap.Int("doubling_attempts", doublingIter+1),
+					)
+					return truncatedContent, fmt.Errorf("%w: model=%s max_tokens=%d output_tokens=%d",
+						ErrResponseTruncated, req.Model, currentMax, resp.OutputTokens)
+				}
+
+				c.logger.Warn("LLM response truncated, retrying with increased max_tokens",
 					zap.String("model", req.Model),
-					zap.Int("max_tokens", req.MaxTokens),
+					zap.Int("current_max_tokens", currentMax),
+					zap.Int("new_max_tokens", doubled),
 					zap.Int("output_tokens", resp.OutputTokens),
+					zap.Int("doubling_iteration", doublingIter+1),
 				)
-				return "", fmt.Errorf("%w: model=%s max_tokens=%d output_tokens=%d",
-					ErrResponseTruncated, req.Model, req.MaxTokens, resp.OutputTokens)
+
+				retryReq := req
+				retryReq.MaxTokens = doubled
+				currentMax = doubled
+
+				if err := c.limiter.Wait(ctx); err != nil {
+					return truncatedContent, fmt.Errorf("rate limiter during truncation retry: %w", err)
+				}
+				retryCtx, retryCancel := context.WithTimeout(ctx, c.requestTimeout)
+				retryResp, retryErr := c.provider.Complete(retryCtx, retryReq)
+				retryCancel()
+
+				if retryErr != nil {
+					c.logger.Warn("truncation retry failed",
+						zap.String("model", retryReq.Model),
+						zap.Int("doubling_iteration", doublingIter+1),
+						zap.Error(retryErr),
+					)
+					// Fall through to return truncated content for partial recovery
+					break
+				}
+
+				if retryResp.Content == "" {
+					break
+				}
+
+				if !retryResp.Truncated {
+					return retryResp.Content, nil
+				}
+
+				// Still truncated — update content and continue doubling
+				truncatedContent = retryResp.Content
+				resp = retryResp
 			}
 
-			c.logger.Warn("LLM response truncated, retrying with increased max_tokens",
+			// All doubling attempts exhausted — return truncated content for partial recovery
+			c.logger.Error("LLM response still truncated after all doubling attempts, returning for partial recovery",
 				zap.String("model", req.Model),
-				zap.Int("original_max_tokens", req.MaxTokens),
-				zap.Int("new_max_tokens", doubled),
+				zap.Int("final_max_tokens", currentMax),
 				zap.Int("output_tokens", resp.OutputTokens),
 			)
-
-			// Retry with doubled max_tokens
-			retryReq := req
-			retryReq.MaxTokens = doubled
-
-			if err := c.limiter.Wait(ctx); err != nil {
-				return "", fmt.Errorf("rate limiter: %w", err)
-			}
-			retryCtx, retryCancel := context.WithTimeout(ctx, c.requestTimeout)
-		retryResp, retryErr := c.provider.Complete(retryCtx, retryReq)
-		retryCancel()
-			if retryErr != nil {
-				lastErr = fmt.Errorf("truncation retry failed: %w", retryErr)
-				c.logger.Warn("truncation retry failed, falling back to outer retry loop",
-					zap.String("model", retryReq.Model),
-					zap.Int("attempt", attempt+1),
-					zap.Error(retryErr),
-				)
-				backoff := time.Duration(math.Pow(2, float64(attempt))) * time.Second
-				select {
-				case <-time.After(backoff):
-				case <-ctx.Done():
-					return "", ctx.Err()
-				}
-				continue
-			}
-			if retryResp.Content == "" {
-				return "", fmt.Errorf("no text content in truncation retry response")
-			}
-			if retryResp.Truncated {
-				c.logger.Error("LLM response still truncated after retry",
-					zap.String("model", retryReq.Model),
-					zap.Int("max_tokens", retryReq.MaxTokens),
-					zap.Int("output_tokens", retryResp.OutputTokens),
-				)
-				return "", fmt.Errorf("%w: model=%s max_tokens=%d output_tokens=%d",
-					ErrResponseTruncated, retryReq.Model, retryReq.MaxTokens, retryResp.OutputTokens)
-			}
-			return retryResp.Content, nil
+			return truncatedContent, fmt.Errorf("%w: model=%s max_tokens=%d output_tokens=%d",
+				ErrResponseTruncated, req.Model, currentMax, resp.OutputTokens)
 		}
 
 		return resp.Content, nil

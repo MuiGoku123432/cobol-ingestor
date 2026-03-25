@@ -5,12 +5,22 @@ import (
 	"encoding/json"
 	"fmt"
 	"sync"
+	"sync/atomic"
 
 	"cobol-ingestor/internal/graph"
 
 	"github.com/neo4j/neo4j-go-driver/v5/neo4j"
 	"go.uber.org/zap"
 )
+
+// WriteStats tracks write operation metrics for pipeline reporting.
+type WriteStats struct {
+	NodesWritten        atomic.Int64
+	RelationshipsWritten atomic.Int64
+	WriteErrors         atomic.Int64
+	Pass2WriteErrors    atomic.Int64
+	Pass3WriteErrors    atomic.Int64
+}
 
 // BatchWriter writes graph data to Neo4j in batches.
 // All write methods are safe for concurrent use.
@@ -20,6 +30,7 @@ type BatchWriter struct {
 	batchSize int
 	codebase  string
 	logger    *zap.Logger
+	Stats     WriteStats
 }
 
 // NewBatchWriter creates a new batch writer.
@@ -735,7 +746,8 @@ func (w *BatchWriter) WritePass2Result(ctx context.Context, result *graph.Pass2R
 				"MATCH (dst:DataItem {name: row.toName, programId: row.pid}) "+
 				"MERGE (src)-[r:MOVES_TO]->(dst) SET r.context = row.context",
 			flowRows); err != nil {
-			w.logger.Warn("failed to write MOVES_TO relationships", zap.Error(err))
+			w.logger.Error("failed to write MOVES_TO relationships", zap.Error(err))
+			w.Stats.Pass2WriteErrors.Add(1)
 		}
 	}
 
@@ -755,7 +767,8 @@ func (w *BatchWriter) WritePass2Result(ctx context.Context, result *graph.Pass2R
 			}
 		}
 		if err := w.WriteNodes(ctx, "DataItem", "fqn", nodes); err != nil {
-			w.logger.Warn("failed to write DataItem nodes from hierarchy", zap.Error(err))
+			w.logger.Error("failed to write DataItem nodes from hierarchy", zap.Error(err))
+			w.Stats.Pass2WriteErrors.Add(1)
 		}
 	}
 
@@ -807,7 +820,8 @@ func (w *BatchWriter) WritePass2Result(ctx context.Context, result *graph.Pass2R
 					"MATCH (parent:DataItem {fqn: row.parentFQN}) "+
 					"MERGE (child)-[:CHILD_OF]->(parent)",
 				fqnRows); err != nil {
-				w.logger.Warn("failed to write CHILD_OF relationships (FQN)", zap.Error(err))
+				w.logger.Error("failed to write CHILD_OF relationships (FQN)", zap.Error(err))
+			w.Stats.Pass2WriteErrors.Add(1)
 			}
 		}
 		if len(fallbackRows) > 0 {
@@ -817,7 +831,8 @@ func (w *BatchWriter) WritePass2Result(ctx context.Context, result *graph.Pass2R
 					"MATCH (parent:DataItem {name: row.parentName, programId: row.pid}) "+
 					"MERGE (child)-[:CHILD_OF]->(parent)",
 				fallbackRows); err != nil {
-				w.logger.Warn("failed to write CHILD_OF relationships (fallback)", zap.Error(err))
+				w.logger.Error("failed to write CHILD_OF relationships (fallback)", zap.Error(err))
+			w.Stats.Pass2WriteErrors.Add(1)
 			}
 		}
 	}
@@ -855,7 +870,8 @@ func (w *BatchWriter) WritePass2Result(ctx context.Context, result *graph.Pass2R
 					"MATCH (target:DataItem {fqn: row.targetFQN}) "+
 					"MERGE (item)-[:REDEFINES]->(target)",
 				fqnRows); err != nil {
-				w.logger.Warn("failed to write REDEFINES relationships (FQN)", zap.Error(err))
+				w.logger.Error("failed to write REDEFINES relationships (FQN)", zap.Error(err))
+			w.Stats.Pass2WriteErrors.Add(1)
 			}
 		}
 		if len(fallbackRows) > 0 {
@@ -865,7 +881,8 @@ func (w *BatchWriter) WritePass2Result(ctx context.Context, result *graph.Pass2R
 					"MATCH (target:DataItem {name: row.targetName, programId: row.pid}) "+
 					"MERGE (item)-[:REDEFINES]->(target)",
 				fallbackRows); err != nil {
-				w.logger.Warn("failed to write REDEFINES relationships (fallback)", zap.Error(err))
+				w.logger.Error("failed to write REDEFINES relationships (fallback)", zap.Error(err))
+			w.Stats.Pass2WriteErrors.Add(1)
 			}
 		}
 	}
@@ -886,7 +903,8 @@ func (w *BatchWriter) WritePass2Result(ctx context.Context, result *graph.Pass2R
 				"MATCH (cb:Copybook {name: row.cbName}) "+
 				"MERGE (item)-[:DEFINED_IN]->(cb)",
 			defRows); err != nil {
-			w.logger.Warn("failed to write DEFINED_IN relationships", zap.Error(err))
+			w.logger.Error("failed to write DEFINED_IN relationships", zap.Error(err))
+			w.Stats.Pass2WriteErrors.Add(1)
 		}
 	}
 
@@ -907,7 +925,8 @@ func (w *BatchWriter) WritePass2Result(ctx context.Context, result *graph.Pass2R
 			"UNWIND $rows AS row MATCH (p:Paragraph {name: row.name, programId: row.pid}) "+
 				"SET p.conditionalLogic = coalesce(p.conditionalLogic, []) + [row.entry]",
 			clRows); err != nil {
-			w.logger.Warn("failed to update conditional logic", zap.Error(err))
+			w.logger.Error("failed to update conditional logic", zap.Error(err))
+			w.Stats.Pass2WriteErrors.Add(1)
 		}
 	}
 
@@ -947,7 +966,8 @@ func (w *BatchWriter) WritePass2Result(ctx context.Context, result *graph.Pass2R
 			"UNWIND $rows AS row MATCH (p:Paragraph {name: row.name, programId: row.pid}) "+
 				"SET p.errorPattern = row.pattern, p.errorDetails = row.details",
 			ehRows); err != nil {
-			w.logger.Warn("failed to update error handling", zap.Error(err))
+			w.logger.Error("failed to update error handling", zap.Error(err))
+			w.Stats.Pass2WriteErrors.Add(1)
 		}
 	}
 
@@ -1060,7 +1080,8 @@ func (w *BatchWriter) WritePass2Result(ctx context.Context, result *graph.Pass2R
 					}
 				}
 				if err := w.WriteRelationships(ctx, string(key.relType), key.fromLabel, mergeKeyForLabel(key.fromLabel), key.toLabel, mergeKeyForLabel(key.toLabel), rows); err != nil {
-					w.logger.Warn("failed to write IDMS relationships", zap.String("type", string(key.relType)), zap.Error(err))
+					w.logger.Error("failed to write IDMS relationships", zap.String("type", string(key.relType)), zap.Error(err))
+				w.Stats.Pass2WriteErrors.Add(1)
 				}
 			}
 		}
@@ -1084,7 +1105,8 @@ func (w *BatchWriter) WritePass2Result(ctx context.Context, result *graph.Pass2R
 			"UNWIND $rows AS row MATCH (p:Paragraph {name: row.name, programId: row.pid}) "+
 				"SET p.description = row.desc, p.category = row.cat",
 			annRows); err != nil {
-			w.logger.Warn("failed to update paragraph annotations", zap.Error(err))
+			w.logger.Error("failed to update paragraph annotations", zap.Error(err))
+			w.Stats.Pass2WriteErrors.Add(1)
 		}
 	}
 
@@ -1135,7 +1157,8 @@ func (w *BatchWriter) WritePass3Result(ctx context.Context, result *graph.Pass3R
 			"UNWIND $rows AS row MATCH (p:Program {programId: row.pid}) "+
 				"SET p.deadCode = true, p.deadCodeReason = row.reason",
 			rows); err != nil {
-			w.logger.Warn("failed to set dead code flags", zap.Error(err))
+			w.logger.Error("failed to set dead code flags", zap.Error(err))
+			w.Stats.Pass3WriteErrors.Add(1)
 		}
 	}
 
@@ -1154,7 +1177,8 @@ func (w *BatchWriter) WritePass3Result(ctx context.Context, result *graph.Pass3R
 			"UNWIND $rows AS row MATCH (p:Program {programId: row.pid}) "+
 				"SET p.riskScore = row.score, p.riskType = row.riskType, p.riskDetails = row.details",
 			rows); err != nil {
-			w.logger.Warn("failed to set risk flags", zap.Error(err))
+			w.logger.Error("failed to set risk flags", zap.Error(err))
+			w.Stats.Pass3WriteErrors.Add(1)
 		}
 	}
 
@@ -1172,7 +1196,8 @@ func (w *BatchWriter) WritePass3Result(ctx context.Context, result *graph.Pass3R
 			"UNWIND $rows AS row MATCH (p:Program {programId: row.pid}) "+
 				"SET p.isBridge = true, p.bridgeDomains = row.domains, p.bridgeReason = row.reason",
 			rows); err != nil {
-			w.logger.Warn("failed to set bridge program flags", zap.Error(err))
+			w.logger.Error("failed to set bridge program flags", zap.Error(err))
+			w.Stats.Pass3WriteErrors.Add(1)
 		}
 	}
 
@@ -1191,7 +1216,8 @@ func (w *BatchWriter) WritePass3Result(ctx context.Context, result *graph.Pass3R
 			"UNWIND $rows AS row MATCH (c:Copybook {name: row.name}) "+
 				"SET c.riskLevel = row.risk, c.programCount = row.count, c.riskReason = row.reason",
 			rows); err != nil {
-			w.logger.Warn("failed to set copybook risks", zap.Error(err))
+			w.logger.Error("failed to set copybook risks", zap.Error(err))
+			w.Stats.Pass3WriteErrors.Add(1)
 		}
 	}
 
@@ -1210,7 +1236,8 @@ func (w *BatchWriter) WritePass3Result(ctx context.Context, result *graph.Pass3R
 			"UNWIND $rows AS row MATCH (p:Program {programId: row.pid}) "+
 				"SET p.modernizationScore = row.score, p.modernizationReason = row.reason, p.modernizationApproach = row.approach",
 			rows); err != nil {
-			w.logger.Warn("failed to set modernization candidates", zap.Error(err))
+			w.logger.Error("failed to set modernization candidates", zap.Error(err))
+			w.Stats.Pass3WriteErrors.Add(1)
 		}
 	}
 
@@ -1228,10 +1255,12 @@ func (w *BatchWriter) WritePass3Result(ctx context.Context, result *graph.Pass3R
 			"UNWIND $rows AS row MATCH (p:Program {programId: row.pid}) "+
 				"SET p.volumeEstimate = row.estimate, p.volumeReason = row.reason",
 			rows); err != nil {
-			w.logger.Warn("failed to set volume estimates", zap.Error(err))
+			w.logger.Error("failed to set volume estimates", zap.Error(err))
+			w.Stats.Pass3WriteErrors.Add(1)
 		}
 	}
 
+	writeErrors := w.Stats.Pass3WriteErrors.Load()
 	w.logger.Info("wrote pass 3 results",
 		zap.Int("domains", len(result.BusinessDomains)),
 		zap.Int("members", len(result.DomainMembers)),
@@ -1241,7 +1270,12 @@ func (w *BatchWriter) WritePass3Result(ctx context.Context, result *graph.Pass3R
 		zap.Int("copybookRisks", len(result.CopybookRisks)),
 		zap.Int("modernizationCandidates", len(result.ModernizationCandidates)),
 		zap.Int("volumeEstimates", len(result.VolumeEstimates)),
+		zap.Int64("write_errors", writeErrors),
 	)
+
+	if writeErrors > 0 {
+		return fmt.Errorf("pass 3 completed with %d write errors (see logs for details)", writeErrors)
+	}
 
 	return nil
 }
