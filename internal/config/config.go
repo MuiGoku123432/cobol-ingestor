@@ -95,6 +95,7 @@ type ClaudeConfig struct {
 	Pass2MaxTokens   int
 	Pass3MaxTokens   int
 	Pass4MaxTokens   int
+	MaxOutputTokensCap int // upper limit for auto-retry max_tokens doubling (default 65536)
 	RequestTimeout   time.Duration
 	DisableRateLimit bool
 }
@@ -119,8 +120,9 @@ type IngestConfig struct {
 	Pass2TokenLimit int
 	OverlapLines    int
 	Pass3BatchSize        int
-	StripSequenceColumns  bool // STRIP_SEQUENCE_COLUMNS — strip columns 1-6 and 73-80 from fixed-format COBOL
-	ContentDetect         bool // CONTENT_DETECT — enable content-based detection of COBOL/copybook/JCL in .txt files
+	StripSequenceColumns  bool    // STRIP_SEQUENCE_COLUMNS — strip columns 1-6 and 73-80 from fixed-format COBOL
+	ContentDetect         bool    // CONTENT_DETECT — enable content-based detection of COBOL/copybook/JCL in .txt files
+	TokenEstimationRatio  float64 // TOKEN_ESTIMATION_RATIO — chars per token for estimation (default 3.2, old=4.0)
 }
 
 // WorkersForPass returns the worker count for a specific pass, falling back to MaxWorkers.
@@ -164,10 +166,11 @@ func Load() (*Config, error) {
 	viper.SetDefault("CLAUDE_OPUS_MODEL", "claude-opus-4-6")
 	viper.SetDefault("CLAUDE_SONNET_MODEL", "claude-sonnet-4-6")
 	viper.SetDefault("CLAUDE_MAX_RETRIES", 3)
-	viper.SetDefault("CLAUDE_PASS1_MAX_TOKENS", 8192)
-	viper.SetDefault("CLAUDE_PASS2_MAX_TOKENS", 16000)
+	viper.SetDefault("CLAUDE_PASS1_MAX_TOKENS", 16384)
+	viper.SetDefault("CLAUDE_PASS2_MAX_TOKENS", 32000)
 	viper.SetDefault("CLAUDE_PASS3_MAX_TOKENS", 16000)
 	viper.SetDefault("CLAUDE_PASS4_MAX_TOKENS", 4000)
+	viper.SetDefault("CLAUDE_MAX_OUTPUT_CAP", 65536)
 	viper.SetDefault("DISABLE_RATE_LIMIT", false)
 
 	// Neo4j defaults
@@ -190,6 +193,7 @@ func Load() (*Config, error) {
 	viper.SetDefault("PASS3_BATCH_SIZE", 50)
 	viper.SetDefault("STRIP_SEQUENCE_COLUMNS", true)
 	viper.SetDefault("CONTENT_DETECT", false)
+	viper.SetDefault("TOKEN_ESTIMATION_RATIO", 3.2)
 
 	// API defaults
 	viper.SetDefault("API_PORT", "8080")
@@ -259,13 +263,14 @@ func Load() (*Config, error) {
 			ResponseHeaderTimeout: llmResponseHeaderTimeout,
 		},
 		Claude: ClaudeConfig{
-			OpusModel:      viper.GetString("CLAUDE_OPUS_MODEL"),
-			SonnetModel:    viper.GetString("CLAUDE_SONNET_MODEL"),
-			MaxRetries:     viper.GetInt("CLAUDE_MAX_RETRIES"),
-			Pass1MaxTokens: viper.GetInt("CLAUDE_PASS1_MAX_TOKENS"),
-			Pass2MaxTokens: viper.GetInt("CLAUDE_PASS2_MAX_TOKENS"),
-			Pass3MaxTokens: viper.GetInt("CLAUDE_PASS3_MAX_TOKENS"),
+			OpusModel:        viper.GetString("CLAUDE_OPUS_MODEL"),
+			SonnetModel:      viper.GetString("CLAUDE_SONNET_MODEL"),
+			MaxRetries:       viper.GetInt("CLAUDE_MAX_RETRIES"),
+			Pass1MaxTokens:   viper.GetInt("CLAUDE_PASS1_MAX_TOKENS"),
+			Pass2MaxTokens:   viper.GetInt("CLAUDE_PASS2_MAX_TOKENS"),
+			Pass3MaxTokens:   viper.GetInt("CLAUDE_PASS3_MAX_TOKENS"),
 			Pass4MaxTokens:   viper.GetInt("CLAUDE_PASS4_MAX_TOKENS"),
+			MaxOutputTokensCap: viper.GetInt("CLAUDE_MAX_OUTPUT_CAP"),
 			RequestTimeout:   llmTimeout,
 			DisableRateLimit: viper.GetBool("DISABLE_RATE_LIMIT"),
 		},
@@ -290,6 +295,7 @@ func Load() (*Config, error) {
 			Pass3BatchSize:       viper.GetInt("PASS3_BATCH_SIZE"),
 			StripSequenceColumns: viper.GetBool("STRIP_SEQUENCE_COLUMNS"),
 			ContentDetect:        viper.GetBool("CONTENT_DETECT"),
+			TokenEstimationRatio: viper.GetFloat64("TOKEN_ESTIMATION_RATIO"),
 		},
 		API: APIConfig{
 			Port:     viper.GetString("API_PORT"),

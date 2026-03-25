@@ -247,6 +247,7 @@ type IDMSOperation struct {
 // Pass1Result aggregates all extracted data from a single file's Pass 1 analysis.
 type Pass1Result struct {
 	SourceFile         string
+	Partial            bool // true when recovered from a truncated LLM response
 	Programs           []Program
 	Paragraphs         []Paragraph
 	Sections           []Section
@@ -270,6 +271,7 @@ type Pass1Result struct {
 type Pass2Result struct {
 	SourceFile     string
 	ProgramID      string
+	Partial        bool // true when recovered from a truncated LLM response
 	Performs       []PerformRelation
 	DataFlows      []DataFlowRelation
 	FileOps        []FileOpRelation

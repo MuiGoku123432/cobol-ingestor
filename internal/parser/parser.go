@@ -8,7 +8,22 @@ import (
 	"cobol-ingestor/internal/graph"
 
 	"github.com/google/uuid"
+	"go.uber.org/zap"
 )
+
+// logger is the package-level logger for parser. Set via SetLogger.
+var logger *zap.Logger
+
+// SetLogger sets the package-level logger for parser recovery logging.
+func SetLogger(l *zap.Logger) {
+	logger = l
+}
+
+func logWarn(msg string, fields ...zap.Field) {
+	if logger != nil {
+		logger.Warn(msg, fields...)
+	}
+}
 
 // Pass1JSON matches the JSON schema returned by Claude for Pass 1.
 type Pass1JSON struct {
@@ -109,15 +124,30 @@ type IDMSSetJSON struct {
 }
 
 // ParsePass1Response parses Claude's JSON response into a Pass1Result.
+// On parse failure, attempts partial JSON recovery from truncated responses.
 func ParsePass1Response(jsonStr, sourceFile string) (*graph.Pass1Result, error) {
 	cleaned := stripMarkdownFences(jsonStr)
 
 	var raw Pass1JSON
+	partial := false
 	if err := json.Unmarshal([]byte(cleaned), &raw); err != nil {
-		return nil, fmt.Errorf("parsing pass1 JSON: %w\nraw response: %.500s", err, cleaned)
+		// Attempt partial JSON recovery
+		recovered, recoverErr := RecoverPartialJSON(cleaned)
+		if recoverErr != nil {
+			return nil, fmt.Errorf("parsing pass1 JSON: %w\nraw response: %.500s", err, cleaned)
+		}
+		if err2 := json.Unmarshal([]byte(recovered), &raw); err2 != nil {
+			return nil, fmt.Errorf("parsing pass1 JSON after recovery: %w\nraw response: %.500s", err2, cleaned)
+		}
+		partial = true
+		logWarn("pass1: recovered partial JSON from truncated response",
+			zap.String("file", sourceFile),
+			zap.Int("original_len", len(cleaned)),
+			zap.Int("recovered_len", len(recovered)),
+		)
 	}
 
-	result := &graph.Pass1Result{SourceFile: sourceFile}
+	result := &graph.Pass1Result{SourceFile: sourceFile, Partial: partial}
 
 	programID := raw.ProgramID
 	if programID == "" {
@@ -502,17 +532,34 @@ type ErrorHandlingJSON struct {
 }
 
 // ParsePass2Response parses Claude's JSON response into a Pass2Result.
+// On parse failure, attempts partial JSON recovery from truncated responses.
 func ParsePass2Response(jsonStr, sourceFile, programID string) (*graph.Pass2Result, error) {
 	cleaned := stripMarkdownFences(jsonStr)
 
 	var raw Pass2JSON
+	partial := false
 	if err := json.Unmarshal([]byte(cleaned), &raw); err != nil {
-		return nil, fmt.Errorf("parsing pass2 JSON: %w\nraw response: %.500s", err, cleaned)
+		// Attempt partial JSON recovery
+		recovered, recoverErr := RecoverPartialJSON(cleaned)
+		if recoverErr != nil {
+			return nil, fmt.Errorf("parsing pass2 JSON: %w\nraw response: %.500s", err, cleaned)
+		}
+		if err2 := json.Unmarshal([]byte(recovered), &raw); err2 != nil {
+			return nil, fmt.Errorf("parsing pass2 JSON after recovery: %w\nraw response: %.500s", err2, cleaned)
+		}
+		partial = true
+		logWarn("pass2: recovered partial JSON from truncated response",
+			zap.String("file", sourceFile),
+			zap.String("program", programID),
+			zap.Int("original_len", len(cleaned)),
+			zap.Int("recovered_len", len(recovered)),
+		)
 	}
 
 	result := &graph.Pass2Result{
 		SourceFile: sourceFile,
 		ProgramID:  programID,
+		Partial:    partial,
 	}
 
 	for _, p := range raw.Performs {

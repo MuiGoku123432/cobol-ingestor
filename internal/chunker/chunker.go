@@ -252,29 +252,35 @@ func ChunkFile(fi graph.FileInfo, tokenLimit int, logger *zap.Logger) ([]Chunk, 
 			isFirstProcChunk := (len(chunks) == 0)
 
 			for _, para := range paragraphs {
-				paraTokens := EstimateTokens(para.content)
 				preamble := summaryPreamble
 				if isFirstProcChunk {
 					preamble = fullPreamble
 				}
-				chunkBudget := tokenLimit - EstimateTokens(preamble)
+				chunkBudget := tokenLimit - EstimateTokens(preamble) - PromptOverheadTokens
 				if chunkBudget <= 0 {
 					chunkBudget = tokenLimit / 2
 				}
 
-				if currentTokens+paraTokens > chunkBudget && len(currentLines) > 0 {
-					chunks = append(chunks, Chunk{
-						FileName: fi.Path,
-						Content:  preamble + strings.Join(currentLines, "\n"),
-						FileInfo: fi,
-						Pass:     1,
-					})
-					currentLines = nil
-					currentTokens = 0
-					isFirstProcChunk = false
+				// Phase 5: split oversized paragraphs
+				subParas := splitOversizedParagraph(para, chunkBudget, logger)
+
+				for _, subPara := range subParas {
+					subTokens := EstimateTokens(subPara.content)
+
+					if currentTokens+subTokens > chunkBudget && len(currentLines) > 0 {
+						chunks = append(chunks, Chunk{
+							FileName: fi.Path,
+							Content:  preamble + strings.Join(currentLines, "\n"),
+							FileInfo: fi,
+							Pass:     1,
+						})
+						currentLines = nil
+						currentTokens = 0
+						isFirstProcChunk = false
+					}
+					currentLines = append(currentLines, strings.Split(subPara.content, "\n")...)
+					currentTokens += subTokens
 				}
-				currentLines = append(currentLines, strings.Split(para.content, "\n")...)
-				currentTokens += paraTokens
 			}
 			if len(currentLines) > 0 {
 				preamble := summaryPreamble
@@ -314,9 +320,25 @@ func ChunkFile(fi graph.FileInfo, tokenLimit int, logger *zap.Logger) ([]Chunk, 
 	return chunks, nil
 }
 
-// EstimateTokens provides a rough token count (chars / 4).
+// TokenEstimationRatio is the chars-per-token ratio for token estimation.
+// Default 3.2 is conservative for COBOL's verbose syntax (vs the common 4.0).
+// Set from config at startup.
+var TokenEstimationRatio = 3.2
+
+// PromptOverheadTokens is subtracted from chunk token budgets to reserve space
+// for the system prompt and other overhead in the LLM context window.
+var PromptOverheadTokens = 2000
+
+// EstimateTokens provides a rough token count using the configured ratio.
+// Uses len(content) * 10 / ratio*10 to avoid floating point in hot path.
 func EstimateTokens(content string) int {
-	return len(content) / 4
+	// Multiply by 10, divide by ratio*10 to use integer math
+	// ratio=3.2 → multiply by 10, divide by 32
+	ratioX10 := int(TokenEstimationRatio * 10)
+	if ratioX10 <= 0 {
+		ratioX10 = 32
+	}
+	return len(content) * 10 / ratioX10
 }
 
 // CopybookIndex maps normalized copybook names to file paths.
@@ -548,7 +570,8 @@ func ChunkFilePass2(fi graph.FileInfo, opts Pass2ChunkOptions, logger *zap.Logge
 	preambleTokens := EstimateTokens(preamble)
 
 	// If even the summary preamble is too large (unlikely), use it anyway with reduced budget
-	budget := opts.TokenLimit - preambleTokens
+	// Phase 6: subtract prompt overhead from budget
+	budget := opts.TokenLimit - preambleTokens - PromptOverheadTokens
 	if budget <= 0 {
 		logger.Warn("preamble summary alone exceeds token limit",
 			zap.String("file", fi.Path),
@@ -578,33 +601,38 @@ func ChunkFilePass2(fi graph.FileInfo, opts Pass2ChunkOptions, logger *zap.Logge
 	var overlapBuffer []string
 
 	for _, para := range paragraphs {
-		paraTokens := EstimateTokens(para.content)
+		// Phase 5: split oversized paragraphs
+		subParas := splitOversizedParagraph(para, budget, logger)
 
-		if currentTokens+paraTokens > budget && len(currentLines) > 0 {
-			// Emit current chunk
-			chunks = append(chunks, Chunk{
-				FileName: fi.Path,
-				Content:  preamble + strings.Join(currentLines, "\n"),
-				FileInfo: fi,
-				Pass:     2,
-			})
+		for _, subPara := range subParas {
+			subTokens := EstimateTokens(subPara.content)
 
-			// Start new chunk with overlap from end of previous
-			currentLines = make([]string, len(overlapBuffer))
-			copy(currentLines, overlapBuffer)
-			currentTokens = EstimateTokens(strings.Join(currentLines, "\n"))
-		}
+			if currentTokens+subTokens > budget && len(currentLines) > 0 {
+				// Emit current chunk
+				chunks = append(chunks, Chunk{
+					FileName: fi.Path,
+					Content:  preamble + strings.Join(currentLines, "\n"),
+					FileInfo: fi,
+					Pass:     2,
+				})
 
-		lines := strings.Split(para.content, "\n")
-		currentLines = append(currentLines, lines...)
-		currentTokens += paraTokens
+				// Start new chunk with overlap from end of previous
+				currentLines = make([]string, len(overlapBuffer))
+				copy(currentLines, overlapBuffer)
+				currentTokens = EstimateTokens(strings.Join(currentLines, "\n"))
+			}
 
-		// Keep last N lines for overlap
-		allLines := strings.Split(strings.Join(currentLines, "\n"), "\n")
-		if len(allLines) > overlapLines {
-			overlapBuffer = allLines[len(allLines)-overlapLines:]
-		} else {
-			overlapBuffer = allLines
+			lines := strings.Split(subPara.content, "\n")
+			currentLines = append(currentLines, lines...)
+			currentTokens += subTokens
+
+			// Keep last N lines for overlap
+			allLines := strings.Split(strings.Join(currentLines, "\n"), "\n")
+			if len(allLines) > overlapLines {
+				overlapBuffer = allLines[len(allLines)-overlapLines:]
+			} else {
+				overlapBuffer = allLines
+			}
 		}
 	}
 
@@ -881,6 +909,121 @@ func splitParagraphs(procedure string) []paragraphUnit {
 		if strings.TrimSpace(pre) != "" {
 			units = append([]paragraphUnit{{name: "PREAMBLE", content: pre}}, units...)
 		}
+	}
+
+	return units
+}
+
+// cobolStatementEnd matches lines ending with a period (COBOL statement terminator)
+// outside of string literals.
+var cobolStatementEnd = regexp.MustCompile(`\.\s*$`)
+
+// cobolControlKeyword matches COBOL control flow keywords at the start of a statement.
+var cobolControlKeyword = regexp.MustCompile(`(?i)^\s+(EVALUATE|IF|PERFORM|CALL|READ|WRITE|EXEC|GO\s+TO)\b`)
+
+// splitOversizedParagraph splits a single oversized paragraph into sub-units
+// that each fit within the token budget. Splitting priorities:
+// 1. COBOL statement boundaries (lines ending with '.')
+// 2. Control flow keyword boundaries (EVALUATE, IF, PERFORM, etc.)
+// 3. Raw line boundaries (last resort)
+func splitOversizedParagraph(para paragraphUnit, budget int, logger *zap.Logger) []paragraphUnit {
+	paraTokens := EstimateTokens(para.content)
+	if paraTokens <= budget {
+		return []paragraphUnit{para}
+	}
+
+	logger.Info("splitting oversized paragraph",
+		zap.String("paragraph", para.name),
+		zap.Int("tokens", paraTokens),
+		zap.Int("budget", budget),
+	)
+
+	lines := strings.Split(para.content, "\n")
+
+	// Try splitting at statement boundaries (lines ending with '.')
+	units := splitAtBoundaries(lines, para.name, budget, func(line string) bool {
+		return cobolStatementEnd.MatchString(line)
+	})
+	if len(units) > 1 {
+		return units
+	}
+
+	// Try splitting at control flow keyword boundaries
+	units = splitAtBoundaries(lines, para.name, budget, func(line string) bool {
+		return cobolControlKeyword.MatchString(line)
+	})
+	if len(units) > 1 {
+		return units
+	}
+
+	// Last resort: split at line boundaries
+	logger.Warn("splitting paragraph at raw line boundaries (no statement/keyword boundaries found)",
+		zap.String("paragraph", para.name),
+	)
+	return splitAtLineCount(lines, para.name, budget)
+}
+
+// splitAtBoundaries groups lines into chunks at identified boundary points.
+func splitAtBoundaries(lines []string, baseName string, budget int, isBoundary func(string) bool) []paragraphUnit {
+	var units []paragraphUnit
+	var currentLines []string
+	currentTokens := 0
+	partNum := 1
+
+	for _, line := range lines {
+		lineTokens := EstimateTokens(line + "\n")
+
+		if currentTokens+lineTokens > budget && len(currentLines) > 0 && isBoundary(currentLines[len(currentLines)-1]) {
+			units = append(units, paragraphUnit{
+				name:    fmt.Sprintf("%s.part%d", baseName, partNum),
+				content: strings.Join(currentLines, "\n"),
+			})
+			partNum++
+			currentLines = nil
+			currentTokens = 0
+		}
+
+		currentLines = append(currentLines, line)
+		currentTokens += lineTokens
+	}
+
+	if len(currentLines) > 0 {
+		units = append(units, paragraphUnit{
+			name:    fmt.Sprintf("%s.part%d", baseName, partNum),
+			content: strings.Join(currentLines, "\n"),
+		})
+	}
+
+	return units
+}
+
+// splitAtLineCount splits lines into roughly equal chunks by token count.
+func splitAtLineCount(lines []string, baseName string, budget int) []paragraphUnit {
+	var units []paragraphUnit
+	var currentLines []string
+	currentTokens := 0
+	partNum := 1
+
+	for _, line := range lines {
+		lineTokens := EstimateTokens(line + "\n")
+		if currentTokens+lineTokens > budget && len(currentLines) > 0 {
+			units = append(units, paragraphUnit{
+				name:    fmt.Sprintf("%s.part%d", baseName, partNum),
+				content: strings.Join(currentLines, "\n"),
+			})
+			partNum++
+			currentLines = nil
+			currentTokens = 0
+		}
+		currentLines = append(currentLines, line)
+		currentTokens += lineTokens
+	}
+
+	if len(currentLines) > 0 {
+		units = append(units, paragraphUnit{
+			name:    fmt.Sprintf("%s.part%d", baseName, partNum),
+			content: strings.Join(currentLines, "\n"),
+		})
 	}
 
 	return units

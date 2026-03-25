@@ -62,6 +62,23 @@ func New(dbPath string) (*Cache, error) {
 		return nil, fmt.Errorf("creating classify_cache table: %w", err)
 	}
 
+	// Per-chunk cache table for incremental multi-chunk file processing
+	if _, err := db.Exec(`
+		CREATE TABLE IF NOT EXISTS chunk_cache (
+			file_path    TEXT NOT NULL,
+			pass         INTEGER NOT NULL,
+			chunk_index  INTEGER NOT NULL,
+			chunk_total  INTEGER NOT NULL,
+			content_hash TEXT NOT NULL,
+			result_json  TEXT NOT NULL,
+			processed_at DATETIME NOT NULL,
+			PRIMARY KEY (file_path, pass, chunk_index)
+		)
+	`); err != nil {
+		db.Close()
+		return nil, fmt.Errorf("creating chunk_cache table: %w", err)
+	}
+
 	return &Cache{db: db}, nil
 }
 
@@ -329,6 +346,67 @@ func (c *Cache) BatchMarkClassified(entries []ClassifyEntry) error {
 	}
 
 	return tx.Commit()
+}
+
+// ChunkResult holds a cached per-chunk LLM response.
+type ChunkResult struct {
+	ChunkIndex  int
+	ChunkTotal  int
+	ContentHash string
+	ResultJSON  string
+}
+
+// SaveChunkResult caches the raw LLM JSON response for a specific chunk.
+func (c *Cache) SaveChunkResult(path string, pass, chunkIndex, chunkTotal int, contentHash, resultJSON string) error {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	_, err := c.db.Exec(
+		"INSERT OR REPLACE INTO chunk_cache (file_path, pass, chunk_index, chunk_total, content_hash, result_json, processed_at) VALUES (?, ?, ?, ?, ?, ?, ?)",
+		path, pass, chunkIndex, chunkTotal, contentHash, resultJSON, time.Now().UTC(),
+	)
+	if err != nil {
+		return fmt.Errorf("saving chunk result: %w", err)
+	}
+	return nil
+}
+
+// LoadChunkResults returns all cached chunk results for a file+pass.
+// Returns nil if no cached chunks exist.
+func (c *Cache) LoadChunkResults(path string, pass int) ([]ChunkResult, error) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	rows, err := c.db.Query(
+		"SELECT chunk_index, chunk_total, content_hash, result_json FROM chunk_cache WHERE file_path = ? AND pass = ? ORDER BY chunk_index",
+		path, pass,
+	)
+	if err != nil {
+		return nil, fmt.Errorf("loading chunk results: %w", err)
+	}
+	defer rows.Close()
+
+	var results []ChunkResult
+	for rows.Next() {
+		var cr ChunkResult
+		if err := rows.Scan(&cr.ChunkIndex, &cr.ChunkTotal, &cr.ContentHash, &cr.ResultJSON); err != nil {
+			return nil, fmt.Errorf("scanning chunk result: %w", err)
+		}
+		results = append(results, cr)
+	}
+	return results, nil
+}
+
+// ClearChunkResults removes all cached chunk results for a file+pass.
+func (c *Cache) ClearChunkResults(path string, pass int) error {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	_, err := c.db.Exec("DELETE FROM chunk_cache WHERE file_path = ? AND pass = ?", path, pass)
+	if err != nil {
+		return fmt.Errorf("clearing chunk results: %w", err)
+	}
+	return nil
 }
 
 // Close closes the underlying database connection.
