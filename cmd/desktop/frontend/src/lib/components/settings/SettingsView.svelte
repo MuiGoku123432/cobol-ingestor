@@ -7,6 +7,10 @@
   let message = $state('');
   let testingNeo4j = $state(false);
   let dockerStatus = $state<any>(null);
+  let modelOptions = $state<{id: string, name: string}[]>([]);
+  let modelsLoading = $state(false);
+  let modelsError = $state('');
+  let customModel = $state(false);
 
   async function loadConfig() {
     loading = true;
@@ -86,9 +90,28 @@
     }
   }
 
+  async function loadModels() {
+    modelsLoading = true;
+    modelsError = '';
+    try {
+      // @ts-ignore
+      modelOptions = await window.go.main.ChatService.ListModels();
+      // Check if current chatModel is in the fetched list
+      customModel = config.chatModel !== ''
+        && modelOptions.length > 0
+        && !modelOptions.some((m: any) => m.id === config.chatModel);
+    } catch (e: any) {
+      modelsError = 'Authenticate your LLM provider to load models';
+      modelOptions = [];
+    } finally {
+      modelsLoading = false;
+    }
+  }
+
   $effect(() => {
     loadConfig();
     checkDocker();
+    loadModels();
   });
 
   const providers = [
@@ -237,13 +260,41 @@
       <div class="field-row">
         <div class="field">
           <label>Chat Model</label>
-          <input type="text" bind:value={config.chatModel} placeholder="claude-opus-4-6" />
+          {#if modelsError}
+            <div class="hint">{modelsError}</div>
+            <input type="text" bind:value={config.chatModel} placeholder="claude-opus-4-6" />
+          {:else if modelsLoading}
+            <select disabled><option>Loading models...</option></select>
+          {:else}
+            <select value={customModel ? '__custom' : config.chatModel}
+                    onchange={(e) => {
+                      const v = e.currentTarget.value;
+                      if (v === '__custom') {
+                        customModel = true;
+                        config.chatModel = '';
+                      } else {
+                        customModel = false;
+                        config.chatModel = v;
+                      }
+                    }}>
+              {#each modelOptions as m}
+                <option value={m.id}>{m.name}</option>
+              {/each}
+              <option value="__custom">Custom...</option>
+            </select>
+          {/if}
         </div>
         <div class="field">
           <label>Max Tokens</label>
           <input type="number" bind:value={config.chatMaxTokens} min="1000" />
         </div>
       </div>
+      {#if customModel && !modelsError}
+        <div class="field">
+          <label>Custom Model ID</label>
+          <input type="text" bind:value={config.chatModel} placeholder="Enter model ID" />
+        </div>
+      {/if}
     </section>
 
     <!-- BusinessWare -->
@@ -479,6 +530,12 @@
   .docker-ok {
     font-size: 12px;
     color: #3fb950;
+  }
+
+  .hint {
+    font-size: 11px;
+    color: #8b949e;
+    margin-bottom: 4px;
   }
 
   .muted {
