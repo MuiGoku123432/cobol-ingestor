@@ -1,6 +1,7 @@
 <script lang="ts">
   // @ts-ignore - Wails runtime
   import { EventsOn } from 'wailsjs/runtime/runtime';
+  import { usePersistedState } from '../../stores/persisted.svelte';
 
   interface Message {
     role: string;
@@ -15,15 +16,18 @@
     toolCalls: number;
   }
 
+  let saved = usePersistedState('swarm', {
+    discoveryMode: true,
+    multiRound: false,
+    targetLang: 'Java',
+    framework: 'Spring Boot',
+    integrations: '',
+  });
+
   let messages = $state<Message[]>([]);
   let input = $state('');
   let streaming = $state(false);
   let streamedContent = $state('');
-  let discoveryMode = $state(true);
-  let multiRound = $state(false);
-  let targetLang = $state('Java');
-  let framework = $state('Spring Boot');
-  let integrations = $state('');
   let sessionId = $state('');
   let agents = $state<AgentState[]>([]);
 
@@ -41,7 +45,7 @@
       const allMsgs = messages.map((m) => ({ role: m.role, content: m.content }));
       // @ts-ignore
       await window.go.main.ChatService.SendSwarm(
-        sessionId, allMsgs, discoveryMode, multiRound, targetLang, framework, integrations
+        sessionId, allMsgs, saved.discoveryMode, saved.multiRound, saved.targetLang, saved.framework, saved.integrations
       );
     } catch (e: any) {
       messages = [...messages, { role: 'assistant', content: `Error: ${e.message || e}` }];
@@ -103,15 +107,15 @@
   <div class="swarm-main">
     <div class="mode-bar">
       <label class="toggle">
-        <input type="checkbox" bind:checked={discoveryMode} />
-        <span>{discoveryMode ? 'Discovery' : 'Migration'}</span>
+        <input type="checkbox" bind:checked={saved.discoveryMode} />
+        <span>{saved.discoveryMode ? 'Discovery' : 'Migration'}</span>
       </label>
       <label class="toggle">
-        <input type="checkbox" bind:checked={multiRound} />
+        <input type="checkbox" bind:checked={saved.multiRound} />
         <span>Multi-Round</span>
       </label>
-      {#if !discoveryMode}
-        <select bind:value={targetLang}>
+      {#if !saved.discoveryMode}
+        <select bind:value={saved.targetLang}>
           {#each languages as lang}
             <option>{lang}</option>
           {/each}

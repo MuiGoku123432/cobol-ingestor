@@ -10,30 +10,31 @@
   import StrategyView from './lib/components/strategy/StrategyView.svelte';
   import GraphView from './lib/components/graph/GraphView.svelte';
   import SettingsView from './lib/components/settings/SettingsView.svelte';
+  import { usePersistedState } from './lib/stores/persisted.svelte';
 
-  let currentView = $state('dashboard');
+  let saved = usePersistedState('app', { currentView: 'dashboard' });
 </script>
 
 <div class="app">
-  <Sidebar bind:currentView />
+  <Sidebar bind:currentView={saved.currentView} />
   <main class="content">
-    {#if currentView === 'dashboard'}
+    {#if saved.currentView === 'dashboard'}
       <DashboardView />
-    {:else if currentView === 'browse'}
+    {:else if saved.currentView === 'browse'}
       <BrowseView />
-    {:else if currentView === 'analysis'}
+    {:else if saved.currentView === 'analysis'}
       <AnalysisView />
-    {:else if currentView === 'ingest'}
+    {:else if saved.currentView === 'ingest'}
       <IngestView />
-    {:else if currentView === 'chat'}
+    {:else if saved.currentView === 'chat'}
       <ChatView />
-    {:else if currentView === 'swarm'}
+    {:else if saved.currentView === 'swarm'}
       <SwarmView />
-    {:else if currentView === 'strategy'}
+    {:else if saved.currentView === 'strategy'}
       <StrategyView />
-    {:else if currentView === 'graph'}
+    {:else if saved.currentView === 'graph'}
       <GraphView />
-    {:else if currentView === 'settings'}
+    {:else if saved.currentView === 'settings'}
       <SettingsView />
     {/if}
   </main>

@@ -71,6 +71,8 @@ func (a *App) startup(ctx context.Context) {
 	if a.cfg.Neo4j.URI != "" {
 		if err := a.Neo4jService.tryConnect(ctx); err != nil {
 			a.logger.Info("neo4j not connected at startup (configure via Settings)", zap.Error(err))
+		} else if err := a.initMCP(); err != nil {
+			a.logger.Error("init MCP at startup", zap.Error(err))
 		}
 	}
 
