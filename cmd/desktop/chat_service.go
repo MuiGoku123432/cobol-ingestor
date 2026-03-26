@@ -152,14 +152,35 @@ func (s *ChatService) DeleteSession(id string) error {
 	return s.sessionStore.Delete(id)
 }
 
+// ensureMCP lazily initializes the Neo4j connection and MCP client if not
+// already connected. This allows the chat to work after the user configures
+// Neo4j via Settings without requiring an explicit "Connect" click.
+func (s *ChatService) ensureMCP() error {
+	if s.mcpClient != nil {
+		return nil
+	}
+	if s.app.Neo4jService.client == nil {
+		if s.app.cfg.Neo4j.URI == "" {
+			return fmt.Errorf("Neo4j not configured (set connection details in Settings)")
+		}
+		if err := s.app.Neo4jService.tryConnect(s.app.ctx); err != nil {
+			return fmt.Errorf("Neo4j connection failed: %w", err)
+		}
+	}
+	if err := s.app.initMCP(); err != nil {
+		return fmt.Errorf("MCP initialization failed: %w", err)
+	}
+	return nil
+}
+
 // SendChat sends a chat message and streams responses via Wails events.
 // Events: chat:text, chat:tool_start, chat:tool_result, chat:done, chat:error
 func (s *ChatService) SendChat(sessionID string, messages []ChatMessage, discoveryMode bool, targetLang, framework, integrations string) error {
 	if !s.ps.IsReady() {
 		return fmt.Errorf("LLM provider not ready (configure in Settings)")
 	}
-	if s.mcpClient == nil {
-		return fmt.Errorf("MCP not connected (connect to Neo4j first)")
+	if err := s.ensureMCP(); err != nil {
+		return err
 	}
 
 	s.mu.Lock()
@@ -201,8 +222,8 @@ func (s *ChatService) SendSwarm(sessionID string, messages []ChatMessage, discov
 	if !s.ps.IsReady() {
 		return fmt.Errorf("LLM provider not ready (configure in Settings)")
 	}
-	if s.mcpClient == nil {
-		return fmt.Errorf("MCP not connected (connect to Neo4j first)")
+	if err := s.ensureMCP(); err != nil {
+		return err
 	}
 
 	s.mu.Lock()

@@ -54,6 +54,7 @@ type ConfigDTO struct {
 	BWExtensions string `json:"bwExtensions"`
 	BWMaxWorkers int    `json:"bwMaxWorkers"`
 	BWTokenLimit int    `json:"bwTokenLimit"`
+	BWMaxTokens  int    `json:"bwMaxTokens"`
 
 	// Oracle / External DB
 	OracleHost       string `json:"oracleHost"`
@@ -62,10 +63,14 @@ type ConfigDTO struct {
 	OracleUser       string `json:"oracleUser"`
 	OraclePassword   string `json:"oraclePassword"`
 	OracleWalletPath string `json:"oracleWalletPath"`
+	OracleTNSAdmin   string `json:"oracleTnsAdmin"`
 	OracleSQLclPath  string `json:"oracleSqlclPath"`
 	ExtDBName        string `json:"extDbName"`
 	ExtDBType        string `json:"extDbType"`
 	ExtDBMaxIter     int    `json:"extDbMaxIterations"`
+	ExtDBMCPCmd      string `json:"extDbMcpCmd"`
+	ExtDBMCPUrl      string `json:"extDbMcpUrl"`
+	ExtDBMaxTokens   int    `json:"extDbMaxTokens"`
 }
 
 // GetConfig returns the current configuration with secrets masked.
@@ -96,16 +101,21 @@ func (s *ConfigService) GetConfig() ConfigDTO {
 		BWExtensions:       cfg.BW.Extensions,
 		BWMaxWorkers:       cfg.BW.MaxWorkers,
 		BWTokenLimit:       cfg.BW.TokenLimit,
+		BWMaxTokens:        cfg.BW.MaxTokens,
 		OracleHost:         cfg.ExternalDB.OracleHost,
 		OraclePort:         cfg.ExternalDB.OraclePort,
 		OracleService:      cfg.ExternalDB.OracleService,
 		OracleUser:         cfg.ExternalDB.OracleUser,
 		OraclePassword:     maskSecret(cfg.ExternalDB.OraclePassword),
 		OracleWalletPath:   cfg.ExternalDB.OracleWalletPath,
+		OracleTNSAdmin:     cfg.ExternalDB.OracleTNSAdmin,
 		OracleSQLclPath:    cfg.ExternalDB.OracleSQLclPath,
 		ExtDBName:          cfg.ExternalDB.DatabaseName,
 		ExtDBType:          cfg.ExternalDB.DatabaseType,
 		ExtDBMaxIter:       cfg.ExternalDB.MaxIterations,
+		ExtDBMCPCmd:        cfg.ExternalDB.DBMCPCommand,
+		ExtDBMCPUrl:        cfg.ExternalDB.DBMCPServerURL,
+		ExtDBMaxTokens:     cfg.ExternalDB.MaxTokens,
 	}
 }
 
@@ -150,6 +160,9 @@ func (s *ConfigService) SaveConfig(dto ConfigDTO) error {
 	if dto.BWTokenLimit > 0 {
 		existing["BW_TOKEN_LIMIT"] = fmt.Sprintf("%d", dto.BWTokenLimit)
 	}
+	if dto.BWMaxTokens > 0 {
+		existing["BW_MAX_TOKENS"] = fmt.Sprintf("%d", dto.BWMaxTokens)
+	}
 
 	// Oracle / External DB
 	setIfNotMasked(existing, "ORACLE_HOST", dto.OracleHost)
@@ -158,11 +171,17 @@ func (s *ConfigService) SaveConfig(dto ConfigDTO) error {
 	setIfNotMasked(existing, "ORACLE_USER", dto.OracleUser)
 	setIfNotMasked(existing, "ORACLE_PASSWORD", dto.OraclePassword)
 	setIfNotMasked(existing, "ORACLE_WALLET_PATH", dto.OracleWalletPath)
+	setIfNotMasked(existing, "ORACLE_TNS_ADMIN", dto.OracleTNSAdmin)
 	setIfNotMasked(existing, "ORACLE_SQLCL_PATH", dto.OracleSQLclPath)
 	setIfNotMasked(existing, "EXTDB_DATABASE_NAME", dto.ExtDBName)
 	setIfNotMasked(existing, "EXTDB_DATABASE_TYPE", dto.ExtDBType)
 	if dto.ExtDBMaxIter > 0 {
 		existing["EXTDB_MAX_ITERATIONS"] = fmt.Sprintf("%d", dto.ExtDBMaxIter)
+	}
+	setIfNotMasked(existing, "EXTDB_MCP_CMD", dto.ExtDBMCPCmd)
+	setIfNotMasked(existing, "EXTDB_MCP_URL", dto.ExtDBMCPUrl)
+	if dto.ExtDBMaxTokens > 0 {
+		existing["EXTDB_MAX_TOKENS"] = fmt.Sprintf("%d", dto.ExtDBMaxTokens)
 	}
 
 	if err := godotenv.Write(existing, envPath); err != nil {

@@ -1,6 +1,7 @@
 <script lang="ts">
   // @ts-ignore - Wails runtime
   import { EventsOn } from 'wailsjs/runtime/runtime';
+  import { usePersistedState } from '../../stores/persisted.svelte';
 
   interface Question {
     id: string;
@@ -27,9 +28,12 @@
 
   type Phase = 'questionnaire' | 'analysis' | 'results';
 
-  let phase = $state<Phase>('questionnaire');
+  let saved = usePersistedState('strategy', {
+    phase: 'questionnaire' as Phase,
+    answers: {} as Record<string, string[]>,
+  });
+
   let questions = $state<Question[]>([]);
-  let answers = $state<Record<string, string[]>>({});
   let validationErrors = $state<string[]>([]);
   let agents = $state<AgentState[]>([]);
   let synthesisContent = $state('');
@@ -44,7 +48,7 @@
 
     const unsubs = [
       EventsOn('strategy:start', () => {
-        phase = 'analysis';
+        saved.phase = 'analysis';
         agents = [];
         synthesisContent = '';
         writtenFiles = [];
@@ -81,12 +85,12 @@
       }),
       EventsOn('strategy:complete', (data: any) => {
         outputDir = data?.outputDir || '';
-        phase = 'results';
+        saved.phase = 'results';
       }),
       EventsOn('strategy:error', (data: any) => {
         errorMessage = data?.error || 'Unknown error';
-        if (phase === 'analysis') {
-          phase = 'questionnaire';
+        if (saved.phase === 'analysis') {
+          saved.phase = 'questionnaire';
         }
       }),
     ];
@@ -106,21 +110,21 @@
 
   function shouldShow(q: Question): boolean {
     if (!q.dependsOn) return true;
-    const parentAnswers = answers[q.dependsOn.questionId];
+    const parentAnswers = saved.answers[q.dependsOn.questionId];
     if (!parentAnswers || parentAnswers.length === 0) return false;
     return parentAnswers.some(a => q.dependsOn!.values.includes(a));
   }
 
   function setAnswer(id: string, value: string) {
-    answers = { ...answers, [id]: [value] };
+    saved.answers = { ...saved.answers, [id]: [value] };
   }
 
   function toggleMulti(id: string, value: string) {
-    const current = answers[id] || [];
+    const current = saved.answers[id] || [];
     if (current.includes(value)) {
-      answers = { ...answers, [id]: current.filter(v => v !== value) };
+      saved.answers = { ...saved.answers, [id]: current.filter(v => v !== value) };
     } else {
-      answers = { ...answers, [id]: [...current, value] };
+      saved.answers = { ...saved.answers, [id]: [...current, value] };
     }
   }
 
@@ -148,7 +152,7 @@
     try {
       // Validate
       // @ts-ignore
-      const [ctx, errors] = await window.go.main.StrategyService.ValidateAnswers(answers);
+      const [ctx, errors] = await window.go.main.StrategyService.ValidateAnswers(saved.answers);
       if (errors && errors.length > 0) {
         validationErrors = errors;
         loading = false;
@@ -165,7 +169,7 @@
 
       // Start
       // @ts-ignore
-      await window.go.main.StrategyService.StartStrategy(answers, dir);
+      await window.go.main.StrategyService.StartStrategy(saved.answers, dir);
     } catch (e: any) {
       errorMessage = e.message || String(e);
     } finally {
@@ -179,7 +183,7 @@
   }
 
   function startOver() {
-    phase = 'questionnaire';
+    saved.phase = 'questionnaire';
     agents = [];
     synthesisContent = '';
     writtenFiles = [];
@@ -189,7 +193,7 @@
 </script>
 
 <div class="strategy-layout">
-  {#if phase === 'questionnaire'}
+  {#if saved.phase === 'questionnaire'}
     <div class="questionnaire">
       <h2>Migration Strategy Planner</h2>
       <p class="subtitle">Answer the questions below to generate a comprehensive migration strategy document set.</p>
@@ -225,7 +229,7 @@
                     {#each q.options as opt}
                       <button
                         class="option-btn"
-                        class:selected={(answers[q.id] || [])[0] === opt.value}
+                        class:selected={(saved.answers[q.id] || [])[0] === opt.value}
                         onclick={() => setAnswer(q.id, opt.value)}
                       >
                         <span class="opt-label">{opt.label}</span>
@@ -240,7 +244,7 @@
                     {#each q.options as opt}
                       <button
                         class="option-btn"
-                        class:selected={(answers[q.id] || []).includes(opt.value)}
+                        class:selected={(saved.answers[q.id] || []).includes(opt.value)}
                         onclick={() => toggleMulti(q.id, opt.value)}
                       >
                         <span class="opt-label">{opt.label}</span>
@@ -250,14 +254,14 @@
                 {:else if q.type === 'text'}
                   <input
                     type="text"
-                    value={(answers[q.id] || [''])[0]}
+                    value={(saved.answers[q.id] || [''])[0]}
                     oninput={(e) => setAnswer(q.id, (e.target as HTMLInputElement).value)}
                     placeholder={q.description || ''}
                   />
                 {:else if q.type === 'number'}
                   <input
                     type="number"
-                    value={(answers[q.id] || [''])[0]}
+                    value={(saved.answers[q.id] || [''])[0]}
                     oninput={(e) => setAnswer(q.id, (e.target as HTMLInputElement).value)}
                     min="0"
                   />
@@ -275,7 +279,7 @@
       </div>
     </div>
 
-  {:else if phase === 'analysis'}
+  {:else if saved.phase === 'analysis'}
     <div class="analysis">
       <h2>Generating Migration Strategy</h2>
 
@@ -309,7 +313,7 @@
       </div>
     </div>
 
-  {:else if phase === 'results'}
+  {:else if saved.phase === 'results'}
     <div class="results">
       <h2>Strategy Generated</h2>
       <p class="subtitle">Your migration strategy documents have been written to: <code>{outputDir}</code></p>

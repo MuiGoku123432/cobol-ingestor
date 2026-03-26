@@ -4,8 +4,9 @@
   import ProgramDetailView from '../programs/ProgramDetailView.svelte';
   import DomainListView from './DomainListView.svelte';
   import DomainDetailView from './DomainDetailView.svelte';
+  import { usePersistedState } from '../../stores/persisted.svelte';
 
-  let activeTab = $state('programs');
+  let saved = usePersistedState('browse', { activeTab: 'programs' });
   let selectedProgram = $state<string | null>(null);
   let selectedDomain = $state<string | null>(null);
 
@@ -17,7 +18,7 @@
   // Clear detail selections when switching tabs
   $effect(() => {
     // Access activeTab to track it
-    const _ = activeTab;
+    const _ = saved.activeTab;
     selectedProgram = null;
     selectedDomain = null;
   });
@@ -25,16 +26,16 @@
 
 <div class="browse">
   <h2>Browse</h2>
-  <Tabs {tabs} bind:activeTab />
+  <Tabs {tabs} bind:activeTab={saved.activeTab} />
 
-  {#if activeTab === 'programs'}
+  {#if saved.activeTab === 'programs'}
     {#if selectedProgram}
       <ProgramDetailView programId={selectedProgram} onBack={() => selectedProgram = null} />
     {:else}
       <ProgramListView onSelectProgram={(id) => selectedProgram = id} />
     {/if}
 
-  {:else if activeTab === 'domains'}
+  {:else if saved.activeTab === 'domains'}
     {#if selectedDomain}
       <DomainDetailView name={selectedDomain} onBack={() => selectedDomain = null} />
     {:else}

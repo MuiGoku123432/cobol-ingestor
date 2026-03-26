@@ -52,7 +52,7 @@ func (s *IngestService) SelectDirectory(title string) (string, error) {
 
 // StartIngestion starts the pipeline in a background goroutine.
 // pass=0 runs all passes; pass=1-5 runs a specific pass.
-func (s *IngestService) StartIngestion(dir string, pass int) error {
+func (s *IngestService) StartIngestion(dir string, pass int, contentDetect bool) error {
 	s.mu.Lock()
 	if s.running {
 		s.mu.Unlock()
@@ -81,7 +81,7 @@ func (s *IngestService) StartIngestion(dir string, pass int) error {
 
 		s.emit("start", map[string]any{"dir": dir, "pass": pass})
 
-		if err := s.runPipeline(ctx, dir, pass); err != nil {
+		if err := s.runPipeline(ctx, dir, pass, contentDetect); err != nil {
 			if ctx.Err() != nil {
 				s.emit("cancelled", nil)
 			} else {
@@ -120,14 +120,17 @@ func (s *IngestService) emit(event string, data any) {
 	runtime.EventsEmit(s.app.ctx, "ingest:"+event, data)
 }
 
-func (s *IngestService) runPipeline(ctx context.Context, dir string, passFlag int) error {
+func (s *IngestService) runPipeline(ctx context.Context, dir string, passFlag int, contentDetect bool) error {
 	cfg := s.app.cfg
 	cfg.Ingest.RootDir = dir
 	logger := s.newEventLogger()
 
 	// Scan filesystem
 	s.emit("progress", map[string]any{"phase": "scanning", "message": "Scanning files..."})
-	scanResult, err := scanner.Scan(ctx, dir, logger)
+	detect := contentDetect || cfg.Ingest.ContentDetect
+	scanResult, err := scanner.Scan(ctx, dir, logger, scanner.ScanOptions{
+		ContentDetect: detect,
+	})
 	if err != nil {
 		return fmt.Errorf("scanning: %w", err)
 	}
@@ -182,6 +185,14 @@ func (s *IngestService) runPipeline(ctx context.Context, dir string, passFlag in
 		if resolved, err := llm.ResolveCopilotModels(ctx, provider, cfg.Claude.OpusModel, cfg.Claude.SonnetModel); err == nil {
 			cfg.Claude.OpusModel = resolved.OpusModel
 			cfg.Claude.SonnetModel = resolved.SonnetModel
+		}
+	}
+
+	// Classify .txt files if content detection is enabled
+	if detect && len(scanResult.Snippets) > 0 {
+		s.emit("progress", map[string]any{"phase": "classifying", "message": "Classifying .txt files..."})
+		if err := scanner.ClassifyPendingFiles(ctx, scanResult, provider, cfg.Claude.SonnetModel, logger, fileCache); err != nil {
+			logger.Warn("content classification had errors", zap.Error(err))
 		}
 	}
 
@@ -562,10 +573,18 @@ func (s *IngestService) StartOracleAnalysis() error {
 	s.mu.Unlock()
 
 	if s.app.Neo4jService.client == nil {
-		s.mu.Lock()
-		s.running = false
-		s.mu.Unlock()
-		return fmt.Errorf("not connected to Neo4j")
+		if s.app.cfg.Neo4j.URI == "" {
+			s.mu.Lock()
+			s.running = false
+			s.mu.Unlock()
+			return fmt.Errorf("Neo4j not configured (set connection details in Settings)")
+		}
+		if err := s.app.Neo4jService.tryConnect(s.app.ctx); err != nil {
+			s.mu.Lock()
+			s.running = false
+			s.mu.Unlock()
+			return fmt.Errorf("Neo4j connection failed: %w", err)
+		}
 	}
 
 	ctx, cancel := context.WithCancel(s.app.ctx)

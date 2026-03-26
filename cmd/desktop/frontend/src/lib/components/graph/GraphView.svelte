@@ -2,13 +2,19 @@
   import NVL from '@neo4j-nvl/base';
   import ContextMenu from './ContextMenu.svelte';
   import CypherPanel from './CypherPanel.svelte';
+  import { usePersistedState } from '../../stores/persisted.svelte';
+
+  let saved = usePersistedState('graph', {
+    selectedDomain: '',
+    cypherVisible: false,
+    showMinimap: false,
+  });
 
   let container: HTMLDivElement;
   let minimapContainer: HTMLDivElement;
   let nvl: NVL | null = null;
 
   let domains: { name: string; description: string }[] = $state([]);
-  let selectedDomain = $state('');
   let loading = $state(false);
   let error = $state('');
 
@@ -26,12 +32,6 @@
 
   // Navigation breadcrumb trail
   let navHistory: { id: string; label: string; caption: string }[] = $state([]);
-
-  // Minimap
-  let showMinimap = $state(false);
-
-  // Cypher panel
-  let cypherVisible = $state(false);
 
   const colorMap: Record<string, string> = {
     Program: '#238636',
@@ -95,7 +95,7 @@
       },
     };
 
-    if (showMinimap && minimapContainer) {
+    if (saved.showMinimap && minimapContainer) {
       nvlOptions.minimapContainer = minimapContainer;
     }
 
@@ -264,11 +264,11 @@
   }
 
   function resetGraph() {
-    loadAndTrackGraph(selectedDomain);
+    loadAndTrackGraph(saved.selectedDomain);
   }
 
   function toggleMinimap() {
-    showMinimap = !showMinimap;
+    saved.showMinimap = !saved.showMinimap;
     // Need to re-render to apply minimap container
     if (nvl) {
       resetGraph();
@@ -288,7 +288,7 @@
     // Ctrl/Cmd+Q — toggle Cypher panel (always)
     if ((e.ctrlKey || e.metaKey) && e.key === 'q') {
       e.preventDefault();
-      cypherVisible = !cypherVisible;
+      saved.cypherVisible = !saved.cypherVisible;
       return;
     }
 
@@ -313,8 +313,8 @@
       case 'Escape':
         if (ctxMenuVisible) {
           ctxMenuVisible = false;
-        } else if (cypherVisible) {
-          cypherVisible = false;
+        } else if (saved.cypherVisible) {
+          saved.cypherVisible = false;
         } else if (selectedNode) {
           clearSelection();
         }
@@ -331,7 +331,7 @@
 
   $effect(() => {
     loadDomains();
-    loadAndTrackGraph('');
+    loadAndTrackGraph(saved.selectedDomain);
 
     return () => {
       if (nvl) {
@@ -350,8 +350,8 @@
       <label for="domain-filter">Domain:</label>
       <select
         id="domain-filter"
-        bind:value={selectedDomain}
-        onchange={() => loadAndTrackGraph(selectedDomain)}
+        bind:value={saved.selectedDomain}
+        onchange={() => loadAndTrackGraph(saved.selectedDomain)}
       >
         <option value="">All Programs</option>
         {#each domains as d}
@@ -372,8 +372,8 @@
     {/if}
 
     <div class="toolbar-right">
-      <button onclick={() => { cypherVisible = !cypherVisible; }} title="Cypher query (Ctrl+Q)" class:active={cypherVisible}>Cypher</button>
-      <button onclick={toggleMinimap} title="Toggle minimap" class:active={showMinimap}>Map</button>
+      <button onclick={() => { saved.cypherVisible = !saved.cypherVisible; }} title="Cypher query (Ctrl+Q)" class:active={saved.cypherVisible}>Cypher</button>
+      <button onclick={toggleMinimap} title="Toggle minimap" class:active={saved.showMinimap}>Map</button>
       <button onclick={fitGraph} title="Fit to view (F)">Fit</button>
       <button onclick={resetGraph} title="Reset graph">Reset</button>
     </div>
@@ -399,7 +399,7 @@
         </div>
 
         <!-- Minimap -->
-        {#if showMinimap}
+        {#if saved.showMinimap}
           <div class="minimap" bind:this={minimapContainer}></div>
         {/if}
 
@@ -447,7 +447,7 @@
       {/if}
     </div>
 
-    <CypherPanel bind:visible={cypherVisible} onrungraph={handleCypherGraph} />
+    <CypherPanel bind:visible={saved.cypherVisible} onrungraph={handleCypherGraph} />
   </div>
 </div>
 

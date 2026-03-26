@@ -266,6 +266,10 @@
           <label>Token Limit</label>
           <input type="number" bind:value={config.bwTokenLimit} min="1000" />
         </div>
+        <div class="field">
+          <label>Max Output Tokens</label>
+          <input type="number" bind:value={config.bwMaxTokens} min="1000" />
+        </div>
       </div>
     </section>
 
@@ -301,6 +305,10 @@
         <input type="text" bind:value={config.oracleWalletPath} placeholder="/path/to/wallet" />
       </div>
       <div class="field">
+        <label>TNS Admin Path</label>
+        <input type="text" bind:value={config.oracleTnsAdmin} placeholder="/path/to/tns_admin" />
+      </div>
+      <div class="field">
         <label>SQLcl Path</label>
         <input type="text" bind:value={config.oracleSqlclPath} placeholder="sql (auto-detected if empty)" />
       </div>
@@ -318,6 +326,24 @@
             <option value="mysql">MySQL</option>
             <option value="sqlserver">SQL Server</option>
           </select>
+        </div>
+      </div>
+      <div class="field">
+        <label>MCP Command</label>
+        <input type="text" bind:value={config.extDbMcpCmd} placeholder="npx @some/db-mcp-server --db postgres" />
+      </div>
+      <div class="field">
+        <label>MCP URL</label>
+        <input type="text" bind:value={config.extDbMcpUrl} placeholder="http://localhost:3100/sse" />
+      </div>
+      <div class="field-row">
+        <div class="field">
+          <label>Max Iterations</label>
+          <input type="number" bind:value={config.extDbMaxIterations} min="1" max="100" />
+        </div>
+        <div class="field">
+          <label>Max Tokens</label>
+          <input type="number" bind:value={config.extDbMaxTokens} min="1000" />
         </div>
       </div>
     </section>

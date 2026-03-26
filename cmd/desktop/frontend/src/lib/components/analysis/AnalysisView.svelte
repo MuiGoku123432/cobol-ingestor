@@ -6,8 +6,9 @@
   import MigrationSequence from './MigrationSequence.svelte';
   import DeadCodeSummary from './DeadCodeSummary.svelte';
   import EffortEstimates from './EffortEstimates.svelte';
+  import { usePersistedState } from '../../stores/persisted.svelte';
 
-  let activeTab = $state('modernization');
+  let saved = usePersistedState('analysis', { activeTab: 'modernization' });
 
   const tabs = [
     { id: 'modernization', label: 'Modernization' },
@@ -33,7 +34,7 @@
       migration: 'migration',
       deadcode: 'dead-code',
     };
-    const reportType = typeMap[activeTab];
+    const reportType = typeMap[saved.activeTab];
     if (!reportType) return;
     // @ts-ignore
     const dir = await window.go.main.ExportService.SelectSaveDirectory();
@@ -52,17 +53,17 @@
     </div>
   </div>
 
-  <Tabs {tabs} bind:activeTab />
+  <Tabs {tabs} bind:activeTab={saved.activeTab} />
 
-  {#if activeTab === 'modernization'}
+  {#if saved.activeTab === 'modernization'}
     <ModernizationCandidates />
-  {:else if activeTab === 'risk'}
+  {:else if saved.activeTab === 'risk'}
     <RiskPrograms />
-  {:else if activeTab === 'migration'}
+  {:else if saved.activeTab === 'migration'}
     <MigrationSequence />
-  {:else if activeTab === 'deadcode'}
+  {:else if saved.activeTab === 'deadcode'}
     <DeadCodeSummary />
-  {:else if activeTab === 'effort'}
+  {:else if saved.activeTab === 'effort'}
     <EffortEstimates />
   {/if}
 </div>
