@@ -17,11 +17,20 @@ import (
 	"go.uber.org/zap"
 )
 
-// classifyBatchSize is the number of files sent per LLM classification call.
+// classifyBatchSize is the default number of files sent per LLM classification call.
 const classifyBatchSize = 8
 
 // classifyMaxWorkers is the max concurrent LLM classification requests.
 const classifyMaxWorkers = 5
+
+// confidenceThreshold is the minimum confidence for accepting a classification.
+const confidenceThreshold = 0.7
+
+// retrySnippetLines defines snippet sizes for each attempt.
+var retrySnippetLines = [3]int{150, 400, 800}
+
+// retryBatchSizes defines batch sizes for each attempt.
+var retryBatchSizes = [3]int{8, 4, 1}
 
 // ClassifyPendingFiles resolves FileTypePending entries in result using LLM
 // classification (when provider is non-nil) or heuristic fallback.
@@ -64,12 +73,15 @@ func ClassifyPendingFiles(ctx context.Context, result *ScanResult, provider llm.
 			for path, cr := range hits {
 				idx := pathIdx[path]
 				result.Files[idx].Type = graph.FileType(cr.FileType)
+				result.Files[idx].Confidence = cr.Confidence
+				result.Files[idx].Classifier = "CACHE"
 				delete(result.Snippets, path)
 				delete(pathIdx, path)
 				logger.Info("cached classification",
 					zap.String("file", filepath.Base(path)),
 					zap.String("type", cr.FileType),
 					zap.String("classifier", cr.Classifier),
+					zap.Float64("confidence", cr.Confidence),
 				)
 			}
 		}
@@ -81,14 +93,15 @@ func ClassifyPendingFiles(ctx context.Context, result *ScanResult, provider llm.
 		}
 	}
 
-	// Track classifier per file for cache storage
+	// Track classifier + confidence per file for cache storage
 	classifiedBy := make(map[string]string, len(pathIdx))
+	classifiedConf := make(map[string]float64, len(pathIdx))
 
 	var classifyErr error
 	if provider != nil {
-		classifyErr = classifyWithLLM(ctx, result, pathIdx, provider, model, logger, classifiedBy)
+		classifyErr = classifyWithLLMProgressive(ctx, result, pathIdx, provider, model, logger, classifiedBy, classifiedConf)
 	} else {
-		classifyWithHeuristic(result, pathIdx, logger, classifiedBy)
+		classifyWithHeuristic(result, pathIdx, logger, classifiedBy, classifiedConf)
 	}
 
 	// Store newly classified files in cache
@@ -104,6 +117,7 @@ func ClassifyPendingFiles(ctx context.Context, result *ScanResult, provider llm.
 				Hash:       result.Files[idx].Hash,
 				FileType:   string(result.Files[idx].Type),
 				Classifier: classifier,
+				Confidence: classifiedConf[path],
 			})
 		}
 		if len(entries) > 0 {
@@ -144,163 +158,331 @@ func filterClassifiedFiles(result *ScanResult, logger *zap.Logger, errs ...error
 
 // llmClassification is the JSON structure returned by the LLM.
 type llmClassification struct {
-	File string `json:"file"`
-	Type string `json:"type"`
+	File       string  `json:"file"`
+	Type       string  `json:"type"`
+	Confidence float64 `json:"confidence"`
+	Reasoning  string  `json:"reasoning"`
 }
 
-func classifyWithLLM(ctx context.Context, result *ScanResult, pathIdx map[string]int, provider llm.Provider, model string, logger *zap.Logger, classifiedBy map[string]string) error {
+// classifyWithLLMProgressive implements 3-attempt progressive classification.
+// Attempt 1: standard snippet, batch size 8
+// Attempt 2: 400-line snippet, batch size 4 (files with confidence < 0.7 or UNKNOWN)
+// Attempt 3: 800-line snippet, batch size 1 (still uncertain)
+// Heuristic fallback only for files where all LLM attempts errored.
+func classifyWithLLMProgressive(ctx context.Context, result *ScanResult, pathIdx map[string]int, provider llm.Provider, model string, logger *zap.Logger, classifiedBy map[string]string, classifiedConf map[string]float64) error {
 	// Collect pending paths in sorted order for deterministic batching
-	paths := make([]string, 0, len(pathIdx))
+	allPaths := make([]string, 0, len(pathIdx))
 	for p := range pathIdx {
-		paths = append(paths, p)
+		allPaths = append(allPaths, p)
 	}
-	sort.Strings(paths)
+	sort.Strings(allPaths)
 
-	// Build batches with pre-copied snippets (avoids concurrent map reads)
-	type classifyBatch struct {
-		paths    []string
-		snippets map[string][]string
-	}
-	var batches []classifyBatch
-	for i := 0; i < len(paths); i += classifyBatchSize {
-		end := i + classifyBatchSize
-		if end > len(paths) {
-			end = len(paths)
-		}
-		batchPaths := paths[i:end]
-		batchSnippets := make(map[string][]string, len(batchPaths))
-		for _, p := range batchPaths {
-			batchSnippets[p] = result.Snippets[p]
-		}
-		batches = append(batches, classifyBatch{paths: batchPaths, snippets: batchSnippets})
-	}
+	// Track previous attempt results for enhanced retry prompts
+	prevResults := make(map[string]*llmClassification)
 
-	logger.Info("LLM classification starting",
-		zap.Int("files", len(paths)),
-		zap.Int("batches", len(batches)),
-		zap.Int("workers", classifyMaxWorkers),
-	)
+	// Track files that errored on all attempts (candidates for heuristic)
+	llmErrorFiles := make(map[string]bool)
 
-	// Mutex protects result.Files and result.Snippets during concurrent updates
-	var mu sync.Mutex
 	var firstErr error
 	var errOnce sync.Once
 
-	sem := make(chan struct{}, classifyMaxWorkers)
-	var wg sync.WaitGroup
+	for attempt := 0; attempt < 3; attempt++ {
+		if ctx.Err() != nil {
+			break
+		}
 
-	for batchIdx, b := range batches {
-		wg.Add(1)
-		go func(batchIdx int, batch []string, batchSnippets map[string][]string) {
-			defer wg.Done()
+		var pendingPaths []string
+		if attempt == 0 {
+			pendingPaths = allPaths
+		} else {
+			// Collect files that need retry: low confidence, UNKNOWN, or errored
+			for _, p := range allPaths {
+				idx := pathIdx[p]
+				ft := result.Files[idx].Type
+				conf := result.Files[idx].Confidence
 
-			sem <- struct{}{}
-			defer func() { <-sem }()
-
-			if ctx.Err() != nil {
-				return
-			}
-
-			// Build prompt using pre-copied snippets
-			prompt := buildClassifyPrompt(batch, batchSnippets)
-
-			resp, err := provider.Complete(ctx, llm.CompletionRequest{
-				Model: model,
-				Messages: []llm.Message{
-					{Role: llm.RoleSystem, Content: "You are an expert IBM mainframe and COBOL analyst. Your task is to classify source code files from mainframe COBOL codebases. When uncertain, prefer COBOL or COPYBOOK over UNKNOWN — it is better to include a borderline file than to miss real mainframe source code."},
-					{Role: llm.RoleUser, Content: prompt},
-				},
-				MaxTokens:   1024,
-				Temperature: 0,
-			})
-			if err != nil {
-				logger.Error("LLM classification batch failed, falling back to heuristic",
-					zap.Int("batch", batchIdx),
-					zap.Error(err),
-				)
-				errOnce.Do(func() { firstErr = err })
-				batchPathIdx := make(map[string]int, len(batch))
-				for _, p := range batch {
-					batchPathIdx[p] = pathIdx[p]
+				// Still pending (errored) or low confidence or UNKNOWN
+				if ft == graph.FileTypePending || ft == "UNKNOWN" || conf < confidenceThreshold {
+					pendingPaths = append(pendingPaths, p)
 				}
-				mu.Lock()
-				classifyWithHeuristic(result, batchPathIdx, logger, classifiedBy)
-				mu.Unlock()
-				return
 			}
+		}
 
-			// Parse JSON from response
-			classifications, parseErr := parseClassifyResponse(resp.Content)
-			if parseErr != nil {
-				logger.Error("failed to parse LLM classification response, falling back to heuristic",
-					zap.Int("batch", batchIdx),
-					zap.Error(parseErr),
-					zap.String("response", resp.Content),
-				)
-				errOnce.Do(func() { firstErr = fmt.Errorf("parsing LLM response: %w", parseErr) })
-				batchPathIdx := make(map[string]int, len(batch))
-				for _, p := range batch {
-					batchPathIdx[p] = pathIdx[p]
-				}
-				mu.Lock()
-				classifyWithHeuristic(result, batchPathIdx, logger, classifiedBy)
-				mu.Unlock()
-				return
-			}
+		if len(pendingPaths) == 0 {
+			break
+		}
 
-			// Map filename back to full path
-			nameToPath := make(map[string]string, len(batch))
-			for _, p := range batch {
-				nameToPath[filepath.Base(p)] = p
-			}
+		batchSize := retryBatchSizes[attempt]
+		snippetLines := retrySnippetLines[attempt]
 
-			mu.Lock()
-			for _, c := range classifications {
-				p, ok := nameToPath[c.File]
-				if !ok {
+		logger.Info("LLM classification attempt",
+			zap.Int("attempt", attempt+1),
+			zap.Int("files", len(pendingPaths)),
+			zap.Int("snippetLines", snippetLines),
+			zap.Int("batchSize", batchSize),
+		)
+
+		// For attempts 2+, re-read files with larger snippets
+		if attempt > 0 {
+			for _, p := range pendingPaths {
+				newSnippet, err := readLargerSnippet(p, snippetLines)
+				if err != nil {
+					logger.Warn("failed to re-read file for retry",
+						zap.String("file", filepath.Base(p)),
+						zap.Error(err),
+					)
 					continue
 				}
-				idx, ok := pathIdx[p]
-				if !ok {
-					continue
+				if result.Snippets == nil {
+					result.Snippets = make(map[string][]string)
 				}
-				ft := mapClassificationType(c.Type)
-				result.Files[idx].Type = ft
-				delete(result.Snippets, p)
-				classifiedBy[p] = "LLM"
-				logger.Info("LLM classified file",
-					zap.String("file", c.File),
-					zap.String("type", string(ft)),
-				)
+				result.Snippets[p] = newSnippet
 			}
-			mu.Unlock()
-		}(batchIdx, b.paths, b.snippets)
+		}
+
+		// Build batches
+		type classifyBatch struct {
+			paths    []string
+			snippets map[string][]string
+		}
+		var batches []classifyBatch
+		for i := 0; i < len(pendingPaths); i += batchSize {
+			end := i + batchSize
+			if end > len(pendingPaths) {
+				end = len(pendingPaths)
+			}
+			batchPaths := pendingPaths[i:end]
+			batchSnippets := make(map[string][]string, len(batchPaths))
+			for _, p := range batchPaths {
+				batchSnippets[p] = result.Snippets[p]
+			}
+			batches = append(batches, classifyBatch{paths: batchPaths, snippets: batchSnippets})
+		}
+
+		// Process batches concurrently
+		var mu sync.Mutex
+		sem := make(chan struct{}, classifyMaxWorkers)
+		var wg sync.WaitGroup
+
+		for batchIdx, b := range batches {
+			wg.Add(1)
+			go func(batchIdx int, batch []string, batchSnippets map[string][]string) {
+				defer wg.Done()
+
+				sem <- struct{}{}
+				defer func() { <-sem }()
+
+				if ctx.Err() != nil {
+					return
+				}
+
+				// Build prompt (enhanced for retry attempts)
+				mu.Lock()
+				var batchPrevResults map[string]*llmClassification
+				if attempt > 0 {
+					batchPrevResults = make(map[string]*llmClassification)
+					for _, p := range batch {
+						if prev, ok := prevResults[p]; ok {
+							batchPrevResults[p] = prev
+						}
+					}
+				}
+				mu.Unlock()
+
+				prompt := buildClassifyPrompt(batch, batchSnippets)
+				systemMsg := classifySystemMessage
+
+				if attempt > 0 && len(batchPrevResults) > 0 {
+					prompt = buildRetryClassifyPrompt(batch, batchSnippets, batchPrevResults, attempt+1)
+				}
+
+				resp, err := provider.Complete(ctx, llm.CompletionRequest{
+					Model: model,
+					Messages: []llm.Message{
+						{Role: llm.RoleSystem, Content: systemMsg},
+						{Role: llm.RoleUser, Content: prompt},
+					},
+					MaxTokens:   2048,
+					Temperature: 0,
+				})
+				if err != nil {
+					logger.Error("LLM classification batch failed",
+						zap.Int("attempt", attempt+1),
+						zap.Int("batch", batchIdx),
+						zap.Error(err),
+					)
+					errOnce.Do(func() { firstErr = err })
+					mu.Lock()
+					for _, p := range batch {
+						llmErrorFiles[p] = true
+					}
+					mu.Unlock()
+					return
+				}
+
+				// Parse JSON from response
+				classifications, parseErr := parseClassifyResponse(resp.Content)
+				if parseErr != nil {
+					logger.Error("failed to parse LLM classification response",
+						zap.Int("attempt", attempt+1),
+						zap.Int("batch", batchIdx),
+						zap.Error(parseErr),
+						zap.String("response", resp.Content),
+					)
+					errOnce.Do(func() { firstErr = fmt.Errorf("parsing LLM response: %w", parseErr) })
+					mu.Lock()
+					for _, p := range batch {
+						llmErrorFiles[p] = true
+					}
+					mu.Unlock()
+					return
+				}
+
+				// Map filename back to full path
+				nameToPath := make(map[string]string, len(batch))
+				for _, p := range batch {
+					nameToPath[filepath.Base(p)] = p
+				}
+
+				mu.Lock()
+				for _, c := range classifications {
+					p, ok := nameToPath[c.File]
+					if !ok {
+						continue
+					}
+					idx, ok := pathIdx[p]
+					if !ok {
+						continue
+					}
+					ft := mapClassificationType(c.Type)
+					conf := c.Confidence
+					if conf == 0 {
+						conf = 0.8 // default if LLM didn't provide confidence
+					}
+
+					// Only update if this attempt's result is better
+					if attempt == 0 || conf > result.Files[idx].Confidence || result.Files[idx].Type == graph.FileTypePending {
+						result.Files[idx].Type = ft
+						result.Files[idx].Confidence = conf
+						result.Files[idx].Classifier = "LLM"
+						classifiedBy[p] = "LLM"
+						classifiedConf[p] = conf
+						delete(llmErrorFiles, p) // clear error flag on success
+					}
+
+					// Store for potential retry prompt
+					prevResults[p] = &c
+
+					logger.Info("LLM classified file",
+						zap.Int("attempt", attempt+1),
+						zap.String("file", c.File),
+						zap.String("type", string(ft)),
+						zap.Float64("confidence", conf),
+						zap.String("reasoning", c.Reasoning),
+					)
+				}
+				mu.Unlock()
+			}(batchIdx, b.paths, b.snippets)
+		}
+
+		wg.Wait()
 	}
 
-	wg.Wait()
+	// Heuristic fallback ONLY for files that errored on ALL LLM attempts
+	var heuristicPaths []string
+	for _, p := range allPaths {
+		idx := pathIdx[p]
+		if result.Files[idx].Type == graph.FileTypePending && llmErrorFiles[p] {
+			heuristicPaths = append(heuristicPaths, p)
+		}
+	}
+	if len(heuristicPaths) > 0 {
+		logger.Info("falling back to heuristic for LLM-errored files",
+			zap.Int("count", len(heuristicPaths)),
+		)
+		heuristicIdx := make(map[string]int, len(heuristicPaths))
+		for _, p := range heuristicPaths {
+			heuristicIdx[p] = pathIdx[p]
+		}
+		classifyWithHeuristic(result, heuristicIdx, logger, classifiedBy, classifiedConf)
+	}
+
+	// Clean up snippets for all classified files
+	for _, p := range allPaths {
+		delete(result.Snippets, p)
+	}
+
 	return firstErr
 }
+
+// classifySystemMessage is the system prompt for LLM classification.
+const classifySystemMessage = `You are an expert IBM mainframe and COBOL analyst with decades of experience classifying source code from mainframe COBOL codebases that have been migrated to flat files. Files have lost their original extensions and are wrapped in .txt or other generic extensions. You must determine the original source type from the content.
+
+When uncertain, prefer COBOL or COPYBOOK over UNKNOWN — it is better to include a borderline file than to miss real mainframe source code.`
 
 // buildClassifyPrompt builds the classification prompt for a batch of files.
 func buildClassifyPrompt(batch []string, snippets map[string][]string) string {
 	var sb strings.Builder
 	sb.WriteString("Classify each file snippet by its mainframe source type.\n\n")
-	sb.WriteString("Common types: COBOL, COPYBOOK, JCL, BMS, DCLGEN, ASM, PLI, REXX, NATURAL, PROC, CLIST\n")
-	sb.WriteString("Use UNKNOWN only for files that are not mainframe/programming source code.\n")
+
+	sb.WriteString("## Valid Types\n")
+	sb.WriteString("COBOL, COPYBOOK, JCL, BMS, DCLGEN, ASM, PLI, REXX, NATURAL, PROC, CLIST\n")
+	sb.WriteString("Use UNKNOWN only for files that are clearly not mainframe/programming source code.\n")
 	sb.WriteString("Return any type that accurately describes the source — you are not limited to the list above.\n\n")
-	sb.WriteString("Rules:\n")
-	sb.WriteString("- COBOL: Any file containing COBOL statements, division headers (IDENTIFICATION, ENVIRONMENT, DATA, PROCEDURE), or COBOL verbs (PERFORM, MOVE, CALL, EVALUATE, COMPUTE, IF/ELSE/END-IF, EXEC SQL, EXEC CICS). Does NOT require all four divisions — partial programs and single-division files count as COBOL.\n")
-	sb.WriteString("- COPYBOOK: COBOL data definitions (level numbers with PIC/PICTURE), 88-level conditions, SQL host variable declarations (EXEC SQL INCLUDE), paragraph-level code fragments meant to be INCLUDEd — no PROGRAM-ID.\n")
-	sb.WriteString("- JCL: IBM Job Control Language (lines starting with //, JOB/EXEC/DD statements)\n")
-	sb.WriteString("- BMS: Basic Mapping Support macro definitions (DFHMSD, DFHMDI, DFHMDF)\n")
-	sb.WriteString("- DCLGEN: DB2 DCLGEN output (EXEC SQL DECLARE TABLE, host variable copybooks)\n")
-	sb.WriteString("- UNKNOWN: Clearly not mainframe/programming source code (e.g., plain English docs, XML, HTML). When uncertain, prefer a specific type over UNKNOWN.\n\n")
-	sb.WriteString("Tiebreaker: If a file shows even one strong mainframe indicator, classify with a specific type, not UNKNOWN.\n\n")
-	sb.WriteString("Respond with ONLY a JSON array: [{\"file\": \"filename\", \"type\": \"<TYPE>\"}]\n\n")
+
+	sb.WriteString("## Classification Rules & Signals\n\n")
+
+	sb.WriteString("**COBOL** (strong signals: PROGRAM-ID, division headers, PROCEDURE DIVISION + verbs):\n")
+	sb.WriteString("- Any file containing COBOL statements, division headers (IDENTIFICATION, ENVIRONMENT, DATA, PROCEDURE)\n")
+	sb.WriteString("- COBOL verbs: PERFORM, MOVE, CALL, EVALUATE, COMPUTE, IF/ELSE/END-IF, EXEC SQL, EXEC CICS, GOBACK, STOP RUN\n")
+	sb.WriteString("- Does NOT require all four divisions — partial programs and single-division files count as COBOL\n")
+	sb.WriteString("- Strong: PROGRAM-ID present → 0.95+ confidence\n")
+	sb.WriteString("- Medium: 2+ division headers or PROCEDURE DIVISION + verbs → 0.8+ confidence\n\n")
+
+	sb.WriteString("**COPYBOOK** (strong signals: level numbers with PIC, no PROGRAM-ID):\n")
+	sb.WriteString("- COBOL data definitions: level numbers (01-49, 66, 77, 88) with PIC/PICTURE clauses\n")
+	sb.WriteString("- 88-level conditions, REDEFINES, OCCURS, VALUE clauses\n")
+	sb.WriteString("- SQL host variable declarations (EXEC SQL INCLUDE)\n")
+	sb.WriteString("- Paragraph-level code fragments meant to be INCLUDEd — no PROGRAM-ID\n")
+	sb.WriteString("- Strong: Multiple level numbers + PIC clauses, no PROGRAM-ID → 0.9+ confidence\n\n")
+
+	sb.WriteString("**JCL** (strong signals: lines starting with //, JOB/EXEC/DD):\n")
+	sb.WriteString("- IBM Job Control Language (lines starting with //)\n")
+	sb.WriteString("- JOB, EXEC, DD statements; PROC/PEND; SET symbols\n")
+	sb.WriteString("- Strong: 2+ JCL statements → 0.9+ confidence\n\n")
+
+	sb.WriteString("**BMS** (strong signals: DFHMSD, DFHMDI, DFHMDF macros):\n")
+	sb.WriteString("- Basic Mapping Support macro definitions\n\n")
+
+	sb.WriteString("**DCLGEN** (strong signals: EXEC SQL DECLARE TABLE, generated host variables):\n")
+	sb.WriteString("- DB2 DCLGEN output with EXEC SQL DECLARE TABLE statements\n\n")
+
+	sb.WriteString("**UNKNOWN**: Use ONLY for files that are clearly not mainframe source code (e.g., plain English documentation, XML, HTML, CSV data). When in doubt, prefer a specific type.\n\n")
+
+	sb.WriteString("## Confidence Rubric\n")
+	sb.WriteString("- 0.95-1.0: Multiple strong signals unambiguously identify the type\n")
+	sb.WriteString("- 0.80-0.94: Clear signals present, high certainty\n")
+	sb.WriteString("- 0.70-0.79: Some signals present but could be ambiguous\n")
+	sb.WriteString("- 0.50-0.69: Weak signals, uncertain classification\n")
+	sb.WriteString("- Below 0.50: Very uncertain, consider UNKNOWN\n\n")
+
+	sb.WriteString("## Tiebreaker Rules\n")
+	sb.WriteString("If a file shows even one strong mainframe indicator, classify with a specific type, not UNKNOWN.\n")
+	sb.WriteString("Priority: COBOL > COPYBOOK > JCL > UNKNOWN\n\n")
+
+	sb.WriteString("## Response Format\n")
+	sb.WriteString("Respond with ONLY a JSON array:\n")
+	sb.WriteString(`[{"file": "NAME.txt", "type": "COBOL", "confidence": 0.95, "reasoning": "PROGRAM-ID present, PROCEDURE DIVISION with PERFORM/CALL verbs"}]`)
+	sb.WriteString("\n\n")
 
 	for _, p := range batch {
 		name := filepath.Base(p)
-		sb.WriteString(fmt.Sprintf("=== File: %s ===\n", name))
+		hint := filenameHint(name)
+		if hint != "" {
+			sb.WriteString(fmt.Sprintf("=== File: %s (%s) ===\n", name, hint))
+		} else {
+			sb.WriteString(fmt.Sprintf("=== File: %s ===\n", name))
+		}
 		if snippet, ok := snippets[p]; ok {
 			trimmed := trimCommentHeader(snippet)
 			for _, line := range trimmed {
@@ -312,6 +494,90 @@ func buildClassifyPrompt(batch []string, snippets map[string][]string) string {
 	}
 	return sb.String()
 }
+
+// buildRetryClassifyPrompt builds an enhanced prompt for retry attempts,
+// including previous attempt results and explicit uncertainty guidance.
+func buildRetryClassifyPrompt(batch []string, snippets map[string][]string, prevResults map[string]*llmClassification, attemptNum int) string {
+	var sb strings.Builder
+	sb.WriteString(fmt.Sprintf("## Classification Retry (Attempt %d)\n\n", attemptNum))
+	sb.WriteString("These files were uncertain in a previous classification attempt. More context is provided below.\n")
+	sb.WriteString("Look harder for subtle signals — column-based COBOL formatting, section names, verb patterns, data names with hyphens.\n\n")
+
+	sb.WriteString("## Previous Results\n")
+	for _, p := range batch {
+		name := filepath.Base(p)
+		if prev, ok := prevResults[p]; ok {
+			sb.WriteString(fmt.Sprintf("- %s: previously classified as %s (confidence: %.2f)\n", name, prev.Type, prev.Confidence))
+			if prev.Reasoning != "" {
+				sb.WriteString(fmt.Sprintf("  Reasoning: %s\n", prev.Reasoning))
+			}
+		}
+	}
+	sb.WriteString("\n")
+
+	// Include the same classification rules and confidence rubric
+	sb.WriteString("## Valid Types\n")
+	sb.WriteString("COBOL, COPYBOOK, JCL, BMS, DCLGEN, ASM, PLI, REXX, NATURAL, PROC, CLIST\n")
+	sb.WriteString("Use UNKNOWN only for files that are clearly not mainframe/programming source code.\n\n")
+
+	sb.WriteString("## Confidence Rubric\n")
+	sb.WriteString("- 0.95-1.0: Multiple strong signals unambiguously identify the type\n")
+	sb.WriteString("- 0.80-0.94: Clear signals present, high certainty\n")
+	sb.WriteString("- 0.70-0.79: Some signals present but could be ambiguous\n")
+	sb.WriteString("- 0.50-0.69: Weak signals, uncertain classification\n")
+	sb.WriteString("- Below 0.50: Very uncertain, consider UNKNOWN\n\n")
+
+	sb.WriteString("## Tiebreaker: COBOL > COPYBOOK > JCL > UNKNOWN\n\n")
+
+	sb.WriteString("## Response Format\n")
+	sb.WriteString(`Respond with ONLY a JSON array: [{"file": "NAME.txt", "type": "COBOL", "confidence": 0.95, "reasoning": "..."}]`)
+	sb.WriteString("\n\n")
+
+	for _, p := range batch {
+		name := filepath.Base(p)
+		hint := filenameHint(name)
+		if hint != "" {
+			sb.WriteString(fmt.Sprintf("=== File: %s (%s) ===\n", name, hint))
+		} else {
+			sb.WriteString(fmt.Sprintf("=== File: %s ===\n", name))
+		}
+		if snippet, ok := snippets[p]; ok {
+			trimmed := trimCommentHeader(snippet)
+			for _, line := range trimmed {
+				sb.WriteString(line)
+				sb.WriteString("\n")
+			}
+		}
+		sb.WriteString("\n")
+	}
+	return sb.String()
+}
+
+// filenameHint returns a classification hint based on the filename pattern.
+func filenameHint(name string) string {
+	upper := strings.ToUpper(strings.TrimSuffix(name, filepath.Ext(name)))
+
+	switch {
+	case strings.HasPrefix(upper, "CPY") || strings.HasPrefix(upper, "COPY"):
+		return "name suggests: COPYBOOK"
+	case strings.HasPrefix(upper, "DCL"):
+		return "name suggests: DCLGEN"
+	case strings.HasPrefix(upper, "MAP") || strings.HasPrefix(upper, "BMS"):
+		return "name suggests: BMS"
+	case strings.HasPrefix(upper, "PROC"):
+		return "name suggests: PROC"
+	}
+
+	// 8-char uppercase PDS member name pattern
+	if len(upper) <= 8 && pdsNameRe.MatchString(upper) {
+		return "PDS member name format"
+	}
+
+	return ""
+}
+
+// pdsNameRe matches valid PDS member names (1-8 chars, uppercase alphanumeric + @#$).
+var pdsNameRe = regexp.MustCompile(`^[A-Z@#$][A-Z0-9@#$]{0,7}$`)
 
 // trimCommentHeader strips leading COBOL comment lines (starting with '*' in column 7
 // or '*' after trimming) and blank lines, so the LLM sees actual code sooner.
@@ -339,6 +605,8 @@ func trimCommentHeader(lines []string) []string {
 // parseClassifyResponse extracts classifications from the LLM response body.
 func parseClassifyResponse(content string) ([]llmClassification, error) {
 	body := strings.TrimSpace(content)
+
+	// Strip markdown code fences
 	if strings.HasPrefix(body, "```") {
 		if idx := strings.Index(body[3:], "\n"); idx >= 0 {
 			body = body[3+idx+1:]
@@ -349,6 +617,20 @@ func parseClassifyResponse(content string) ([]llmClassification, error) {
 		body = strings.TrimSpace(body)
 	}
 
+	// Handle preamble text before JSON: find first '[' or '{'
+	if !strings.HasPrefix(body, "[") && !strings.HasPrefix(body, "{") {
+		if arrIdx := strings.Index(body, "["); arrIdx >= 0 {
+			body = body[arrIdx:]
+		} else if objIdx := strings.Index(body, "{"); objIdx >= 0 {
+			body = body[objIdx:]
+		}
+	}
+
+	// Handle single-object response: wrap in array
+	if strings.HasPrefix(body, "{") {
+		body = "[" + body + "]"
+	}
+
 	var classifications []llmClassification
 	if err := json.Unmarshal([]byte(body), &classifications); err != nil {
 		return nil, err
@@ -356,19 +638,24 @@ func parseClassifyResponse(content string) ([]llmClassification, error) {
 	return classifications, nil
 }
 
-func classifyWithHeuristic(result *ScanResult, pathIdx map[string]int, logger *zap.Logger, classifiedBy map[string]string) {
+func classifyWithHeuristic(result *ScanResult, pathIdx map[string]int, logger *zap.Logger, classifiedBy map[string]string, classifiedConf map[string]float64) {
 	for path, idx := range pathIdx {
 		snippet := result.Snippets[path]
 		if ft, ok := classifyByContent(snippet); ok {
 			result.Files[idx].Type = ft
+			result.Files[idx].Confidence = 0.5
+			result.Files[idx].Classifier = "HEURISTIC"
 			classifiedBy[path] = "HEURISTIC"
+			classifiedConf[path] = 0.5
 			logger.Info("heuristic classified file",
 				zap.String("file", filepath.Base(path)),
 				zap.String("type", string(ft)),
 			)
 		} else {
 			result.Files[idx].Type = "UNKNOWN"
+			result.Files[idx].Classifier = "HEURISTIC"
 			classifiedBy[path] = "HEURISTIC"
+			classifiedConf[path] = 0.0
 			logger.Debug("heuristic could not classify file",
 				zap.String("file", filepath.Base(path)),
 			)

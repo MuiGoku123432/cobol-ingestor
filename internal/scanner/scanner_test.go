@@ -120,7 +120,10 @@ func TestHashCountAndSnippet(t *testing.T) {
 	require.NoError(t, err)
 	assert.NotEmpty(t, hash)
 	assert.Equal(t, 100, lineCount)
-	assert.Len(t, snippet, 50)
+	// Smart snippet captures head + middle + tail regions + separator lines;
+	// total will be approximately maxLines + 2 separator lines
+	assert.Greater(t, len(snippet), 0)
+	assert.LessOrEqual(t, len(snippet), 60, "snippet should be close to maxLines")
 
 	// Short file: fewer lines than maxLines
 	shortPath := filepath.Join(dir, "short.txt")

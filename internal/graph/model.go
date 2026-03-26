@@ -12,11 +12,13 @@ const (
 
 // FileInfo represents a discovered source file.
 type FileInfo struct {
-	Path      string
-	Type      FileType
-	Hash      string // SHA-256
-	Size      int64
-	LineCount int
+	Path       string
+	Type       FileType
+	Hash       string  // SHA-256
+	Size       int64
+	LineCount  int
+	Confidence float64 // 0.0-1.0 classification confidence
+	Classifier string  // "EXTENSION", "LLM", "HEURISTIC", "CACHE"
 }
 
 // RelType enumerates Neo4j relationship types.

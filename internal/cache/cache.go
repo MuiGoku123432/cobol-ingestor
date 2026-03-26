@@ -62,6 +62,9 @@ func New(dbPath string) (*Cache, error) {
 		return nil, fmt.Errorf("creating classify_cache table: %w", err)
 	}
 
+	// Migration: add confidence column (idempotent — ignore "duplicate column" error)
+	_, _ = db.Exec(`ALTER TABLE classify_cache ADD COLUMN confidence REAL NOT NULL DEFAULT 0.0`)
+
 	// Per-chunk cache table for incremental multi-chunk file processing
 	if _, err := db.Exec(`
 		CREATE TABLE IF NOT EXISTS chunk_cache (
@@ -255,12 +258,14 @@ func (c *Cache) BatchIsChangedForPass(pathHashes map[string]string, pass int) ([
 // ClassifyResult holds a cached classification outcome.
 type ClassifyResult struct {
 	FileType   string
-	Classifier string // "LLM" or "HEURISTIC"
+	Classifier string  // "LLM" or "HEURISTIC"
+	Confidence float64 // 0.0-1.0
 }
 
 // ClassifyEntry is an input to BatchMarkClassified.
 type ClassifyEntry struct {
 	Path, Hash, FileType, Classifier string
+	Confidence                       float64
 }
 
 // BatchLookupClassification returns cached classifications where the hash still matches.
@@ -286,7 +291,7 @@ func (c *Cache) BatchLookupClassification(pathHashes map[string]string) (hits ma
 		args[i] = p
 	}
 
-	query := "SELECT file_path, content_hash, file_type, classifier FROM classify_cache WHERE file_path IN (" +
+	query := "SELECT file_path, content_hash, file_type, classifier, COALESCE(confidence, 0.0) FROM classify_cache WHERE file_path IN (" +
 		strings.Join(placeholders, ",") + ")"
 	rows, err := c.db.Query(query, args...)
 	if err != nil {
@@ -296,13 +301,18 @@ func (c *Cache) BatchLookupClassification(pathHashes map[string]string) (hits ma
 
 	cached := make(map[string]struct {
 		hash, fileType, classifier string
+		confidence                 float64
 	})
 	for rows.Next() {
 		var path, hash, ft, cls string
-		if err := rows.Scan(&path, &hash, &ft, &cls); err != nil {
+		var conf float64
+		if err := rows.Scan(&path, &hash, &ft, &cls, &conf); err != nil {
 			return nil, nil, fmt.Errorf("scanning classify row: %w", err)
 		}
-		cached[path] = struct{ hash, fileType, classifier string }{hash, ft, cls}
+		cached[path] = struct {
+			hash, fileType, classifier string
+			confidence                 float64
+		}{hash, ft, cls, conf}
 	}
 
 	for _, p := range paths {
@@ -310,7 +320,7 @@ func (c *Cache) BatchLookupClassification(pathHashes map[string]string) (hits ma
 		if !ok || entry.hash != pathHashes[p] {
 			misses = append(misses, p)
 		} else {
-			hits[p] = ClassifyResult{FileType: entry.fileType, Classifier: entry.classifier}
+			hits[p] = ClassifyResult{FileType: entry.fileType, Classifier: entry.classifier, Confidence: entry.confidence}
 		}
 	}
 
@@ -332,7 +342,7 @@ func (c *Cache) BatchMarkClassified(entries []ClassifyEntry) error {
 	}
 	defer tx.Rollback() //nolint:errcheck
 
-	stmt, err := tx.Prepare("INSERT OR REPLACE INTO classify_cache (file_path, content_hash, file_type, classifier, classified_at) VALUES (?, ?, ?, ?, ?)")
+	stmt, err := tx.Prepare("INSERT OR REPLACE INTO classify_cache (file_path, content_hash, file_type, classifier, classified_at, confidence) VALUES (?, ?, ?, ?, ?, ?)")
 	if err != nil {
 		return fmt.Errorf("prepare classify insert: %w", err)
 	}
@@ -340,7 +350,7 @@ func (c *Cache) BatchMarkClassified(entries []ClassifyEntry) error {
 
 	now := time.Now().UTC()
 	for _, e := range entries {
-		if _, err := stmt.Exec(e.Path, e.Hash, e.FileType, e.Classifier, now); err != nil {
+		if _, err := stmt.Exec(e.Path, e.Hash, e.FileType, e.Classifier, now, e.Confidence); err != nil {
 			return fmt.Errorf("inserting classify entry: %w", err)
 		}
 	}
