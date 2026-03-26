@@ -7,9 +7,11 @@ BINARIES := \
 	$(BINARY_DIR)/cobol-graph-mcp \
 	$(BINARY_DIR)/cobol-graph-modernize
 
-.PHONY: build clean install uninstall run-ingest run-api run-mcp run-modernize run-desktop build-desktop desktop-mac desktop-linux desktop-windows test test-integration vet lint swagger docker docker-build
+.PHONY: all build clean install uninstall run-ingest run-api run-mcp run-modernize run-desktop build-desktop desktop-mac desktop-linux desktop-windows test test-integration vet lint swagger docker docker-build
 
 build: $(BINARIES)
+
+all: build build-desktop
 
 $(BINARY_DIR)/cobol-graph: $(shell find cmd/ingest internal prompts -type f)
 	go build -o $@ ./cmd/ingest
@@ -42,8 +44,8 @@ run-api: $(BINARY_DIR)/cobol-graph-api
 run-mcp: $(BINARY_DIR)/cobol-graph-mcp
 	./bin/cobol-graph-mcp
 
-run-modernize: $(BINARY_DIR)/cobol-graph-modernize
-	./bin/cobol-graph-modernize
+run-modernize: $(BINARY_DIR)/cobol-graph-modernize $(BINARY_DIR)/cobol-graph-mcp
+	MCP_SERVER_BIN=$(CURDIR)/bin/cobol-graph-mcp ./bin/cobol-graph-modernize
 
 test:
 	go test ./... -v -race
@@ -64,7 +66,7 @@ swagger:
 run-desktop:
 	cd cmd/desktop && wails dev
 
-build-desktop: bin
+build-desktop: bin $(BINARY_DIR)/cobol-graph-mcp
 	cd cmd/desktop && wails build
 	cp -r cmd/desktop/build/bin/cobol-graph-desktop.app bin/cobol-graph-desktop.app
 
