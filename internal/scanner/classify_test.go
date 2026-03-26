@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"os"
 	"path/filepath"
 	"regexp"
 	"strings"
@@ -189,12 +190,15 @@ func (m *mockProvider) Name() string                        { return "mock" }
 func (m *mockProvider) HealthCheck(_ context.Context) error { return nil }
 func (m *mockProvider) Close() error                        { return nil }
 
-// dynamicMockProvider responds based on the prompt content — classifies everything as COBOL.
+// dynamicMockProvider responds based on the prompt content — classifies everything as COBOL
+// with high confidence.
 type dynamicMockProvider struct {
 	callCount atomic.Int32
 }
 
-var fileHeaderRe = regexp.MustCompile(`=== File: (.+?) ===`)
+// fileHeaderRe extracts just the filename (non-whitespace) from file headers,
+// which may include optional hints like "(PDS member name format)".
+var fileHeaderRe = regexp.MustCompile(`=== File: (\S+)`)
 
 func (m *dynamicMockProvider) Complete(_ context.Context, req llm.CompletionRequest) (*llm.CompletionResponse, error) {
 	m.callCount.Add(1)
@@ -209,7 +213,7 @@ func (m *dynamicMockProvider) Complete(_ context.Context, req llm.CompletionRequ
 	matches := fileHeaderRe.FindAllStringSubmatch(prompt, -1)
 	var items []llmClassification
 	for _, match := range matches {
-		items = append(items, llmClassification{File: match[1], Type: "COBOL"})
+		items = append(items, llmClassification{File: match[1], Type: "COBOL", Confidence: 0.95})
 	}
 	body, _ := json.Marshal(items)
 	return &llm.CompletionResponse{Content: string(body)}, nil
@@ -289,7 +293,7 @@ func TestClassifyPendingFiles_LLM(t *testing.T) {
 
 	mock := &mockProvider{
 		responses: []string{
-			`[{"file": "FILE1.txt", "type": "COBOL"}, {"file": "FILE2.txt", "type": "JCL"}]`,
+			`[{"file": "FILE1.txt", "type": "COBOL", "confidence": 0.95}, {"file": "FILE2.txt", "type": "JCL", "confidence": 0.90}]`,
 		},
 	}
 
@@ -320,7 +324,7 @@ func TestClassifyPendingFiles_LLM_MarkdownFence(t *testing.T) {
 
 	mock := &mockProvider{
 		responses: []string{
-			"```json\n[{\"file\": \"FILE1.txt\", \"type\": \"COBOL\"}]\n```",
+			"```json\n[{\"file\": \"FILE1.txt\", \"type\": \"COBOL\", \"confidence\": 0.95}]\n```",
 		},
 	}
 
@@ -332,7 +336,7 @@ func TestClassifyPendingFiles_LLM_MarkdownFence(t *testing.T) {
 func TestClassifyPendingFiles_Batching(t *testing.T) {
 	logger := zap.NewNop()
 
-	// Create 25 pending files -> should result in ceil(25/8) = 4 batches
+	// Create 25 pending files -> should result in ceil(25/8) = 4 batches on attempt 1
 	var files []graph.FileInfo
 	snippets := make(map[string][]string)
 
@@ -348,6 +352,7 @@ func TestClassifyPendingFiles_Batching(t *testing.T) {
 	err := ClassifyPendingFiles(context.Background(), result, mock, "test-model", logger, nil)
 	require.NoError(t, err)
 
+	// All files should be classified on attempt 1 (confidence 0.95 >= 0.7), so only 4 batches
 	assert.Equal(t, int32(4), mock.callCount.Load(), "should have made 4 batch calls")
 	assert.Len(t, result.Files, 25, "all files should remain (classified as COBOL)")
 	for _, f := range result.Files {
@@ -409,9 +414,13 @@ func TestClassifyPendingFiles_LLM_UnknownRemoved(t *testing.T) {
 		},
 	}
 
+	// UNKNOWN with high confidence — should not retry (accepted as UNKNOWN)
+	// Provide 3 responses since UNKNOWN triggers retry (need all 3 attempts)
 	mock := &mockProvider{
 		responses: []string{
-			`[{"file": "FILE1.txt", "type": "UNKNOWN"}]`,
+			`[{"file": "FILE1.txt", "type": "UNKNOWN", "confidence": 0.90, "reasoning": "no mainframe signals"}]`,
+			`[{"file": "FILE1.txt", "type": "UNKNOWN", "confidence": 0.90, "reasoning": "no mainframe signals"}]`,
+			`[{"file": "FILE1.txt", "type": "UNKNOWN", "confidence": 0.90, "reasoning": "no mainframe signals"}]`,
 		},
 	}
 
@@ -436,7 +445,7 @@ func TestClassifyPendingFiles_LLM_FallbackOnError(t *testing.T) {
 		},
 	}
 
-	// Provider returns an error -> should fall back to heuristic
+	// Provider returns an error -> should fall back to heuristic after 3 attempts
 	mock := &mockProvider{responses: nil} // will error immediately
 
 	err := ClassifyPendingFiles(context.Background(), result, mock, "test-model", logger, nil)
@@ -474,7 +483,7 @@ func TestParseClassifyResponse(t *testing.T) {
 		{"plain json", `[{"file":"a.txt","type":"COBOL"}]`, 1, false},
 		{"markdown fence", "```json\n[{\"file\":\"a.txt\",\"type\":\"JCL\"}]\n```", 1, false},
 		{"empty array", "[]", 0, false},
-		{"invalid json", "not json", 0, true},
+		{"invalid json", "not json at all and no braces", 0, true},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -496,14 +505,17 @@ func TestBuildClassifyPrompt(t *testing.T) {
 		"/tmp/B.txt": {"line3"},
 	}
 	prompt := buildClassifyPrompt(batch, snippets)
-	assert.Contains(t, prompt, "=== File: A.txt ===")
-	assert.Contains(t, prompt, "=== File: B.txt ===")
+	assert.Contains(t, prompt, "=== File: A.txt")
+	assert.Contains(t, prompt, "=== File: B.txt")
 	assert.Contains(t, prompt, "line1")
 	assert.Contains(t, prompt, "line3")
 	assert.Contains(t, prompt, "mainframe source type")
 	assert.Contains(t, prompt, "Tiebreaker")
 	assert.Contains(t, prompt, "BMS")
 	assert.Contains(t, prompt, "DCLGEN")
+	assert.Contains(t, prompt, "Confidence Rubric")
+	assert.Contains(t, prompt, "confidence")
+	assert.Contains(t, prompt, "reasoning")
 	assert.True(t, strings.HasPrefix(prompt, "Classify each file snippet"))
 }
 
@@ -526,8 +538,8 @@ func TestClassifyPendingFiles_CacheHit(t *testing.T) {
 
 	// Pre-populate cache
 	require.NoError(t, c.BatchMarkClassified([]cache.ClassifyEntry{
-		{Path: "/tmp/FILE1.txt", Hash: "hash1", FileType: "COBOL", Classifier: "LLM"},
-		{Path: "/tmp/FILE2.txt", Hash: "hash2", FileType: "JCL", Classifier: "LLM"},
+		{Path: "/tmp/FILE1.txt", Hash: "hash1", FileType: "COBOL", Classifier: "LLM", Confidence: 0.95},
+		{Path: "/tmp/FILE2.txt", Hash: "hash2", FileType: "JCL", Classifier: "LLM", Confidence: 0.90},
 	}))
 
 	result := &ScanResult{
@@ -572,7 +584,7 @@ func TestClassifyPendingFiles_CacheMiss_ThenPopulated(t *testing.T) {
 
 	mock := &mockProvider{
 		responses: []string{
-			`[{"file": "FILE1.txt", "type": "COBOL"}]`,
+			`[{"file": "FILE1.txt", "type": "COBOL", "confidence": 0.95}]`,
 		},
 	}
 
@@ -600,7 +612,7 @@ func TestClassifyPendingFiles_CacheStale(t *testing.T) {
 
 	// Pre-populate cache with old hash
 	require.NoError(t, c.BatchMarkClassified([]cache.ClassifyEntry{
-		{Path: "/tmp/FILE1.txt", Hash: "old-hash", FileType: "JCL", Classifier: "LLM"},
+		{Path: "/tmp/FILE1.txt", Hash: "old-hash", FileType: "JCL", Classifier: "LLM", Confidence: 0.90},
 	}))
 
 	result := &ScanResult{
@@ -614,7 +626,7 @@ func TestClassifyPendingFiles_CacheStale(t *testing.T) {
 
 	mock := &mockProvider{
 		responses: []string{
-			`[{"file": "FILE1.txt", "type": "COBOL"}]`,
+			`[{"file": "FILE1.txt", "type": "COBOL", "confidence": 0.95}]`,
 		},
 	}
 
@@ -647,7 +659,7 @@ func TestClassifyPendingFiles_OpenEndedType(t *testing.T) {
 
 	mock := &mockProvider{
 		responses: []string{
-			`[{"file": "MAPDEF.txt", "type": "BMS"}, {"file": "ASMMOD.txt", "type": "ASM"}]`,
+			`[{"file": "MAPDEF.txt", "type": "BMS", "confidence": 0.90}, {"file": "ASMMOD.txt", "type": "ASM", "confidence": 0.85}]`,
 		},
 	}
 
@@ -662,4 +674,411 @@ func TestClassifyPendingFiles_OpenEndedType(t *testing.T) {
 	}
 	assert.Equal(t, graph.FileType("BMS"), typeMap["/tmp/MAPDEF.txt"])
 	assert.Equal(t, graph.FileType("ASM"), typeMap["/tmp/ASMMOD.txt"])
+}
+
+// === New tests for progressive retry, enhanced prompt, etc. ===
+
+func TestClassifyWithLLMProgressive_AllConfident(t *testing.T) {
+	logger := zap.NewNop()
+
+	result := &ScanResult{
+		Files: []graph.FileInfo{
+			{Path: "/tmp/A.txt", Type: graph.FileTypePending},
+			{Path: "/tmp/B.txt", Type: graph.FileTypePending},
+		},
+		Snippets: map[string][]string{
+			"/tmp/A.txt": {"IDENTIFICATION DIVISION."},
+			"/tmp/B.txt": {"//JOB1 JOB"},
+		},
+	}
+
+	mock := &mockProvider{
+		responses: []string{
+			`[{"file": "A.txt", "type": "COBOL", "confidence": 0.95}, {"file": "B.txt", "type": "JCL", "confidence": 0.92}]`,
+		},
+	}
+
+	err := ClassifyPendingFiles(context.Background(), result, mock, "test-model", logger, nil)
+	require.NoError(t, err)
+
+	assert.Equal(t, 1, mock.calls, "should only need 1 LLM call (no retry)")
+	assert.Equal(t, graph.FileTypeCOBOL, result.Files[0].Type)
+	assert.Equal(t, graph.FileTypeJCL, result.Files[1].Type)
+	assert.InDelta(t, 0.95, result.Files[0].Confidence, 0.01)
+	assert.Equal(t, "LLM", result.Files[0].Classifier)
+}
+
+// confidenceMockProvider returns configurable confidence per attempt.
+type confidenceMockProvider struct {
+	mu        sync.Mutex
+	callCount int
+	// responses maps attempt number (0-based) to response generator
+	attemptResponses map[int]func(filenames []string) string
+}
+
+func (m *confidenceMockProvider) Complete(_ context.Context, req llm.CompletionRequest) (*llm.CompletionResponse, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	var prompt string
+	for _, msg := range req.Messages {
+		if msg.Role == llm.RoleUser {
+			prompt = msg.Content
+			break
+		}
+	}
+
+	matches := fileHeaderRe.FindAllStringSubmatch(prompt, -1)
+	var filenames []string
+	for _, match := range matches {
+		filenames = append(filenames, match[1])
+	}
+
+	attempt := m.callCount
+	m.callCount++
+
+	if gen, ok := m.attemptResponses[attempt]; ok {
+		return &llm.CompletionResponse{Content: gen(filenames)}, nil
+	}
+
+	// Default: return COBOL with high confidence
+	var items []llmClassification
+	for _, name := range filenames {
+		items = append(items, llmClassification{File: name, Type: "COBOL", Confidence: 0.95})
+	}
+	body, _ := json.Marshal(items)
+	return &llm.CompletionResponse{Content: string(body)}, nil
+}
+
+func (m *confidenceMockProvider) Name() string                        { return "confidence-mock" }
+func (m *confidenceMockProvider) HealthCheck(_ context.Context) error { return nil }
+func (m *confidenceMockProvider) Close() error                        { return nil }
+
+func TestClassifyWithLLMProgressive_RetryOnLowConfidence(t *testing.T) {
+	logger := zap.NewNop()
+
+	result := &ScanResult{
+		Files: []graph.FileInfo{
+			{Path: "/tmp/A.txt", Type: graph.FileTypePending},
+		},
+		Snippets: map[string][]string{
+			"/tmp/A.txt": {"SOME AMBIGUOUS CONTENT"},
+		},
+	}
+
+	mock := &confidenceMockProvider{
+		attemptResponses: map[int]func([]string) string{
+			0: func(filenames []string) string {
+				// Attempt 1: low confidence
+				items := []llmClassification{{File: filenames[0], Type: "COBOL", Confidence: 0.55}}
+				body, _ := json.Marshal(items)
+				return string(body)
+			},
+			1: func(filenames []string) string {
+				// Attempt 2: high confidence
+				items := []llmClassification{{File: filenames[0], Type: "COBOL", Confidence: 0.90}}
+				body, _ := json.Marshal(items)
+				return string(body)
+			},
+		},
+	}
+
+	err := ClassifyPendingFiles(context.Background(), result, mock, "test-model", logger, nil)
+	require.NoError(t, err)
+
+	assert.Equal(t, 2, mock.callCount, "should have 2 LLM calls (attempt 1 low confidence + attempt 2)")
+	assert.Equal(t, graph.FileTypeCOBOL, result.Files[0].Type)
+	assert.InDelta(t, 0.90, result.Files[0].Confidence, 0.01)
+}
+
+func TestClassifyWithLLMProgressive_ThreeAttempts(t *testing.T) {
+	logger := zap.NewNop()
+
+	result := &ScanResult{
+		Files: []graph.FileInfo{
+			{Path: "/tmp/A.txt", Type: graph.FileTypePending},
+		},
+		Snippets: map[string][]string{
+			"/tmp/A.txt": {"VERY AMBIGUOUS CONTENT"},
+		},
+	}
+
+	mock := &confidenceMockProvider{
+		attemptResponses: map[int]func([]string) string{
+			0: func(filenames []string) string {
+				items := []llmClassification{{File: filenames[0], Type: "COBOL", Confidence: 0.50}}
+				body, _ := json.Marshal(items)
+				return string(body)
+			},
+			1: func(filenames []string) string {
+				items := []llmClassification{{File: filenames[0], Type: "COBOL", Confidence: 0.60}}
+				body, _ := json.Marshal(items)
+				return string(body)
+			},
+			2: func(filenames []string) string {
+				items := []llmClassification{{File: filenames[0], Type: "COPYBOOK", Confidence: 0.85}}
+				body, _ := json.Marshal(items)
+				return string(body)
+			},
+		},
+	}
+
+	err := ClassifyPendingFiles(context.Background(), result, mock, "test-model", logger, nil)
+	require.NoError(t, err)
+
+	assert.Equal(t, 3, mock.callCount, "should need all 3 attempts")
+	assert.Equal(t, graph.FileTypeCopybook, result.Files[0].Type)
+	assert.InDelta(t, 0.85, result.Files[0].Confidence, 0.01)
+}
+
+func TestClassifyWithLLMProgressive_HeuristicOnlyOnError(t *testing.T) {
+	logger := zap.NewNop()
+
+	result := &ScanResult{
+		Files: []graph.FileInfo{
+			{Path: "/tmp/COBOL1.txt", Type: graph.FileTypePending},
+		},
+		Snippets: map[string][]string{
+			"/tmp/COBOL1.txt": {
+				"       IDENTIFICATION DIVISION.",
+				"       PROGRAM-ID. TEST.",
+				"       PROCEDURE DIVISION.",
+			},
+		},
+	}
+
+	// All LLM calls error out → heuristic should take over
+	errorProvider := &mockProvider{responses: nil}
+
+	err := ClassifyPendingFiles(context.Background(), result, errorProvider, "test-model", logger, nil)
+	assert.Error(t, err)
+
+	assert.Len(t, result.Files, 1)
+	assert.Equal(t, graph.FileTypeCOBOL, result.Files[0].Type)
+	assert.Equal(t, "HEURISTIC", result.Files[0].Classifier)
+}
+
+func TestBuildClassifyPrompt_Enhanced(t *testing.T) {
+	batch := []string{"/tmp/TEST.txt"}
+	snippets := map[string][]string{
+		"/tmp/TEST.txt": {"IDENTIFICATION DIVISION."},
+	}
+	prompt := buildClassifyPrompt(batch, snippets)
+
+	assert.Contains(t, prompt, "Confidence Rubric")
+	assert.Contains(t, prompt, "0.95-1.0")
+	assert.Contains(t, prompt, "reasoning")
+	assert.Contains(t, prompt, "Classification Rules")
+	assert.Contains(t, prompt, "PROGRAM-ID present")
+}
+
+func TestBuildClassifyPrompt_FilenameHints(t *testing.T) {
+	batch := []string{"/tmp/CPYACCT.txt", "/tmp/DCLCUST.txt"}
+	snippets := map[string][]string{
+		"/tmp/CPYACCT.txt": {"01 WS-ACCT."},
+		"/tmp/DCLCUST.txt": {"EXEC SQL DECLARE"},
+	}
+	prompt := buildClassifyPrompt(batch, snippets)
+
+	assert.Contains(t, prompt, "name suggests: COPYBOOK")
+	assert.Contains(t, prompt, "name suggests: DCLGEN")
+}
+
+func TestFilenameHint(t *testing.T) {
+	tests := []struct {
+		name string
+		want string
+	}{
+		{"CPYACCT.txt", "name suggests: COPYBOOK"},
+		{"COPYDEF.txt", "name suggests: COPYBOOK"},
+		{"DCLCUST.txt", "name suggests: DCLGEN"},
+		{"MAPLOG.txt", "name suggests: BMS"},
+		{"BMSMAP.txt", "name suggests: BMS"},
+		{"PROCJOB.txt", "name suggests: PROC"},
+		{"TESTPROG.txt", "PDS member name format"},
+		{"readme-file.txt", ""},             // not a PDS name
+		{"verylongfilename.txt", ""},        // too long
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := filenameHint(tt.name)
+			assert.Equal(t, tt.want, got)
+		})
+	}
+}
+
+func TestParseClassifyResponse_WithConfidence(t *testing.T) {
+	input := `[{"file": "A.txt", "type": "COBOL", "confidence": 0.95, "reasoning": "PROGRAM-ID found"}]`
+	result, err := parseClassifyResponse(input)
+	require.NoError(t, err)
+	require.Len(t, result, 1)
+	assert.Equal(t, "A.txt", result[0].File)
+	assert.Equal(t, "COBOL", result[0].Type)
+	assert.InDelta(t, 0.95, result[0].Confidence, 0.01)
+	assert.Equal(t, "PROGRAM-ID found", result[0].Reasoning)
+}
+
+func TestParseClassifyResponse_SingleObject(t *testing.T) {
+	input := `{"file": "A.txt", "type": "JCL", "confidence": 0.88}`
+	result, err := parseClassifyResponse(input)
+	require.NoError(t, err)
+	require.Len(t, result, 1)
+	assert.Equal(t, "JCL", result[0].Type)
+}
+
+func TestParseClassifyResponse_PreambleText(t *testing.T) {
+	input := `Here are the classifications:\n[{"file": "A.txt", "type": "COBOL", "confidence": 0.90}]`
+	result, err := parseClassifyResponse(input)
+	require.NoError(t, err)
+	require.Len(t, result, 1)
+	assert.Equal(t, "COBOL", result[0].Type)
+}
+
+func TestSmartSnippet_LargeFile(t *testing.T) {
+	// Build a 300-line file
+	var allLines []string
+	for i := 0; i < 300; i++ {
+		allLines = append(allLines, fmt.Sprintf("LINE %d CONTENT", i+1))
+	}
+
+	snippet := buildSmartSnippet(allLines, 150)
+
+	// Should contain first line (head region)
+	assert.Contains(t, snippet[0], "LINE 1")
+
+	// Should contain middle separator
+	found := false
+	for _, line := range snippet {
+		if strings.HasPrefix(line, "--- [middle of file") {
+			found = true
+			break
+		}
+	}
+	assert.True(t, found, "should contain middle separator")
+
+	// Should contain tail separator
+	foundTail := false
+	for _, line := range snippet {
+		if strings.HasPrefix(line, "--- [end of file") {
+			foundTail = true
+			break
+		}
+	}
+	assert.True(t, foundTail, "should contain end separator")
+
+	// Should contain last line
+	assert.Contains(t, snippet[len(snippet)-1], "LINE 300")
+
+	// Total snippet should be roughly around maxLines + separators
+	assert.Greater(t, len(snippet), 100, "should capture substantial content")
+	assert.Less(t, len(snippet), 200, "should not capture entire file")
+}
+
+func TestSmartSnippet_SmallFile(t *testing.T) {
+	allLines := []string{"line1", "line2", "line3"}
+	snippet := buildSmartSnippet(allLines, 150)
+	assert.Equal(t, allLines, snippet, "small file should return all lines")
+}
+
+func TestReadLargerSnippet(t *testing.T) {
+	dir := t.TempDir()
+
+	// Create a file with 200 lines
+	var content strings.Builder
+	for i := 0; i < 200; i++ {
+		content.WriteString(fmt.Sprintf("LINE %d CONTENT\n", i+1))
+	}
+	path := filepath.Join(dir, "test.txt")
+	require.NoError(t, os.WriteFile(path, []byte(content.String()), 0644))
+
+	snippet, err := readLargerSnippet(path, 400)
+	require.NoError(t, err)
+
+	// File has 200 lines, maxLines=400, so entire file should be returned
+	assert.Len(t, snippet, 200)
+	assert.Contains(t, snippet[0], "LINE 1")
+	assert.Contains(t, snippet[199], "LINE 200")
+}
+
+func TestScan_ContentDetect_NoExtension(t *testing.T) {
+	logger := zap.NewNop()
+	dir := t.TempDir()
+
+	// File with no extension but COBOL content
+	cobolContent := "       IDENTIFICATION DIVISION.\n       PROGRAM-ID. TESTPROG.\n"
+	require.NoError(t, os.WriteFile(filepath.Join(dir, "TESTPROG"), []byte(cobolContent), 0644))
+
+	result, err := Scan(context.Background(), dir, logger, ScanOptions{ContentDetect: true})
+	require.NoError(t, err)
+
+	assert.Len(t, result.Files, 1, "extensionless file should be captured")
+	assert.Equal(t, graph.FileTypePending, result.Files[0].Type)
+	assert.NotEmpty(t, result.Snippets)
+}
+
+func TestScan_ContentDetect_DatFile(t *testing.T) {
+	logger := zap.NewNop()
+	dir := t.TempDir()
+
+	cobolContent := "       IDENTIFICATION DIVISION.\n       PROGRAM-ID. DATPROG.\n"
+	require.NoError(t, os.WriteFile(filepath.Join(dir, "DATPROG.dat"), []byte(cobolContent), 0644))
+
+	result, err := Scan(context.Background(), dir, logger, ScanOptions{ContentDetect: true})
+	require.NoError(t, err)
+
+	assert.Len(t, result.Files, 1, ".dat file should be captured")
+	assert.Equal(t, graph.FileTypePending, result.Files[0].Type)
+}
+
+func TestCacheConfidence(t *testing.T) {
+	dbPath := filepath.Join(t.TempDir(), "conf_cache.sqlite")
+	c, err := cache.New(dbPath)
+	require.NoError(t, err)
+	defer c.Close()
+
+	// Store entry with confidence
+	require.NoError(t, c.BatchMarkClassified([]cache.ClassifyEntry{
+		{Path: "/tmp/A.txt", Hash: "hash1", FileType: "COBOL", Classifier: "LLM", Confidence: 0.95},
+	}))
+
+	// Retrieve and verify confidence round-trips
+	hits, _, err := c.BatchLookupClassification(map[string]string{"/tmp/A.txt": "hash1"})
+	require.NoError(t, err)
+	require.Len(t, hits, 1)
+	assert.InDelta(t, 0.95, hits["/tmp/A.txt"].Confidence, 0.01)
+}
+
+func TestLLMClassification_ConfidenceStored(t *testing.T) {
+	logger := zap.NewNop()
+	dbPath := filepath.Join(t.TempDir(), "conf_store.sqlite")
+	c, err := cache.New(dbPath)
+	require.NoError(t, err)
+	defer c.Close()
+
+	result := &ScanResult{
+		Files: []graph.FileInfo{
+			{Path: "/tmp/FILE1.txt", Type: graph.FileTypePending, Hash: "hash1"},
+		},
+		Snippets: map[string][]string{
+			"/tmp/FILE1.txt": {"IDENTIFICATION DIVISION."},
+		},
+	}
+
+	mock := &mockProvider{
+		responses: []string{
+			`[{"file": "FILE1.txt", "type": "COBOL", "confidence": 0.92}]`,
+		},
+	}
+
+	err = ClassifyPendingFiles(context.Background(), result, mock, "test-model", logger, c)
+	require.NoError(t, err)
+
+	// Verify FileInfo has confidence
+	assert.InDelta(t, 0.92, result.Files[0].Confidence, 0.01)
+	assert.Equal(t, "LLM", result.Files[0].Classifier)
+
+	// Verify cache has confidence
+	hits, _, err := c.BatchLookupClassification(map[string]string{"/tmp/FILE1.txt": "hash1"})
+	require.NoError(t, err)
+	assert.InDelta(t, 0.92, hits["/tmp/FILE1.txt"].Confidence, 0.01)
 }
