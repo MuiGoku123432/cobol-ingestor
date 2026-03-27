@@ -132,3 +132,9 @@ Rules:
   - Always populate paragraph with the paragraph name where the DML occurs
 - If this is a partial chunk, extract only what is visible — do not fabricate content from other chunks
 - Return ONLY the JSON object, no markdown fences, no explanation
+{{if .FewShot}}
+Here is an example of the expected input/output format:
+{{.FewShot}}
+
+Now analyze the following chunk:
+{{end}}

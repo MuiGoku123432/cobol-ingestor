@@ -43,6 +43,7 @@ type Client struct {
 	pass4Tmpl          *template.Template
 	pass5Tmpl          *template.Template
 	bwTmpl             *template.Template
+	calibrator         *chunker.TokenCalibrator
 }
 
 // NewClient creates a Claude API client using an LLM provider.
@@ -113,35 +114,55 @@ func NewClient(provider llm.Provider, cfg config.ClaudeConfig, logger *zap.Logge
 		maxOutputTokensCap: maxOutputCap,
 		requestTimeout:     requestTimeout,
 		limiter:            limiter,
-		logger:      logger,
-		pass1Tmpl:   p1Tmpl,
-		pass2Tmpl:   p2Tmpl,
-		pass3Tmpl:   p3Tmpl,
-		jclTmpl:     jclTmpl,
-		pass4Tmpl:   p4Tmpl,
-		pass5Tmpl:   p5Tmpl,
-		bwTmpl:      bwTmpl,
+		logger:             logger,
+		pass1Tmpl:          p1Tmpl,
+		pass2Tmpl:          p2Tmpl,
+		pass3Tmpl:          p3Tmpl,
+		jclTmpl:            jclTmpl,
+		pass4Tmpl:          p4Tmpl,
+		pass5Tmpl:          p5Tmpl,
+		bwTmpl:             bwTmpl,
 	}, nil
+}
+
+// SetCalibrator sets the token calibrator for feeding calibration data.
+func (c *Client) SetCalibrator(cal *chunker.TokenCalibrator) {
+	c.calibrator = cal
+}
+
+// withJSONPrefill appends an assistant prefill message containing "{" to force
+// the model to begin its response with JSON. The caller must prepend "{" to the
+// response content before parsing.
+func (c *Client) withJSONPrefill(msgs []llm.Message) []llm.Message {
+	return append(msgs, llm.Message{Role: llm.RoleAssistant, Content: "{"})
 }
 
 // AnalyzeStructural sends a file to Claude Sonnet for Pass 1 structural extraction.
 // Returns the raw JSON response string.
 func (c *Client) AnalyzeStructural(ctx context.Context, fileName, content string) (string, error) {
 	var userMsg bytes.Buffer
-	if err := c.pass1Tmpl.Execute(&userMsg, map[string]string{
+	if err := c.pass1Tmpl.Execute(&userMsg, map[string]any{
 		"FileName": fileName,
+		"FewShot":  prompts.Pass1Example,
 	}); err != nil {
 		return "", fmt.Errorf("rendering pass1 template: %w", err)
 	}
 
-	return c.completeWithRetry(ctx, llm.CompletionRequest{
+	resp, err := c.completeWithRetry(ctx, llm.CompletionRequest{
 		Model:     c.sonnetModel,
 		MaxTokens: c.pass1MaxTokens,
-		Messages: []llm.Message{
+		Messages: c.withJSONPrefill([]llm.Message{
 			{Role: llm.RoleSystem, Content: "You are a COBOL code analysis assistant. You extract structural information from COBOL source files and return it as JSON."},
 			{Role: llm.RoleUser, Content: userMsg.String() + "\n\n---\n\n" + content},
-		},
+		}),
 	})
+	if err != nil {
+		if resp != "" {
+			resp = "{" + resp
+		}
+		return resp, err
+	}
+	return "{" + resp, nil
 }
 
 // AnalyzeDeep sends a chunk to Claude Opus for Pass 2 deep semantic analysis.
@@ -152,6 +173,7 @@ func (c *Client) AnalyzeDeep(ctx context.Context, chunk chunker.Chunk, contextPr
 		"FileName": chunk.FileName,
 		"Index":    chunk.Index + 1,
 		"Total":    chunk.Total,
+		"FewShot":  prompts.Pass2Example,
 	}); err != nil {
 		return "", fmt.Errorf("rendering pass2 template: %w", err)
 	}
@@ -160,16 +182,26 @@ func (c *Client) AnalyzeDeep(ctx context.Context, chunk chunker.Chunk, contextPr
 	if contextPreamble != "" {
 		userContent = contextPreamble + "\n\n" + userContent
 	}
+	if chunk.LastParagraph != "" && chunk.Index > 0 {
+		userContent += fmt.Sprintf("\n\nCHUNK BOUNDARY NOTE: The previous chunk ended at paragraph '%s'. If you see this paragraph in the overlap region at the start of this chunk, do NOT extract its items again — they were already captured in the previous chunk.", chunk.LastParagraph)
+	}
 	userContent += "\n\n---\n\n" + chunk.Content
 
-	return c.completeWithRetry(ctx, llm.CompletionRequest{
+	resp, err := c.completeWithRetry(ctx, llm.CompletionRequest{
 		Model:     c.opusModel,
 		MaxTokens: c.pass2MaxTokens,
-		Messages: []llm.Message{
+		Messages: c.withJSONPrefill([]llm.Message{
 			{Role: llm.RoleSystem, Content: "You are an expert COBOL analyst performing deep semantic analysis. You extract detailed relationships, data flows, and control flows from COBOL source code and return structured JSON."},
 			{Role: llm.RoleUser, Content: userContent},
-		},
+		}),
 	})
+	if err != nil {
+		if resp != "" {
+			resp = "{" + resp
+		}
+		return resp, err
+	}
+	return "{" + resp, nil
 }
 
 // AnalyzeCrossCutting sends a graph data slice to Claude Opus for Pass 3 cross-cutting analysis.
@@ -184,14 +216,21 @@ func (c *Client) AnalyzeCrossCutting(ctx context.Context, graphSlice, existingDo
 
 	userContent := userMsg.String() + "\n\n" + graphSlice
 
-	return c.completeWithRetry(ctx, llm.CompletionRequest{
+	resp, err := c.completeWithRetry(ctx, llm.CompletionRequest{
 		Model:     c.opusModel,
 		MaxTokens: c.pass3MaxTokens,
-		Messages: []llm.Message{
+		Messages: c.withJSONPrefill([]llm.Message{
 			{Role: llm.RoleSystem, Content: "You are an expert COBOL systems analyst. You analyze program relationships to identify business domains, dead code, and risk factors. Return structured JSON."},
 			{Role: llm.RoleUser, Content: userContent},
-		},
+		}),
 	})
+	if err != nil {
+		if resp != "" {
+			resp = "{" + resp
+		}
+		return resp, err
+	}
+	return "{" + resp, nil
 }
 
 // AnalyzeJCL sends a JCL file to Claude Sonnet for structural extraction.
@@ -203,14 +242,21 @@ func (c *Client) AnalyzeJCL(ctx context.Context, fileName, content string) (stri
 		return "", fmt.Errorf("rendering jcl template: %w", err)
 	}
 
-	return c.completeWithRetry(ctx, llm.CompletionRequest{
+	resp, err := c.completeWithRetry(ctx, llm.CompletionRequest{
 		Model:     c.sonnetModel,
 		MaxTokens: c.pass1MaxTokens,
-		Messages: []llm.Message{
+		Messages: c.withJSONPrefill([]llm.Message{
 			{Role: llm.RoleSystem, Content: "You are a mainframe JCL analysis assistant. You extract structural information from JCL files and return it as JSON."},
 			{Role: llm.RoleUser, Content: userMsg.String() + "\n\n---\n\n" + content},
-		},
+		}),
 	})
+	if err != nil {
+		if resp != "" {
+			resp = "{" + resp
+		}
+		return resp, err
+	}
+	return "{" + resp, nil
 }
 
 // AnalyzeCrossProgramFlow sends caller/callee field context to Claude Sonnet for LINKAGE mapping.
@@ -228,14 +274,21 @@ func (c *Client) AnalyzeCrossProgramFlow(ctx context.Context, caller, callee, fi
 		maxTokens = 4000
 	}
 
-	return c.completeWithRetry(ctx, llm.CompletionRequest{
+	resp, err := c.completeWithRetry(ctx, llm.CompletionRequest{
 		Model:     c.sonnetModel,
 		MaxTokens: maxTokens,
-		Messages: []llm.Message{
+		Messages: c.withJSONPrefill([]llm.Message{
 			{Role: llm.RoleSystem, Content: "You are an expert COBOL analyst mapping data fields between programs through LINKAGE SECTION parameters. Return structured JSON."},
 			{Role: llm.RoleUser, Content: userMsg.String() + "\n\n" + fieldContext},
-		},
+		}),
 	})
+	if err != nil {
+		if resp != "" {
+			resp = "{" + resp
+		}
+		return resp, err
+	}
+	return "{" + resp, nil
 }
 
 // AnalyzeRepair sends a targeted repair prompt to Opus for Pass 5 gap repair.
@@ -251,14 +304,21 @@ func (c *Client) AnalyzeRepair(ctx context.Context, repairType, programID, graph
 		return "", fmt.Errorf("rendering pass5 template: %w", err)
 	}
 
-	return c.completeWithRetry(ctx, llm.CompletionRequest{
+	resp, err := c.completeWithRetry(ctx, llm.CompletionRequest{
 		Model:     c.opusModel,
 		MaxTokens: c.pass2MaxTokens,
-		Messages: []llm.Message{
+		Messages: c.withJSONPrefill([]llm.Message{
 			{Role: llm.RoleSystem, Content: "You are an expert COBOL analyst repairing gaps in extracted program metadata. Return only valid JSON matching the requested schema."},
 			{Role: llm.RoleUser, Content: userMsg.String()},
-		},
+		}),
 	})
+	if err != nil {
+		if resp != "" {
+			resp = "{" + resp
+		}
+		return resp, err
+	}
+	return "{" + resp, nil
 }
 
 // AnalyzeBW sends a Businessware file to Claude Opus for entity/relationship extraction.
@@ -277,14 +337,21 @@ func (c *Client) AnalyzeBW(ctx context.Context, fileName, fileType, content, exi
 		maxTokens = 16000
 	}
 
-	return c.completeWithRetry(ctx, llm.CompletionRequest{
+	resp, err := c.completeWithRetry(ctx, llm.CompletionRequest{
 		Model:     c.opusModel,
 		MaxTokens: maxTokens,
-		Messages: []llm.Message{
+		Messages: c.withJSONPrefill([]llm.Message{
 			{Role: llm.RoleSystem, Content: "You are an enterprise software analyst. You extract entities, relationships, and COBOL cross-references from Businessware artifacts (Java code, documentation, configuration files, architecture diagrams). Return structured JSON."},
 			{Role: llm.RoleUser, Content: userMsg.String() + "\n\n---\n\n" + content},
-		},
+		}),
 	})
+	if err != nil {
+		if resp != "" {
+			resp = "{" + resp
+		}
+		return resp, err
+	}
+	return "{" + resp, nil
 }
 
 // isDiagramType returns true if the file type represents a diagram format.
@@ -326,6 +393,13 @@ func (c *Client) completeWithRetry(ctx context.Context, req llm.CompletionReques
 		reqCancel()
 		if err != nil {
 			lastErr = err
+			if !llm.IsRetriable(err) {
+				c.logger.Error("LLM API call failed with non-retriable error",
+					zap.String("provider", c.provider.Name()),
+					zap.Error(err),
+				)
+				return "", fmt.Errorf("LLM API non-retriable error: %w", err)
+			}
 			c.logger.Warn("LLM API call failed, retrying",
 				zap.String("provider", c.provider.Name()),
 				zap.Int("attempt", attempt+1),
@@ -346,24 +420,84 @@ func (c *Client) completeWithRetry(ctx context.Context, req llm.CompletionReques
 				zap.Int("estimated", estimatedInputTokens),
 				zap.Int("actual", resp.PromptTokens),
 			)
+			if c.calibrator != nil {
+				c.calibrator.RecordSample(estimatedInputTokens, resp.PromptTokens)
+			}
 		}
 
 		if resp.Content == "" {
 			return "", fmt.Errorf("no text content in LLM response")
 		}
 
-		// Handle truncated responses with iterative doubling (Phase 1)
+		// Handle truncated responses: first try compression instructions, then double max_tokens.
 		if resp.Truncated {
 			truncatedContent := resp.Content
 			currentMax := req.MaxTokens
 
+			// Phase 1: Try progressive compression instructions before doubling tokens.
+			compressionInstructions := []string{
+				"\n\nIMPORTANT: Be maximally concise. Omit empty arrays (remove keys with [] values). Use minimal whitespace in JSON output.",
+				"\n\nIMPORTANT: Output ONLY non-empty arrays and objects. Remove ALL keys whose values would be empty arrays [] or empty strings. Minimize output size.",
+			}
+
+			compressionSucceeded := false
+			for compIdx, instruction := range compressionInstructions {
+				c.logger.Warn("LLM response truncated, retrying with compression instruction",
+					zap.String("model", req.Model),
+					zap.Int("max_tokens", currentMax),
+					zap.Int("compression_level", compIdx+1),
+				)
+
+				// Append compression instruction to the last user message.
+				compReq := req
+				compReq.Messages = make([]llm.Message, len(req.Messages))
+				copy(compReq.Messages, req.Messages)
+				for i := len(compReq.Messages) - 1; i >= 0; i-- {
+					if compReq.Messages[i].Role == llm.RoleUser {
+						compReq.Messages[i].Content += instruction
+						break
+					}
+				}
+
+				if err := c.limiter.Wait(ctx); err != nil {
+					return truncatedContent, fmt.Errorf("rate limiter during compression retry: %w", err)
+				}
+				compCtx, compCancel := context.WithTimeout(ctx, c.requestTimeout)
+				compResp, compErr := c.provider.Complete(compCtx, compReq)
+				compCancel()
+
+				if compErr != nil {
+					c.logger.Warn("compression retry failed",
+						zap.String("model", req.Model),
+						zap.Int("compression_level", compIdx+1),
+						zap.Error(compErr),
+					)
+					break
+				}
+				if compResp.Content == "" {
+					break
+				}
+				if !compResp.Truncated {
+					compressionSucceeded = true
+					truncatedContent = compResp.Content
+					break
+				}
+				// Still truncated — keep best content and try next compression level.
+				truncatedContent = compResp.Content
+			}
+
+			if compressionSucceeded {
+				return truncatedContent, nil
+			}
+
+			// Phase 2: Double max_tokens up to 3 times.
 			for doublingIter := range 3 {
 				doubled := currentMax * 2
 				if doubled > c.maxOutputTokensCap {
 					doubled = c.maxOutputTokensCap
 				}
 				if doubled <= currentMax {
-					// At cap, can't increase further — return truncated content for partial recovery
+					// At cap, can't increase further — return truncated content for partial recovery.
 					c.logger.Error("LLM response truncated at max_tokens cap, returning for partial recovery",
 						zap.String("model", req.Model),
 						zap.Int("max_tokens", currentMax),
@@ -399,7 +533,7 @@ func (c *Client) completeWithRetry(ctx context.Context, req llm.CompletionReques
 						zap.Int("doubling_iteration", doublingIter+1),
 						zap.Error(retryErr),
 					)
-					// Fall through to return truncated content for partial recovery
+					// Fall through to return truncated content for partial recovery.
 					break
 				}
 
@@ -411,13 +545,13 @@ func (c *Client) completeWithRetry(ctx context.Context, req llm.CompletionReques
 					return retryResp.Content, nil
 				}
 
-				// Still truncated — update content and continue doubling
+				// Still truncated — update content and continue doubling.
 				truncatedContent = retryResp.Content
 				resp = retryResp
 			}
 
-			// All doubling attempts exhausted — return truncated content for partial recovery
-			c.logger.Error("LLM response still truncated after all doubling attempts, returning for partial recovery",
+			// All attempts exhausted — return truncated content for partial recovery.
+			c.logger.Error("LLM response still truncated after all retry attempts, returning for partial recovery",
 				zap.String("model", req.Model),
 				zap.Int("final_max_tokens", currentMax),
 				zap.Int("output_tokens", resp.OutputTokens),

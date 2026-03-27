@@ -418,7 +418,8 @@ func classifyWithLLMProgressive(ctx context.Context, result *ScanResult, pathIdx
 // classifySystemMessage is the system prompt for LLM classification.
 const classifySystemMessage = `You are an expert IBM mainframe and COBOL analyst with decades of experience classifying source code from mainframe COBOL codebases that have been migrated to flat files. Files have lost their original extensions and are wrapped in .txt or other generic extensions. You must determine the original source type from the content.
 
-When uncertain, prefer COBOL or COPYBOOK over UNKNOWN — it is better to include a borderline file than to miss real mainframe source code.`
+When uncertain, prefer COBOL or COPYBOOK over UNKNOWN — it is better to include a borderline file than to miss real mainframe source code.
+Never classify a file as UNKNOWN if it contains any structured code, data definitions, or mainframe-related content.`
 
 // buildClassifyPrompt builds the classification prompt for a batch of files.
 func buildClassifyPrompt(batch []string, snippets map[string][]string) string {
@@ -428,7 +429,8 @@ func buildClassifyPrompt(batch []string, snippets map[string][]string) string {
 	sb.WriteString("## Valid Types\n")
 	sb.WriteString("COBOL, COPYBOOK, JCL, BMS, DCLGEN, ASM, PLI, REXX, NATURAL, PROC, CLIST\n")
 	sb.WriteString("Use UNKNOWN only for files that are clearly not mainframe/programming source code.\n")
-	sb.WriteString("Return any type that accurately describes the source — you are not limited to the list above.\n\n")
+	sb.WriteString("Return any type that accurately describes the source — you are not limited to the list above.\n")
+	sb.WriteString("Examples of other valid types: CONTROL, DATA, EASYTRIEVE, IDMS, ADABAS, SORT, UTILITY, SCRIPT, MACRO.\n\n")
 
 	sb.WriteString("## Classification Rules & Signals\n\n")
 
@@ -457,14 +459,17 @@ func buildClassifyPrompt(batch []string, snippets map[string][]string) string {
 	sb.WriteString("**DCLGEN** (strong signals: EXEC SQL DECLARE TABLE, generated host variables):\n")
 	sb.WriteString("- DB2 DCLGEN output with EXEC SQL DECLARE TABLE statements\n\n")
 
-	sb.WriteString("**UNKNOWN**: Use ONLY for files that are clearly not mainframe source code (e.g., plain English documentation, XML, HTML, CSV data). When in doubt, prefer a specific type.\n\n")
+	sb.WriteString("**UNKNOWN**: Use ONLY for files that contain NO structured content, code, or data definitions whatsoever — pure English prose documentation, XML/HTML markup, or CSV data with no mainframe indicators. NEVER return UNKNOWN if the file contains ANY code-like structure, level numbers, verbs, or column-based formatting.\n\n")
 
 	sb.WriteString("## Confidence Rubric\n")
 	sb.WriteString("- 0.95-1.0: Multiple strong signals unambiguously identify the type\n")
 	sb.WriteString("- 0.80-0.94: Clear signals present, high certainty\n")
 	sb.WriteString("- 0.70-0.79: Some signals present but could be ambiguous\n")
 	sb.WriteString("- 0.50-0.69: Weak signals, uncertain classification\n")
-	sb.WriteString("- Below 0.50: Very uncertain, consider UNKNOWN\n\n")
+	sb.WriteString("- Below 0.50: Weak signals — provide your best-guess type (do NOT default to UNKNOWN)\n\n")
+
+	sb.WriteString("## Short File Guidance\n")
+	sb.WriteString("For very short files (under 20 lines), classify based on whatever signals exist — even a single line with a COBOL verb, level number, JCL statement, or column-based formatting is sufficient to assign a type. Short does not mean UNKNOWN.\n\n")
 
 	sb.WriteString("## Tiebreaker Rules\n")
 	sb.WriteString("If a file shows even one strong mainframe indicator, classify with a specific type, not UNKNOWN.\n")
@@ -501,7 +506,8 @@ func buildRetryClassifyPrompt(batch []string, snippets map[string][]string, prev
 	var sb strings.Builder
 	sb.WriteString(fmt.Sprintf("## Classification Retry (Attempt %d)\n\n", attemptNum))
 	sb.WriteString("These files were uncertain in a previous classification attempt. More context is provided below.\n")
-	sb.WriteString("Look harder for subtle signals — column-based COBOL formatting, section names, verb patterns, data names with hyphens.\n\n")
+	sb.WriteString("Look harder for subtle signals — column-based COBOL formatting, section names, verb patterns, data names with hyphens.\n")
+	sb.WriteString("Do NOT return UNKNOWN. Provide your best-guess classification even if confidence is low. If you previously returned UNKNOWN, look again for ANY structural or code-like signals and assign a specific type.\n\n")
 
 	sb.WriteString("## Previous Results\n")
 	for _, p := range batch {
@@ -525,7 +531,7 @@ func buildRetryClassifyPrompt(batch []string, snippets map[string][]string, prev
 	sb.WriteString("- 0.80-0.94: Clear signals present, high certainty\n")
 	sb.WriteString("- 0.70-0.79: Some signals present but could be ambiguous\n")
 	sb.WriteString("- 0.50-0.69: Weak signals, uncertain classification\n")
-	sb.WriteString("- Below 0.50: Very uncertain, consider UNKNOWN\n\n")
+	sb.WriteString("- Below 0.50: Weak signals — provide your best-guess type (do NOT default to UNKNOWN)\n\n")
 
 	sb.WriteString("## Tiebreaker: COBOL > COPYBOOK > JCL > UNKNOWN\n\n")
 
@@ -602,6 +608,59 @@ func trimCommentHeader(lines []string) []string {
 	return lines[i:]
 }
 
+// extractJSONBlock scans s for the first balanced JSON array or object,
+// respecting string literals and escape characters. It returns the balanced
+// substring and true, or ("", false) if no balanced block is found.
+func extractJSONBlock(s string) (string, bool) {
+	var inString bool
+	var escaped bool
+	var stack []byte
+	start := -1
+
+	for i := 0; i < len(s); i++ {
+		c := s[i]
+
+		if escaped {
+			escaped = false
+			continue
+		}
+
+		if inString {
+			if c == '\\' {
+				escaped = true
+			} else if c == '"' {
+				inString = false
+			}
+			continue
+		}
+
+		switch c {
+		case '"':
+			inString = true
+		case '[', '{':
+			if start == -1 {
+				start = i
+			}
+			stack = append(stack, c)
+		case ']':
+			if len(stack) > 0 && stack[len(stack)-1] == '[' {
+				stack = stack[:len(stack)-1]
+				if len(stack) == 0 {
+					return s[start : i+1], true
+				}
+			}
+		case '}':
+			if len(stack) > 0 && stack[len(stack)-1] == '{' {
+				stack = stack[:len(stack)-1]
+				if len(stack) == 0 {
+					return s[start : i+1], true
+				}
+			}
+		}
+	}
+	return "", false
+}
+
 // parseClassifyResponse extracts classifications from the LLM response body.
 func parseClassifyResponse(content string) ([]llmClassification, error) {
 	body := strings.TrimSpace(content)
@@ -617,25 +676,32 @@ func parseClassifyResponse(content string) ([]llmClassification, error) {
 		body = strings.TrimSpace(body)
 	}
 
-	// Handle preamble text before JSON: find first '[' or '{'
-	if !strings.HasPrefix(body, "[") && !strings.HasPrefix(body, "{") {
-		if arrIdx := strings.Index(body, "["); arrIdx >= 0 {
-			body = body[arrIdx:]
-		} else if objIdx := strings.Index(body, "{"); objIdx >= 0 {
-			body = body[objIdx:]
+	// Try extracting a balanced JSON block (handles preamble AND trailing text).
+	// Retry up to 10 times to skip false positives like [word] in prose.
+	remaining := body
+	for attempt := 0; attempt < 10; attempt++ {
+		candidate, ok := extractJSONBlock(remaining)
+		if !ok {
+			break
 		}
+
+		// Handle single-object response: wrap in array
+		toUnmarshal := candidate
+		if len(candidate) > 0 && candidate[0] == '{' {
+			toUnmarshal = "[" + candidate + "]"
+		}
+
+		var classifications []llmClassification
+		if err := json.Unmarshal([]byte(toUnmarshal), &classifications); err == nil {
+			return classifications, nil
+		}
+
+		// Advance past this candidate and try again
+		idx := strings.Index(remaining, candidate)
+		remaining = remaining[idx+len(candidate):]
 	}
 
-	// Handle single-object response: wrap in array
-	if strings.HasPrefix(body, "{") {
-		body = "[" + body + "]"
-	}
-
-	var classifications []llmClassification
-	if err := json.Unmarshal([]byte(body), &classifications); err != nil {
-		return nil, err
-	}
-	return classifications, nil
+	return nil, fmt.Errorf("no valid JSON found in response")
 }
 
 func classifyWithHeuristic(result *ScanResult, pathIdx map[string]int, logger *zap.Logger, classifiedBy map[string]string, classifiedConf map[string]float64) {

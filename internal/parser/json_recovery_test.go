@@ -282,6 +282,113 @@ func TestRecoverPartialJSON_TruncatedAtColon(t *testing.T) {
 	}
 }
 
+// --- sanitizeJSON / RecoverPartialJSON sanitization tests ---
+
+func TestSanitizeJSON_LeadingText(t *testing.T) {
+	// LLM prefaces the JSON with natural-language text.
+	input := "Here is the JSON:\n{\"programId\": \"TEST\"}"
+
+	result, err := RecoverPartialJSON(input)
+	require.NoError(t, err)
+
+	var m map[string]any
+	require.NoError(t, json.Unmarshal([]byte(result), &m), "recovered JSON should be valid: %s", result)
+	assert.Equal(t, "TEST", m["programId"])
+}
+
+func TestSanitizeJSON_TrailingText(t *testing.T) {
+	// LLM appends a closing remark after valid JSON.
+	input := "{\"programId\": \"TEST\"}\nHope this helps!"
+
+	result, err := RecoverPartialJSON(input)
+	require.NoError(t, err)
+
+	var m map[string]any
+	require.NoError(t, json.Unmarshal([]byte(result), &m), "recovered JSON should be valid: %s", result)
+	assert.Equal(t, "TEST", m["programId"])
+}
+
+func TestSanitizeJSON_TrailingCommas(t *testing.T) {
+	// Trailing commas before } and ] are illegal in JSON but common in LLM output.
+	input := `{"items": ["a", "b",], "x": 1,}`
+
+	result, err := RecoverPartialJSON(input)
+	require.NoError(t, err)
+
+	var m map[string]any
+	require.NoError(t, json.Unmarshal([]byte(result), &m), "recovered JSON should be valid: %s", result)
+
+	items, ok := m["items"].([]any)
+	require.True(t, ok, "items should be an array")
+	assert.Len(t, items, 2)
+	assert.Equal(t, float64(1), m["x"])
+}
+
+func TestSanitizeJSON_LineComments(t *testing.T) {
+	// Single-line // comments are stripped outside of string values.
+	input := "{\"key\": \"value\" // comment\n}"
+
+	result, err := RecoverPartialJSON(input)
+	require.NoError(t, err)
+
+	var m map[string]any
+	require.NoError(t, json.Unmarshal([]byte(result), &m), "recovered JSON should be valid: %s", result)
+	assert.Equal(t, "value", m["key"])
+}
+
+func TestSanitizeJSON_BlockComments(t *testing.T) {
+	// Block /* ... */ comments are stripped outside of string values.
+	input := `{"key": /* inline */ "value"}`
+
+	result, err := RecoverPartialJSON(input)
+	require.NoError(t, err)
+
+	var m map[string]any
+	require.NoError(t, json.Unmarshal([]byte(result), &m), "recovered JSON should be valid: %s", result)
+	assert.Equal(t, "value", m["key"])
+}
+
+func TestSanitizeJSON_Mixed(t *testing.T) {
+	// Leading preamble text, trailing commas, and line comments all at once.
+	input := "Here is the output:\n{\"id\": \"P1\", // program id\n\"refs\": [\"A\", \"B\",],}"
+
+	result, err := RecoverPartialJSON(input)
+	require.NoError(t, err)
+
+	var m map[string]any
+	require.NoError(t, json.Unmarshal([]byte(result), &m), "recovered JSON should be valid: %s", result)
+	assert.Equal(t, "P1", m["id"])
+
+	refs, ok := m["refs"].([]any)
+	require.True(t, ok, "refs should be an array")
+	assert.Len(t, refs, 2)
+}
+
+func TestSanitizeJSON_StringsWithSlashSlash(t *testing.T) {
+	// A string value containing // must not be treated as a comment.
+	input := `{"url": "http://example.com"}`
+
+	result, err := RecoverPartialJSON(input)
+	require.NoError(t, err)
+
+	var m map[string]any
+	require.NoError(t, json.Unmarshal([]byte(result), &m), "recovered JSON should be valid: %s", result)
+	assert.Equal(t, "http://example.com", m["url"])
+}
+
+func TestSanitizeJSON_StringsWithBraces(t *testing.T) {
+	// A string value containing { and } must not confuse the leading/trailing strip.
+	input := `{"template": "use {placeholder} here", "id": "T1"}`
+
+	result, err := RecoverPartialJSON(input)
+	require.NoError(t, err)
+
+	var m map[string]any
+	require.NoError(t, json.Unmarshal([]byte(result), &m), "recovered JSON should be valid: %s", result)
+	assert.Equal(t, "use {placeholder} here", m["template"])
+	assert.Equal(t, "T1", m["id"])
+}
+
 func TestRecoverPartialJSON_NestedObjectsTruncated(t *testing.T) {
 	// Object containing another object, truncated inside the inner one.
 	input := `{"config": {"host": "localhost", "port": 8080}, "data": {"name": "test", "val`
