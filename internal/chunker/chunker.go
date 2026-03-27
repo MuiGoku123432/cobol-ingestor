@@ -72,12 +72,13 @@ func stripSequenceColumns(content string) string {
 
 // Chunk represents a piece of a source file ready for analysis.
 type Chunk struct {
-	FileName string
-	Content  string
-	FileInfo graph.FileInfo
-	Index    int // chunk index within the file (0 for single-chunk)
-	Total    int // total chunks for this file
-	Pass     int // 1 or 2
+	FileName      string
+	Content       string
+	FileInfo      graph.FileInfo
+	Index         int    // chunk index within the file (0 for single-chunk)
+	Total         int    // total chunks for this file
+	Pass          int    // 1 or 2
+	LastParagraph string // last paragraph name from the previous chunk (for boundary context)
 }
 
 // ChunkFile reads a file and returns chunks suitable for Pass 1 analysis.
@@ -652,6 +653,15 @@ func ChunkFilePass2(fi graph.FileInfo, opts Pass2ChunkOptions, logger *zap.Logge
 		chunks[i].Total = len(chunks)
 	}
 
+	// Set LastParagraph on each chunk from the previous chunk's last paragraph
+	for i := 1; i < len(chunks); i++ {
+		prevContent := chunks[i-1].Content
+		paras := splitParagraphs(prevContent)
+		if len(paras) > 0 {
+			chunks[i].LastParagraph = paras[len(paras)-1].name
+		}
+	}
+
 	return chunks, nil
 }
 
@@ -842,6 +852,59 @@ func summarizePreamble(divs map[string]string) string {
 		re := regexp.MustCompile(`(?im)DB\s+([A-Za-z0-9_-]+)\s+WITHIN\s+([A-Za-z0-9_-]+)`)
 		if m := re.FindStringSubmatch(data); len(m) >= 3 {
 			sb.WriteString("*>> SCHEMA: subschema " + m[1] + " within " + m[2] + "\n")
+		}
+	}
+
+	// COPY members: extract from INLINED markers (scan both DATA and PROCEDURE divisions)
+	if data, ok := divs["DATA"]; ok {
+		content := data
+		if proc, ok2 := divs["PROCEDURE"]; ok2 {
+			content += "\n" + proc
+		}
+		copyRe := regexp.MustCompile(`\*>> COPY ([A-Za-z0-9_-]+(?:\s+[A-Za-z0-9_-]+)?) INLINED BEGIN`)
+		copyMatches := copyRe.FindAllStringSubmatch(content, -1)
+		if len(copyMatches) > 0 {
+			sb.WriteString("*>> COPY MEMBERS INLINED: ")
+			seen := make(map[string]bool)
+			first := true
+			for _, m := range copyMatches {
+				name := m[1]
+				if seen[name] {
+					continue
+				}
+				seen[name] = true
+				if !first {
+					sb.WriteString(", ")
+				}
+				sb.WriteString(name)
+				first = false
+			}
+			sb.WriteString("\n")
+		}
+	}
+
+	// LINKAGE SECTION parameters
+	if data, ok := divs["DATA"]; ok {
+		// Find LINKAGE SECTION and extract 01/77 level items
+		linkageRe := regexp.MustCompile(`(?im)LINKAGE\s+SECTION\.`)
+		if loc := linkageRe.FindStringIndex(data); loc != nil {
+			linkageContent := data[loc[1]:]
+			// Stop at next section header or end
+			if nextSec := dataSectionRegex.FindStringIndex(linkageContent); nextSec != nil {
+				linkageContent = linkageContent[:nextSec[0]]
+			}
+			linkageItemRe := regexp.MustCompile(`(?im)^\s+(?:01|77)\s+([A-Za-z0-9_-]+)`)
+			linkItems := linkageItemRe.FindAllStringSubmatch(linkageContent, -1)
+			if len(linkItems) > 0 {
+				sb.WriteString("*>> LINKAGE PARAMETERS: ")
+				for i, item := range linkItems {
+					if i > 0 {
+						sb.WriteString(", ")
+					}
+					sb.WriteString(item[1])
+				}
+				sb.WriteString("\n")
+			}
 		}
 	}
 

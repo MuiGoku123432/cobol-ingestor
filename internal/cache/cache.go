@@ -120,6 +120,19 @@ func (c *Cache) MarkProcessed(path, hash string) error {
 	return nil
 }
 
+// MarkPartiallyProcessed records a file as partially processed (some chunks succeeded, some failed).
+// On next run, the file will be re-analyzed to fill in the missing chunks.
+func (c *Cache) MarkPartiallyProcessed(filePath, hash string) error {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	_, err := c.db.Exec(`
+		INSERT INTO file_cache (file_path, content_hash, processed_at)
+		VALUES (?, ?, ?)
+		ON CONFLICT(file_path) DO UPDATE SET content_hash = 'partial:' || ?, processed_at = ?
+	`, filePath, "partial:"+hash, time.Now(), hash, time.Now())
+	return err
+}
+
 // IsChangedForPass returns true if the file has no cache entry for the given pass or its hash differs.
 func (c *Cache) IsChangedForPass(path, hash string, pass int) (bool, error) {
 	c.mu.Lock()

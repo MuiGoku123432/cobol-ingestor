@@ -158,6 +158,7 @@ func ParsePass1Response(jsonStr, sourceFile string) (*graph.Pass1Result, error) 
 	if executionMode == "" {
 		executionMode = "UNKNOWN"
 	}
+	executionMode = normalizeEnum(executionMode, "executionMode", validExecutionModes, "UNKNOWN")
 
 	// Program node
 	prog := graph.Program{
@@ -634,7 +635,7 @@ func ParsePass2Response(jsonStr, sourceFile, programID string) (*graph.Pass2Resu
 		result.Annotations = append(result.Annotations, graph.Annotation{
 			Paragraph:   a.Paragraph,
 			Description: a.Description,
-			Category:    a.Category,
+			Category:    normalizeEnum(a.Category, "category", validCategories, "OTHER"),
 		})
 	}
 
@@ -643,7 +644,7 @@ func ParsePass2Response(jsonStr, sourceFile, programID string) (*graph.Pass2Resu
 			Paragraph: cl.Paragraph,
 			Condition: cl.Condition,
 			Variables: cl.Variables,
-			Type:      cl.Type,
+			Type:      normalizeEnum(cl.Type, "conditionalLogicType", validConditionalTypes, "IF"),
 		})
 	}
 
@@ -658,7 +659,7 @@ func ParsePass2Response(jsonStr, sourceFile, programID string) (*graph.Pass2Resu
 	for _, eh := range raw.ErrorHandling {
 		result.ErrorHandlers = append(result.ErrorHandlers, graph.ErrorHandler{
 			Paragraph: eh.Paragraph,
-			Pattern:   eh.Pattern,
+			Pattern:   normalizeEnum(eh.Pattern, "errorPattern", validErrorPatterns, "AD-HOC"),
 			Details:   eh.Details,
 		})
 	}

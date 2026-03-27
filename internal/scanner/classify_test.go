@@ -1082,3 +1082,146 @@ func TestLLMClassification_ConfidenceStored(t *testing.T) {
 	require.NoError(t, err)
 	assert.InDelta(t, 0.92, hits["/tmp/FILE1.txt"].Confidence, 0.01)
 }
+
+// === Tests for extractJSONBlock and robust parsing ===
+
+func TestExtractJSONBlock(t *testing.T) {
+	tests := []struct {
+		name    string
+		input   string
+		want    string
+		wantOK  bool
+	}{
+		{
+			"balanced array",
+			`[{"file":"a.txt","type":"COBOL"}]`,
+			`[{"file":"a.txt","type":"COBOL"}]`,
+			true,
+		},
+		{
+			"balanced object",
+			`{"file":"a.txt","type":"COBOL"}`,
+			`{"file":"a.txt","type":"COBOL"}`,
+			true,
+		},
+		{
+			"nested brackets",
+			`[{"arr":[1,2],"obj":{"k":"v"}}]`,
+			`[{"arr":[1,2],"obj":{"k":"v"}}]`,
+			true,
+		},
+		{
+			"no JSON",
+			`This is plain text with no brackets`,
+			"",
+			false,
+		},
+		{
+			"brackets in strings",
+			`[{"note":"has [brackets] inside"}]`,
+			`[{"note":"has [brackets] inside"}]`,
+			true,
+		},
+		{
+			"trailing text after array",
+			`[{"file":"a.txt"}]\n\nNote: I classified this based on signals.`,
+			`[{"file":"a.txt"}]`,
+			true,
+		},
+		{
+			"preamble and trailing text",
+			`Here are the results:\n[{"file":"a.txt","type":"COBOL"}]\nLet me know if you need more.`,
+			`[{"file":"a.txt","type":"COBOL"}]`,
+			true,
+		},
+		{
+			"escaped quotes in strings",
+			`[{"note":"say \"hello\""}]`,
+			`[{"note":"say \"hello\""}]`,
+			true,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got, ok := extractJSONBlock(tt.input)
+			assert.Equal(t, tt.wantOK, ok)
+			if tt.wantOK {
+				assert.Equal(t, tt.want, got)
+			}
+		})
+	}
+}
+
+func TestParseClassifyResponse_TrailingText(t *testing.T) {
+	input := "[{\"file\":\"A.txt\",\"type\":\"COBOL\",\"confidence\":0.95}]\n\nNote: I classified this based on the PROGRAM-ID statement."
+	result, err := parseClassifyResponse(input)
+	require.NoError(t, err)
+	require.Len(t, result, 1)
+	assert.Equal(t, "COBOL", result[0].Type)
+	assert.InDelta(t, 0.95, result[0].Confidence, 0.01)
+}
+
+func TestParseClassifyResponse_PreambleAndTrailingText(t *testing.T) {
+	input := "Here are my classifications:\n[{\"file\":\"A.txt\",\"type\":\"JCL\",\"confidence\":0.88}]\nLet me know if you need anything else."
+	result, err := parseClassifyResponse(input)
+	require.NoError(t, err)
+	require.Len(t, result, 1)
+	assert.Equal(t, "JCL", result[0].Type)
+}
+
+func TestParseClassifyResponse_BracketInProse(t *testing.T) {
+	input := "[word] then [{\"file\":\"A.txt\",\"type\":\"COBOL\",\"confidence\":0.90}]"
+	result, err := parseClassifyResponse(input)
+	require.NoError(t, err)
+	require.Len(t, result, 1)
+	assert.Equal(t, "COBOL", result[0].Type)
+}
+
+func TestParseClassifyResponse_SingleObjectTrailingText(t *testing.T) {
+	input := "{\"file\":\"A.txt\",\"type\":\"COPYBOOK\",\"confidence\":0.85} and here is my reasoning."
+	result, err := parseClassifyResponse(input)
+	require.NoError(t, err)
+	require.Len(t, result, 1)
+	assert.Equal(t, "COPYBOOK", result[0].Type)
+}
+
+func TestBuildClassifyPrompt_AntiUnknown(t *testing.T) {
+	batch := []string{"/tmp/TEST.txt"}
+	snippets := map[string][]string{"/tmp/TEST.txt": {"line1"}}
+	prompt := buildClassifyPrompt(batch, snippets)
+
+	assert.Contains(t, prompt, "NEVER return UNKNOWN")
+	assert.NotContains(t, prompt, "consider UNKNOWN")
+}
+
+func TestBuildClassifyPrompt_ShortFileGuidance(t *testing.T) {
+	batch := []string{"/tmp/TEST.txt"}
+	snippets := map[string][]string{"/tmp/TEST.txt": {"line1"}}
+	prompt := buildClassifyPrompt(batch, snippets)
+
+	assert.Contains(t, prompt, "Short File Guidance")
+	assert.Contains(t, prompt, "Short does not mean UNKNOWN")
+}
+
+func TestBuildClassifyPrompt_ExampleTypes(t *testing.T) {
+	batch := []string{"/tmp/TEST.txt"}
+	snippets := map[string][]string{"/tmp/TEST.txt": {"line1"}}
+	prompt := buildClassifyPrompt(batch, snippets)
+
+	assert.Contains(t, prompt, "EASYTRIEVE")
+	assert.Contains(t, prompt, "CONTROL")
+	assert.Contains(t, prompt, "IDMS")
+	assert.Contains(t, prompt, "ADABAS")
+}
+
+func TestBuildRetryClassifyPrompt_NoUnknown(t *testing.T) {
+	batch := []string{"/tmp/TEST.txt"}
+	snippets := map[string][]string{"/tmp/TEST.txt": {"line1"}}
+	prevResults := map[string]*llmClassification{
+		"/tmp/TEST.txt": {File: "TEST.txt", Type: "UNKNOWN", Confidence: 0.40},
+	}
+	prompt := buildRetryClassifyPrompt(batch, snippets, prevResults, 2)
+
+	assert.Contains(t, prompt, "Do NOT return UNKNOWN")
+	assert.NotContains(t, prompt, "consider UNKNOWN")
+}
