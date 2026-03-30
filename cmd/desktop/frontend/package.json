@@ -9,7 +9,9 @@
     "preview": "vite preview"
   },
   "dependencies": {
-    "@neo4j-nvl/base": "^1.1.0"
+    "@neo4j-nvl/base": "^1.1.0",
+    "highlight.js": "^11.11.1",
+    "marked": "^17.0.5"
   },
   "devDependencies": {
     "@sveltejs/vite-plugin-svelte": "^5.0.0",

@@ -3,6 +3,7 @@
   import { EventsOn } from 'wailsjs/runtime/runtime';
   import { refreshAuthStatus } from '../../stores/status';
   import { usePersistedState } from '../../stores/persisted.svelte';
+  import MarkdownContent from './MarkdownContent.svelte';
 
   interface Message {
     role: string;
@@ -159,7 +160,11 @@
       {#each messages as msg}
         <div class="message" class:user={msg.role === 'user'} class:assistant={msg.role === 'assistant'}>
           <div class="role">{msg.role}</div>
-          <div class="content">{msg.content}</div>
+          {#if msg.role === 'assistant'}
+            <MarkdownContent content={msg.content} />
+          {:else}
+            <div class="content">{msg.content}</div>
+          {/if}
         </div>
       {/each}
 
@@ -177,7 +182,7 @@
         {#if streamedContent}
           <div class="message assistant streaming">
             <div class="role">assistant</div>
-            <div class="content">{streamedContent}</div>
+            <MarkdownContent content={streamedContent} />
           </div>
         {/if}
       {/if}
@@ -315,10 +320,10 @@
     border-radius: 8px;
     font-size: 13px;
     line-height: 1.5;
-    white-space: pre-wrap;
   }
 
   .message.user {
+    white-space: pre-wrap;
     align-self: flex-end;
     background: #1f3a5f;
     color: #e1e4e8;
