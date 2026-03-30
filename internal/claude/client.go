@@ -130,11 +130,30 @@ func (c *Client) SetCalibrator(cal *chunker.TokenCalibrator) {
 	c.calibrator = cal
 }
 
+// supportsPrefill returns true if the provider supports assistant message prefill.
+// Only the Anthropic API supports appending a partial assistant message to steer output.
+func (c *Client) supportsPrefill() bool {
+	return c.provider.Name() == "anthropic"
+}
+
 // withJSONPrefill appends an assistant prefill message containing "{" to force
-// the model to begin its response with JSON. The caller must prepend "{" to the
-// response content before parsing.
+// the model to begin its response with JSON. For providers that don't support
+// assistant prefill (e.g. Copilot/OpenAI), this is a no-op.
+// When prefill is active, the caller must prepend "{" to the response content.
 func (c *Client) withJSONPrefill(msgs []llm.Message) []llm.Message {
+	if !c.supportsPrefill() {
+		return msgs
+	}
 	return append(msgs, llm.Message{Role: llm.RoleAssistant, Content: "{"})
+}
+
+// prependPrefill conditionally prepends "{" to the response when the provider
+// supports assistant prefill (since the prefill seeded "{" as the start of output).
+func (c *Client) prependPrefill(resp string) string {
+	if !c.supportsPrefill() {
+		return resp
+	}
+	return "{" + resp
 }
 
 // AnalyzeStructural sends a file to Claude Sonnet for Pass 1 structural extraction.
@@ -158,11 +177,11 @@ func (c *Client) AnalyzeStructural(ctx context.Context, fileName, content string
 	})
 	if err != nil {
 		if resp != "" {
-			resp = "{" + resp
+			resp = c.prependPrefill(resp)
 		}
 		return resp, err
 	}
-	return "{" + resp, nil
+	return c.prependPrefill(resp), nil
 }
 
 // AnalyzeDeep sends a chunk to Claude Opus for Pass 2 deep semantic analysis.
@@ -197,11 +216,11 @@ func (c *Client) AnalyzeDeep(ctx context.Context, chunk chunker.Chunk, contextPr
 	})
 	if err != nil {
 		if resp != "" {
-			resp = "{" + resp
+			resp = c.prependPrefill(resp)
 		}
 		return resp, err
 	}
-	return "{" + resp, nil
+	return c.prependPrefill(resp), nil
 }
 
 // AnalyzeCrossCutting sends a graph data slice to Claude Opus for Pass 3 cross-cutting analysis.
@@ -226,11 +245,11 @@ func (c *Client) AnalyzeCrossCutting(ctx context.Context, graphSlice, existingDo
 	})
 	if err != nil {
 		if resp != "" {
-			resp = "{" + resp
+			resp = c.prependPrefill(resp)
 		}
 		return resp, err
 	}
-	return "{" + resp, nil
+	return c.prependPrefill(resp), nil
 }
 
 // AnalyzeJCL sends a JCL file to Claude Sonnet for structural extraction.
@@ -252,11 +271,11 @@ func (c *Client) AnalyzeJCL(ctx context.Context, fileName, content string) (stri
 	})
 	if err != nil {
 		if resp != "" {
-			resp = "{" + resp
+			resp = c.prependPrefill(resp)
 		}
 		return resp, err
 	}
-	return "{" + resp, nil
+	return c.prependPrefill(resp), nil
 }
 
 // AnalyzeCrossProgramFlow sends caller/callee field context to Claude Sonnet for LINKAGE mapping.
@@ -284,11 +303,11 @@ func (c *Client) AnalyzeCrossProgramFlow(ctx context.Context, caller, callee, fi
 	})
 	if err != nil {
 		if resp != "" {
-			resp = "{" + resp
+			resp = c.prependPrefill(resp)
 		}
 		return resp, err
 	}
-	return "{" + resp, nil
+	return c.prependPrefill(resp), nil
 }
 
 // AnalyzeRepair sends a targeted repair prompt to Opus for Pass 5 gap repair.
@@ -314,11 +333,11 @@ func (c *Client) AnalyzeRepair(ctx context.Context, repairType, programID, graph
 	})
 	if err != nil {
 		if resp != "" {
-			resp = "{" + resp
+			resp = c.prependPrefill(resp)
 		}
 		return resp, err
 	}
-	return "{" + resp, nil
+	return c.prependPrefill(resp), nil
 }
 
 // AnalyzeBW sends a Businessware file to Claude Opus for entity/relationship extraction.
@@ -347,11 +366,11 @@ func (c *Client) AnalyzeBW(ctx context.Context, fileName, fileType, content, exi
 	})
 	if err != nil {
 		if resp != "" {
-			resp = "{" + resp
+			resp = c.prependPrefill(resp)
 		}
 		return resp, err
 	}
-	return "{" + resp, nil
+	return c.prependPrefill(resp), nil
 }
 
 // isDiagramType returns true if the file type represents a diagram format.
