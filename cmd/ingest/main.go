@@ -38,8 +38,10 @@ var ingestCmd = &cobra.Command{
 }
 
 var (
-	dir      string
-	passFlag int
+	dir            string
+	passFlag       int
+	codebaseFlag   string
+	contentDetect  bool
 )
 
 // bw flags
@@ -192,6 +194,8 @@ var authModelsCmd = &cobra.Command{
 func init() {
 	ingestCmd.Flags().StringVar(&dir, "dir", "", "Root directory of COBOL source files")
 	ingestCmd.Flags().IntVar(&passFlag, "pass", 0, "Which pass to run: 0=all, 1=Pass 1, 2=Pass 2, 3=Pass 3")
+	ingestCmd.Flags().StringVar(&codebaseFlag, "codebase", "default", "Codebase identifier for multi-codebase support")
+	ingestCmd.Flags().BoolVar(&contentDetect, "content-detect", false, "Enable content-based detection of COBOL/copybook/JCL in .txt files")
 	_ = ingestCmd.MarkFlagRequired("dir")
 	rootCmd.AddCommand(ingestCmd)
 
@@ -234,16 +238,24 @@ func runIngest(cmd *cobra.Command, args []string) error {
 	}
 
 	cfg.Ingest.RootDir = dir
+	cfg.Ingest.Codebase = codebaseFlag
+	if codebaseFlag != "default" {
+		cfg.Ingest.CacheDB = fmt.Sprintf("cache-%s.sqlite", codebaseFlag)
+	}
 	ctx := context.Background()
 
 	logger.Info("starting ingestion",
 		zap.String("dir", cfg.Ingest.RootDir),
+		zap.String("codebase", cfg.Ingest.Codebase),
 		zap.Int("max_workers", cfg.Ingest.MaxWorkers),
 		zap.Int("pass", passFlag),
 	)
 
 	// Scan filesystem
-	scanResult, err := scanner.Scan(ctx, cfg.Ingest.RootDir, logger)
+	detect := contentDetect || cfg.Ingest.ContentDetect
+	scanResult, err := scanner.Scan(ctx, cfg.Ingest.RootDir, logger, scanner.ScanOptions{
+		ContentDetect: detect,
+	})
 	if err != nil {
 		return fmt.Errorf("scanning: %w", err)
 	}
@@ -332,12 +344,19 @@ func runIngest(cmd *cobra.Command, args []string) error {
 		}
 	}
 
+	// Classify .txt files if content detection is enabled
+	if detect && len(scanResult.Snippets) > 0 {
+		if err := scanner.ClassifyPendingFiles(ctx, scanResult, provider, cfg.Claude.SonnetModel, logger, fileCache); err != nil {
+			logger.Warn("content classification had errors", zap.Error(err))
+		}
+	}
+
 	claudeClient, err := claude.NewClient(provider, cfg.Claude, logger)
 	if err != nil {
 		return fmt.Errorf("creating claude client: %w", err)
 	}
 
-	writer := n4j.NewBatchWriter(neo4jClient, cfg.Ingest.BatchSize, logger)
+	writer := n4j.NewBatchWriter(neo4jClient, cfg.Ingest.BatchSize, cfg.Ingest.Codebase, logger)
 
 	pipe := &pipeline.Pipeline{
 		Config:      cfg,
@@ -396,10 +415,11 @@ func runBW(cmd *cobra.Command, args []string) error {
 	)
 
 	// Scan BW files
-	scanResult, err := scanner.ScanBW(ctx, cfg.BW.Dir, extensions, logger)
+	bwScanResult, err := scanner.ScanBW(ctx, cfg.BW.Dir, extensions, logger)
 	if err != nil {
 		return fmt.Errorf("scanning BW files: %w", err)
 	}
+	scanResult := bwScanResult.ScanResult
 	if len(scanResult.Files) == 0 {
 		fmt.Println("No Businessware files found.")
 		return nil
@@ -466,7 +486,7 @@ func runBW(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("creating claude client: %w", err)
 	}
 
-	writer := n4j.NewBatchWriter(neo4jClient, cfg.Ingest.BatchSize, logger)
+	writer := n4j.NewBatchWriter(neo4jClient, cfg.Ingest.BatchSize, "default", logger)
 
 	// Query existing COBOL program IDs for prompt context
 	existingPrograms := queryProgramIDs(ctx, neo4jClient, logger)
@@ -492,7 +512,13 @@ func runBW(cmd *cobra.Command, args []string) error {
 			continue
 		}
 
-		content, readErr := os.ReadFile(f.Path)
+		var content []byte
+		var readErr error
+		if jarContent, ok := bwScanResult.JARContents[f.Path]; ok {
+			content = jarContent
+		} else {
+			content, readErr = os.ReadFile(f.Path)
+		}
 		if readErr != nil {
 			logger.Error("failed to read file", zap.String("file", f.Path), zap.Error(readErr))
 			continue
@@ -631,6 +657,8 @@ func classifyBWExtension(path string) string {
 	switch ext {
 	case ".java":
 		return "Java"
+	case ".class":
+		return "Java Bytecode"
 	case ".md":
 		return "Markdown"
 	case ".xml":
@@ -639,6 +667,22 @@ func classifyBWExtension(path string) string {
 		return "Businessware"
 	case ".txt":
 		return "Text"
+	case ".properties":
+		return "Properties"
+	case ".json":
+		return "JSON"
+	case ".yml", ".yaml":
+		return "YAML"
+	case ".mf":
+		return "Manifest"
+	case ".vsdx":
+		return "Visio Diagram"
+	case ".drawio":
+		return "DrawIO Diagram"
+	case ".svg":
+		return "SVG Diagram"
+	case ".puml", ".plantuml":
+		return "PlantUML Diagram"
 	default:
 		return "Unknown"
 	}
@@ -809,7 +853,7 @@ func runExternalDB(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("running migrations: %w", err)
 	}
 
-	writer := n4j.NewBatchWriter(neo4jClient, cfg.Ingest.BatchSize, logger)
+	writer := n4j.NewBatchWriter(neo4jClient, cfg.Ingest.BatchSize, "default", logger)
 	if err := writer.WriteExternalDBResult(ctx, result); err != nil {
 		return fmt.Errorf("writing results to neo4j: %w", err)
 	}

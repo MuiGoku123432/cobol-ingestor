@@ -2,20 +2,25 @@
   // @ts-ignore - Wails runtime
   import { EventsOn } from 'wailsjs/runtime/runtime';
   import { refreshAuthStatus } from '../../stores/status';
+  import { usePersistedState } from '../../stores/persisted.svelte';
+  import MarkdownContent from './MarkdownContent.svelte';
 
   interface Message {
     role: string;
     content: string;
   }
 
+  let saved = usePersistedState('chat', {
+    discoveryMode: true,
+    targetLang: 'Java',
+    framework: 'Spring Boot',
+    integrations: '',
+  });
+
   let messages = $state<Message[]>([]);
   let input = $state('');
   let streaming = $state(false);
   let streamedContent = $state('');
-  let discoveryMode = $state(true);
-  let targetLang = $state('Java');
-  let framework = $state('Spring Boot');
-  let integrations = $state('');
   let sessionId = $state('');
   let sessions = $state<any[]>([]);
   let toolCalls = $state<any[]>([]);
@@ -60,7 +65,7 @@
       const allMsgs = messages.map((m) => ({ role: m.role, content: m.content }));
       // @ts-ignore
       await window.go.main.ChatService.SendChat(
-        sessionId, allMsgs, discoveryMode, targetLang, framework, integrations
+        sessionId, allMsgs, saved.discoveryMode, saved.targetLang, saved.framework, saved.integrations
       );
     } catch (e: any) {
       messages = [...messages, { role: 'assistant', content: `Error: ${e.message || e}` }];
@@ -136,17 +141,17 @@
     <!-- Mode controls -->
     <div class="mode-bar">
       <label class="toggle">
-        <input type="checkbox" bind:checked={discoveryMode} />
-        <span>{discoveryMode ? 'Discovery Mode' : 'Migration Mode'}</span>
+        <input type="checkbox" bind:checked={saved.discoveryMode} />
+        <span>{saved.discoveryMode ? 'Discovery Mode' : 'Migration Mode'}</span>
       </label>
-      {#if !discoveryMode}
-        <select bind:value={targetLang}>
+      {#if !saved.discoveryMode}
+        <select bind:value={saved.targetLang}>
           {#each languages as lang}
             <option>{lang}</option>
           {/each}
         </select>
-        <input type="text" bind:value={framework} placeholder="Framework" class="small-input" />
-        <input type="text" bind:value={integrations} placeholder="Integrations" class="small-input" />
+        <input type="text" bind:value={saved.framework} placeholder="Framework" class="small-input" />
+        <input type="text" bind:value={saved.integrations} placeholder="Integrations" class="small-input" />
       {/if}
     </div>
 
@@ -155,7 +160,11 @@
       {#each messages as msg}
         <div class="message" class:user={msg.role === 'user'} class:assistant={msg.role === 'assistant'}>
           <div class="role">{msg.role}</div>
-          <div class="content">{msg.content}</div>
+          {#if msg.role === 'assistant'}
+            <MarkdownContent content={msg.content} />
+          {:else}
+            <div class="content">{msg.content}</div>
+          {/if}
         </div>
       {/each}
 
@@ -173,7 +182,7 @@
         {#if streamedContent}
           <div class="message assistant streaming">
             <div class="role">assistant</div>
-            <div class="content">{streamedContent}</div>
+            <MarkdownContent content={streamedContent} />
           </div>
         {/if}
       {/if}
@@ -311,10 +320,10 @@
     border-radius: 8px;
     font-size: 13px;
     line-height: 1.5;
-    white-space: pre-wrap;
   }
 
   .message.user {
+    white-space: pre-wrap;
     align-self: flex-end;
     background: #1f3a5f;
     color: #e1e4e8;

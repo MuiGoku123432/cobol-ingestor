@@ -105,7 +105,7 @@ func ParsePass3Response(jsonStr string) (*graph.Pass3Result, error) {
 	for _, rf := range raw.RiskFlags {
 		result.RiskFlags = append(result.RiskFlags, graph.RiskFlag{
 			ProgramID: rf.ProgramID,
-			RiskType:  rf.RiskType,
+			RiskType:  normalizeEnum(rf.RiskType, "riskType", validRiskTypes, "standard"),
 			Details:   rf.Details,
 			Score:     rf.Score,
 		})
@@ -123,7 +123,7 @@ func ParsePass3Response(jsonStr string) (*graph.Pass3Result, error) {
 		result.CopybookRisks = append(result.CopybookRisks, graph.CopybookRisk{
 			Copybook:     cr.Copybook,
 			ProgramCount: cr.ProgramCount,
-			RiskLevel:    cr.RiskLevel,
+			RiskLevel:    normalizeEnum(cr.RiskLevel, "copybookRiskLevel", validCopybookRiskLevels, "LOW"),
 			Reason:       cr.Reason,
 		})
 	}
@@ -133,14 +133,14 @@ func ParsePass3Response(jsonStr string) (*graph.Pass3Result, error) {
 			ProgramID: mc.ProgramID,
 			Score:     mc.Score,
 			Reason:    mc.Reason,
-			Approach:  mc.Approach,
+			Approach:  normalizeEnum(mc.Approach, "approach", validApproaches, "API_EXTRACTION"),
 		})
 	}
 
 	for _, ve := range raw.VolumeEstimates {
 		result.VolumeEstimates = append(result.VolumeEstimates, graph.VolumeEstimate{
 			ProgramID: ve.ProgramID,
-			Estimate:  ve.Estimate,
+			Estimate:  normalizeEnum(ve.Estimate, "volumeEstimate", validVolumeEstimates, "MEDIUM"),
 			Reason:    ve.Reason,
 		})
 	}

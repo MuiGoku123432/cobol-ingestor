@@ -27,7 +27,7 @@ type ProgramHandler struct {
 // @Router /api/v1/programs [get]
 func (h *ProgramHandler) List(c *gin.Context) {
 	page, pageSize := parsePagination(c)
-	filter := n4j.Filter{Search: c.Query("search")}
+	filter := n4j.Filter{Search: c.Query("search"), Codebase: c.Query("codebase")}
 
 	result, err := h.Reader.ListPrograms(c.Request.Context(), filter, page, pageSize)
 	if err != nil {

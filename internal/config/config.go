@@ -26,10 +26,11 @@ type Config struct {
 // BWConfig holds settings for Businessware ingestion.
 type BWConfig struct {
 	Dir        string // BW_DIR — root directory of Businessware files
-	Extensions string // BW_EXTENSIONS — comma-separated file extensions (default ".java,.md,.bw,.txt,.xml")
+	Extensions string // BW_EXTENSIONS — comma-separated file extensions (default ".java,.md,.bw,.txt,.xml,.vsdx,.drawio,.svg,.puml,.plantuml,.jar")
 	MaxWorkers int    // BW_MAX_WORKERS — concurrent analysis workers (default 5)
 	MaxTokens  int    // BW_MAX_TOKENS — max output tokens per LLM call (default 16000)
 	TokenLimit int    // BW_TOKEN_LIMIT — input chunking token limit (default 30000)
+	JavapPath  string // BW_JAVAP_PATH — path to javap binary (auto-detected if empty)
 }
 
 // ExternalDBConfig holds settings for external database gap analysis via MCP.
@@ -94,6 +95,7 @@ type ClaudeConfig struct {
 	Pass2MaxTokens   int
 	Pass3MaxTokens   int
 	Pass4MaxTokens   int
+	MaxOutputTokensCap int // upper limit for auto-retry max_tokens doubling (default 65536)
 	RequestTimeout   time.Duration
 	DisableRateLimit bool
 }
@@ -107,6 +109,7 @@ type Neo4jConfig struct {
 
 type IngestConfig struct {
 	RootDir         string
+	Codebase        string // INGEST_CODEBASE — codebase identifier for multi-codebase support (default "default")
 	BatchSize       int
 	CacheDB         string
 	TokenLimit      int
@@ -117,7 +120,9 @@ type IngestConfig struct {
 	Pass2TokenLimit int
 	OverlapLines    int
 	Pass3BatchSize        int
-	StripSequenceColumns  bool // STRIP_SEQUENCE_COLUMNS — strip columns 1-6 and 73-80 from fixed-format COBOL
+	StripSequenceColumns  bool    // STRIP_SEQUENCE_COLUMNS — strip columns 1-6 and 73-80 from fixed-format COBOL
+	ContentDetect         bool    // CONTENT_DETECT — enable content-based detection of COBOL/copybook/JCL in .txt files
+	TokenEstimationRatio  float64 // TOKEN_ESTIMATION_RATIO — chars per token for estimation (default 3.2, old=4.0)
 }
 
 // WorkersForPass returns the worker count for a specific pass, falling back to MaxWorkers.
@@ -161,10 +166,11 @@ func Load() (*Config, error) {
 	viper.SetDefault("CLAUDE_OPUS_MODEL", "claude-opus-4-6")
 	viper.SetDefault("CLAUDE_SONNET_MODEL", "claude-sonnet-4-6")
 	viper.SetDefault("CLAUDE_MAX_RETRIES", 3)
-	viper.SetDefault("CLAUDE_PASS1_MAX_TOKENS", 8192)
-	viper.SetDefault("CLAUDE_PASS2_MAX_TOKENS", 16000)
+	viper.SetDefault("CLAUDE_PASS1_MAX_TOKENS", 16384)
+	viper.SetDefault("CLAUDE_PASS2_MAX_TOKENS", 32000)
 	viper.SetDefault("CLAUDE_PASS3_MAX_TOKENS", 16000)
 	viper.SetDefault("CLAUDE_PASS4_MAX_TOKENS", 4000)
+	viper.SetDefault("CLAUDE_MAX_OUTPUT_CAP", 65536)
 	viper.SetDefault("DISABLE_RATE_LIMIT", false)
 
 	// Neo4j defaults
@@ -174,6 +180,7 @@ func Load() (*Config, error) {
 	viper.SetDefault("NEO4J_DATABASE", "cobol")
 
 	// Ingest defaults
+	viper.SetDefault("INGEST_CODEBASE", "default")
 	viper.SetDefault("INGEST_BATCH_SIZE", 500)
 	viper.SetDefault("INGEST_CACHE_DB", "./cache.sqlite")
 	viper.SetDefault("INGEST_TOKEN_LIMIT", 30000)
@@ -185,6 +192,8 @@ func Load() (*Config, error) {
 	viper.SetDefault("PASS2_OVERLAP_LINES", 20)
 	viper.SetDefault("PASS3_BATCH_SIZE", 50)
 	viper.SetDefault("STRIP_SEQUENCE_COLUMNS", true)
+	viper.SetDefault("CONTENT_DETECT", false)
+	viper.SetDefault("TOKEN_ESTIMATION_RATIO", 3.2)
 
 	// API defaults
 	viper.SetDefault("API_PORT", "8080")
@@ -209,7 +218,7 @@ func Load() (*Config, error) {
 
 	// BW defaults
 	viper.SetDefault("BW_DIR", "")
-	viper.SetDefault("BW_EXTENSIONS", ".java,.md,.bw,.txt,.xml")
+	viper.SetDefault("BW_EXTENSIONS", ".java,.md,.bw,.txt,.xml,.vsdx,.drawio,.svg,.puml,.plantuml,.jar")
 	viper.SetDefault("BW_MAX_WORKERS", 5)
 	viper.SetDefault("BW_MAX_TOKENS", 16000)
 	viper.SetDefault("BW_TOKEN_LIMIT", 30000)
@@ -254,13 +263,14 @@ func Load() (*Config, error) {
 			ResponseHeaderTimeout: llmResponseHeaderTimeout,
 		},
 		Claude: ClaudeConfig{
-			OpusModel:      viper.GetString("CLAUDE_OPUS_MODEL"),
-			SonnetModel:    viper.GetString("CLAUDE_SONNET_MODEL"),
-			MaxRetries:     viper.GetInt("CLAUDE_MAX_RETRIES"),
-			Pass1MaxTokens: viper.GetInt("CLAUDE_PASS1_MAX_TOKENS"),
-			Pass2MaxTokens: viper.GetInt("CLAUDE_PASS2_MAX_TOKENS"),
-			Pass3MaxTokens: viper.GetInt("CLAUDE_PASS3_MAX_TOKENS"),
+			OpusModel:        viper.GetString("CLAUDE_OPUS_MODEL"),
+			SonnetModel:      viper.GetString("CLAUDE_SONNET_MODEL"),
+			MaxRetries:       viper.GetInt("CLAUDE_MAX_RETRIES"),
+			Pass1MaxTokens:   viper.GetInt("CLAUDE_PASS1_MAX_TOKENS"),
+			Pass2MaxTokens:   viper.GetInt("CLAUDE_PASS2_MAX_TOKENS"),
+			Pass3MaxTokens:   viper.GetInt("CLAUDE_PASS3_MAX_TOKENS"),
 			Pass4MaxTokens:   viper.GetInt("CLAUDE_PASS4_MAX_TOKENS"),
+			MaxOutputTokensCap: viper.GetInt("CLAUDE_MAX_OUTPUT_CAP"),
 			RequestTimeout:   llmTimeout,
 			DisableRateLimit: viper.GetBool("DISABLE_RATE_LIMIT"),
 		},
@@ -272,6 +282,7 @@ func Load() (*Config, error) {
 		},
 		Ingest: IngestConfig{
 			RootDir:         viper.GetString("INGEST_ROOT_DIR"),
+			Codebase:        viper.GetString("INGEST_CODEBASE"),
 			BatchSize:       viper.GetInt("INGEST_BATCH_SIZE"),
 			CacheDB:         viper.GetString("INGEST_CACHE_DB"),
 			TokenLimit:      viper.GetInt("INGEST_TOKEN_LIMIT"),
@@ -283,6 +294,8 @@ func Load() (*Config, error) {
 			OverlapLines:    viper.GetInt("PASS2_OVERLAP_LINES"),
 			Pass3BatchSize:       viper.GetInt("PASS3_BATCH_SIZE"),
 			StripSequenceColumns: viper.GetBool("STRIP_SEQUENCE_COLUMNS"),
+			ContentDetect:        viper.GetBool("CONTENT_DETECT"),
+			TokenEstimationRatio: viper.GetFloat64("TOKEN_ESTIMATION_RATIO"),
 		},
 		API: APIConfig{
 			Port:     viper.GetString("API_PORT"),
@@ -315,6 +328,7 @@ func Load() (*Config, error) {
 			MaxWorkers: viper.GetInt("BW_MAX_WORKERS"),
 			MaxTokens:  viper.GetInt("BW_MAX_TOKENS"),
 			TokenLimit: viper.GetInt("BW_TOKEN_LIMIT"),
+			JavapPath:  viper.GetString("BW_JAVAP_PATH"),
 		},
 		Modernize: ModernizeConfig{
 			Port:          viper.GetString("MODERNIZE_PORT"),

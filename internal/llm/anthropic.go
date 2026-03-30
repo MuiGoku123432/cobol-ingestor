@@ -2,6 +2,7 @@ package llm
 
 import (
 	"context"
+	"errors"
 	"fmt"
 
 	"cobol-ingestor/internal/config"
@@ -85,6 +86,21 @@ func (p *AnthropicProvider) Complete(ctx context.Context, req CompletionRequest)
 	var stopReason string
 
 	if err := p.consumeStream(stream, &content, &inputTokens, &outputTokens, &stopReason); err != nil {
+		// Pass through context cancellation/timeout without wrapping.
+		if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+			return nil, err
+		}
+		// Classify API errors by status code.
+		var apiErr *anthropic.Error
+		if errors.As(err, &apiErr) {
+			retriable := isRetriableStatus(apiErr.StatusCode)
+			return nil, &LLMError{
+				StatusCode: apiErr.StatusCode,
+				Retriable:  retriable,
+				Message:    apiErr.Error(),
+				Err:        err,
+			}
+		}
 		return nil, fmt.Errorf("anthropic streaming: %w", err)
 	}
 
@@ -115,6 +131,17 @@ func (p *AnthropicProvider) consumeStream(
 		}
 	}
 	return stream.Err()
+}
+
+// isRetriableStatus returns true for HTTP status codes that warrant a retry.
+func isRetriableStatus(code int) bool {
+	switch code {
+	case 400, 401, 403:
+		return false
+	default:
+		// 429, 500, 502, 503, 529, and anything else → retry
+		return true
+	}
 }
 
 func (p *AnthropicProvider) Name() string {

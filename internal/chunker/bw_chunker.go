@@ -1,8 +1,11 @@
 package chunker
 
 import (
+	"fmt"
 	"path/filepath"
 	"strings"
+
+	"cobol-ingestor/internal/diagram"
 )
 
 // BWChunk represents a chunk of a Businessware file ready for analysis.
@@ -17,7 +20,20 @@ type BWChunk struct {
 // Java files are split at class/method boundaries, markdown at heading boundaries,
 // and everything else at blank-line paragraph boundaries.
 func ChunkBWFile(path string, content []byte, tokenLimit int) ([]BWChunk, error) {
-	text := string(content)
+	ext := strings.ToLower(filepath.Ext(path))
+
+	// Pre-process diagram formats: extract text from binary/compressed content
+	var text string
+	if diagram.IsDiagramExtension(ext) {
+		extracted, err := diagram.ExtractText(path, content)
+		if err != nil {
+			return nil, fmt.Errorf("extracting diagram %s: %w", path, err)
+		}
+		text = extracted
+	} else {
+		text = string(content)
+	}
+
 	tokens := EstimateTokens(text)
 
 	if tokens <= tokenLimit {
@@ -29,14 +45,15 @@ func ChunkBWFile(path string, content []byte, tokenLimit int) ([]BWChunk, error)
 		}}, nil
 	}
 
-	ext := strings.ToLower(filepath.Ext(path))
 	var sections []string
 
 	switch ext {
-	case ".java":
+	case ".java", ".class":
 		sections = splitJava(text)
 	case ".md":
 		sections = splitMarkdown(text)
+	case ".properties", ".json", ".yml", ".yaml":
+		sections = splitBlankLines(text)
 	default:
 		sections = splitBlankLines(text)
 	}
