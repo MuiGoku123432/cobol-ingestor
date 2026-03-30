@@ -22,11 +22,14 @@ type App struct {
 	cfg    *config.Config
 
 	// Services exposed to frontend via Wails bindings
-	Neo4jService  *Neo4jService
-	IngestService *IngestService
-	ChatService   *ChatService
-	ConfigService *ConfigService
-	QueryStore    *QueryStoreService
+	Neo4jService    *Neo4jService
+	IngestService   *IngestService
+	ChatService     *ChatService
+	ConfigService   *ConfigService
+	QueryStore      *QueryStoreService
+	StrategyService *StrategyService
+	BrowserService  *BrowserService
+	ExportService   *ExportService
 }
 
 func NewApp(logger *zap.Logger) *App {
@@ -36,6 +39,9 @@ func NewApp(logger *zap.Logger) *App {
 	a.ChatService = &ChatService{app: a}
 	a.ConfigService = &ConfigService{app: a}
 	a.QueryStore = &QueryStoreService{app: a}
+	a.StrategyService = &StrategyService{app: a}
+	a.BrowserService = &BrowserService{app: a}
+	a.ExportService = &ExportService{app: a}
 	return a
 }
 
@@ -65,6 +71,8 @@ func (a *App) startup(ctx context.Context) {
 	if a.cfg.Neo4j.URI != "" {
 		if err := a.Neo4jService.tryConnect(ctx); err != nil {
 			a.logger.Info("neo4j not connected at startup (configure via Settings)", zap.Error(err))
+		} else if err := a.initMCP(); err != nil {
+			a.logger.Error("init MCP at startup", zap.Error(err))
 		}
 	}
 
@@ -102,16 +110,13 @@ func (a *App) shutdown(ctx context.Context) {
 // initMCP creates an in-process MCP client connected to the Neo4j reader.
 // Called after Neo4j connects successfully.
 func (a *App) initMCP() error {
-	reader := a.Neo4jService.reader
-	if reader == nil {
+	if a.Neo4jService.client == nil {
 		return nil
 	}
 	var writer *n4j.BatchWriter
-	if a.Neo4jService.client != nil {
-		writer = n4j.NewBatchWriter(a.Neo4jService.client, 500, a.logger)
-	}
+	writer = n4j.NewBatchWriter(a.Neo4jService.client, 500, "default", a.logger)
 
-	server := mcpkg.NewServer(reader, writer)
+	server := mcpkg.NewServer(a.Neo4jService.client, writer)
 	mcpClient, err := modernize.NewMCPClientInProcess(a.ctx, server)
 	if err != nil {
 		return err

@@ -9,7 +9,7 @@ import (
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 )
 
-func registerAllTools(s *mcp.Server, reader n4j.Reader, writer *n4j.BatchWriter) {
+func registerAllTools(s *mcp.Server, reader n4j.Reader, writer *n4j.BatchWriter, client *n4j.Client) {
 	registerGetProgram(s, reader)
 	registerSearchPrograms(s, reader)
 	registerListPrograms(s, reader)
@@ -69,6 +69,9 @@ func registerAllTools(s *mcp.Server, reader n4j.Reader, writer *n4j.BatchWriter)
 	registerGetIDMSAreas(s, reader)
 	// External DB gap analysis tools
 	registerExternalDBTools(s, reader)
+	// Codebase filtering tools
+	registerListCodebases(s, client)
+	registerGetCrossCodebaseCalls(s, client)
 	// Write tools (require writer)
 	if writer != nil {
 		registerReassignProgramDomain(s, writer)
@@ -143,7 +146,7 @@ func registerListPrograms(s *mcp.Server, reader n4j.Reader) {
 		if pageSize <= 0 {
 			pageSize = 20
 		}
-		result, err := reader.ListPrograms(ctx, n4j.Filter{Search: input.Search}, page, pageSize)
+		result, err := reader.ListPrograms(ctx, n4j.Filter{Search: input.Search, Codebase: input.Codebase}, page, pageSize)
 		if err != nil {
 			return nil, nil, err
 		}
@@ -442,7 +445,7 @@ func registerListCopybooks(s *mcp.Server, reader n4j.Reader) {
 		if pageSize <= 0 {
 			pageSize = 20
 		}
-		result, err := reader.ListCopybooks(ctx, n4j.Filter{Search: input.Search}, page, pageSize)
+		result, err := reader.ListCopybooks(ctx, n4j.Filter{Search: input.Search, Codebase: input.Codebase}, page, pageSize)
 		if err != nil {
 			return nil, nil, err
 		}
@@ -588,5 +591,52 @@ func registerGetIDMSAreas(s *mcp.Server, reader n4j.Reader) {
 			return nil, nil, err
 		}
 		return nil, &output{Areas: items}, nil
+	})
+}
+
+func registerListCodebases(s *mcp.Server, client *n4j.Client) {
+	type output struct {
+		Codebases []string `json:"codebases"`
+	}
+	mcp.AddTool(s, &mcp.Tool{
+		Name:        "list_codebases",
+		Description: "List all codebase identifiers present in the graph.",
+	}, func(ctx context.Context, req *mcp.CallToolRequest, input ListCodebasesInput) (*mcp.CallToolResult, *output, error) {
+		codebases, err := client.ListCodebases(ctx)
+		if err != nil {
+			return nil, nil, err
+		}
+		return nil, &output{Codebases: codebases}, nil
+	})
+}
+
+func registerGetCrossCodebaseCalls(s *mcp.Server, client *n4j.Client) {
+	type callInfo struct {
+		CallerID       string `json:"callerId"`
+		CallerCodebase string `json:"callerCodebase"`
+		CalleeID       string `json:"calleeId"`
+		CalleeCodebase string `json:"calleeCodebase"`
+	}
+	type output struct {
+		Calls []callInfo `json:"calls"`
+	}
+	mcp.AddTool(s, &mcp.Tool{
+		Name:        "get_cross_codebase_calls",
+		Description: "Find CALLS relationships where caller and callee belong to different codebases.",
+	}, func(ctx context.Context, req *mcp.CallToolRequest, input GetCrossCodebaseCallsInput) (*mcp.CallToolResult, *output, error) {
+		calls, err := client.GetCrossCodebaseCalls(ctx)
+		if err != nil {
+			return nil, nil, err
+		}
+		var result []callInfo
+		for _, c := range calls {
+			result = append(result, callInfo{
+				CallerID:       c.CallerID,
+				CallerCodebase: c.CallerCodebase,
+				CalleeID:       c.CalleeID,
+				CalleeCodebase: c.CalleeCodebase,
+			})
+		}
+		return nil, &output{Calls: result}, nil
 	})
 }

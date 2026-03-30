@@ -150,7 +150,7 @@ func (c *Client) GetDeadCodeSummary(ctx context.Context) ([]DeadCodeSummaryInfo,
 	defer session.Close(ctx)
 
 	result, err := session.Run(ctx,
-		"MATCH (p:Paragraph)-[:BELONGS_TO]->(prog:Program) "+
+		"MATCH (p:Paragraph)-[:BELONGS_TO]->(prog:Program)"+codebaseWhere("prog", c.codebase)+" "+
 			"WITH prog.programId AS programId, "+
 			"     count(p) AS totalParagraphs, "+
 			"     sum(CASE WHEN p.isReachable = false THEN 1 ELSE 0 END) AS deadParagraphs "+

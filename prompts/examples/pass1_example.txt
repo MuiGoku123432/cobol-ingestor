@@ -1,0 +1,34 @@
+EXAMPLE INPUT:
+       IDENTIFICATION DIVISION.
+       PROGRAM-ID. CUSTLOOK.
+       ENVIRONMENT DIVISION.
+       INPUT-OUTPUT SECTION.
+       FILE-CONTROL.
+           SELECT CUSTOMER-FILE ASSIGN TO CUSTVSAM
+               ORGANIZATION IS INDEXED
+               ACCESS MODE IS DYNAMIC
+               RECORD KEY IS CUST-KEY
+               FILE STATUS IS WS-FILE-STATUS.
+       DATA DIVISION.
+       WORKING-STORAGE SECTION.
+       01  WS-FILE-STATUS        PIC XX.
+       01  WS-PROG-NAME          PIC X(8).
+       77  WS-COUNTER            PIC 9(5).
+           88  WS-DONE           VALUE 99999.
+       LINKAGE SECTION.
+       01  LS-CUST-ID            PIC X(10).
+       PROCEDURE DIVISION USING LS-CUST-ID.
+       0000-MAIN.
+           PERFORM 1000-INIT.
+           PERFORM 2000-LOOKUP.
+           CALL 'CUSTRPT' USING LS-CUST-ID.
+           MOVE 'CUSTVAL' TO WS-PROG-NAME.
+           CALL WS-PROG-NAME USING LS-CUST-ID.
+           STOP RUN.
+       1000-INIT.
+           OPEN INPUT CUSTOMER-FILE.
+       2000-LOOKUP.
+           READ CUSTOMER-FILE.
+
+EXPECTED OUTPUT:
+{"programId":"CUSTLOOK","executionMode":"BATCH","copyReferences":[],"callTargets":[{"target":"CUSTRPT","isDynamic":false},{"target":"WS-PROG-NAME","isDynamic":true}],"paragraphs":["0000-MAIN","1000-INIT","2000-LOOKUP"],"sections":[],"fileDefinitions":[{"name":"CUSTOMER-FILE","organization":"INDEXED","vsamType":"KSDS","dataStoreType":"VSAM"}],"dataItems":[{"name":"WS-FILE-STATUS","level":1,"picture":"XX","usage":""},{"name":"WS-PROG-NAME","level":1,"picture":"X(8)","usage":""},{"name":"WS-COUNTER","level":77,"picture":"9(5)","usage":""}],"conditions":[{"name":"WS-DONE","parent":"WS-COUNTER","value":"99999"}],"parameters":[{"name":"LS-CUST-ID","level":1,"direction":"INOUT"}],"sqlStatements":[],"cicsCommands":[],"externalInterfaces":[],"dbTables":[],"idmsSchemas":[],"idmsRecords":[],"idmsAreas":[],"idmsSets":[]}

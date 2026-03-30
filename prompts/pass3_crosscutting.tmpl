@@ -27,7 +27,6 @@ You are analyzing a batch of COBOL programs from their graph relationships. Base
 
 Return your analysis as JSON with this exact structure:
 
-```json
 {
   "domains": [
     {
@@ -58,7 +57,6 @@ Return your analysis as JSON with this exact structure:
     {"programId": "PROG1", "estimate": "HIGH", "reason": "Multiple PERFORM UNTIL loops processing large files, batch window indicator"}
   ]
 }
-```
 
 Rules:
 - Every program in the input MUST appear in exactly one domain
@@ -72,6 +70,7 @@ Rules:
 - Risk flags MUST cover ALL programs in the input (like volume estimates)
 - Volume estimates should cover all programs in the input
 - Volume estimate values must be exactly HIGH, MEDIUM, or LOW
+- Return ONLY the JSON object, no markdown fences, no explanation.
 {{if .ExistingDomains}}
 IMPORTANT: The following business domains have already been assigned to other programs.
 You MUST reuse these exact domain names when they apply, rather than inventing synonyms.

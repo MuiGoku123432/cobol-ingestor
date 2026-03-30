@@ -2,6 +2,7 @@ package llm
 
 import (
 	"context"
+	"errors"
 	"fmt"
 
 	"cobol-ingestor/internal/config"
@@ -51,6 +52,32 @@ type Provider interface {
 
 	// Close cleans up any resources held by the provider.
 	Close() error
+}
+
+// LLMError wraps an LLM API error with classification metadata.
+type LLMError struct {
+	StatusCode int
+	Retriable  bool
+	Message    string
+	Err        error
+}
+
+func (e *LLMError) Error() string {
+	return fmt.Sprintf("LLM error (status=%d, retriable=%v): %s", e.StatusCode, e.Retriable, e.Message)
+}
+
+func (e *LLMError) Unwrap() error {
+	return e.Err
+}
+
+// IsRetriable checks if an error is an LLMError that should be retried.
+func IsRetriable(err error) bool {
+	var llmErr *LLMError
+	if errors.As(err, &llmErr) {
+		return llmErr.Retriable
+	}
+	// Unknown errors are retriable by default (network issues, etc.)
+	return true
 }
 
 // NewProvider creates a Provider based on the configured provider name.

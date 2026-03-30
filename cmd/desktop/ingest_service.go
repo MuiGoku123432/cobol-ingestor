@@ -52,7 +52,7 @@ func (s *IngestService) SelectDirectory(title string) (string, error) {
 
 // StartIngestion starts the pipeline in a background goroutine.
 // pass=0 runs all passes; pass=1-5 runs a specific pass.
-func (s *IngestService) StartIngestion(dir string, pass int) error {
+func (s *IngestService) StartIngestion(dir string, pass int, contentDetect bool) error {
 	s.mu.Lock()
 	if s.running {
 		s.mu.Unlock()
@@ -81,7 +81,7 @@ func (s *IngestService) StartIngestion(dir string, pass int) error {
 
 		s.emit("start", map[string]any{"dir": dir, "pass": pass})
 
-		if err := s.runPipeline(ctx, dir, pass); err != nil {
+		if err := s.runPipeline(ctx, dir, pass, contentDetect); err != nil {
 			if ctx.Err() != nil {
 				s.emit("cancelled", nil)
 			} else {
@@ -120,14 +120,17 @@ func (s *IngestService) emit(event string, data any) {
 	runtime.EventsEmit(s.app.ctx, "ingest:"+event, data)
 }
 
-func (s *IngestService) runPipeline(ctx context.Context, dir string, passFlag int) error {
+func (s *IngestService) runPipeline(ctx context.Context, dir string, passFlag int, contentDetect bool) error {
 	cfg := s.app.cfg
 	cfg.Ingest.RootDir = dir
 	logger := s.newEventLogger()
 
 	// Scan filesystem
 	s.emit("progress", map[string]any{"phase": "scanning", "message": "Scanning files..."})
-	scanResult, err := scanner.Scan(ctx, dir, logger)
+	detect := contentDetect || cfg.Ingest.ContentDetect
+	scanResult, err := scanner.Scan(ctx, dir, logger, scanner.ScanOptions{
+		ContentDetect: detect,
+	})
 	if err != nil {
 		return fmt.Errorf("scanning: %w", err)
 	}
@@ -185,12 +188,20 @@ func (s *IngestService) runPipeline(ctx context.Context, dir string, passFlag in
 		}
 	}
 
+	// Classify .txt files if content detection is enabled
+	if detect && len(scanResult.Snippets) > 0 {
+		s.emit("progress", map[string]any{"phase": "classifying", "message": "Classifying .txt files..."})
+		if err := scanner.ClassifyPendingFiles(ctx, scanResult, provider, cfg.Claude.SonnetModel, logger, fileCache); err != nil {
+			logger.Warn("content classification had errors", zap.Error(err))
+		}
+	}
+
 	claudeClient, err := claude.NewClient(provider, cfg.Claude, logger)
 	if err != nil {
 		return fmt.Errorf("creating claude client: %w", err)
 	}
 
-	writer := n4j.NewBatchWriter(neo4jClient, cfg.Ingest.BatchSize, logger)
+	writer := n4j.NewBatchWriter(neo4jClient, cfg.Ingest.BatchSize, "default", logger)
 
 	pipe := &pipeline.Pipeline{
 		Config:      cfg,
@@ -345,10 +356,11 @@ func (s *IngestService) runBWPipeline(ctx context.Context, dir, extensionsStr st
 
 	// Scan BW files
 	s.emit("progress", map[string]any{"phase": "scanning", "message": "Scanning BusinessWare files..."})
-	scanResult, err := scanner.ScanBW(ctx, cfg.BW.Dir, extensions, logger)
+	bwScanResult, err := scanner.ScanBW(ctx, cfg.BW.Dir, extensions, logger)
 	if err != nil {
 		return fmt.Errorf("scanning BW files: %w", err)
 	}
+	scanResult := bwScanResult.ScanResult
 	if len(scanResult.Files) == 0 {
 		return fmt.Errorf("no BusinessWare files found in %s", cfg.BW.Dir)
 	}
@@ -399,7 +411,7 @@ func (s *IngestService) runBWPipeline(ctx context.Context, dir, extensionsStr st
 		return fmt.Errorf("creating claude client: %w", err)
 	}
 
-	writer := n4j.NewBatchWriter(neo4jClient, cfg.Ingest.BatchSize, logger)
+	writer := n4j.NewBatchWriter(neo4jClient, cfg.Ingest.BatchSize, "default", logger)
 
 	// Query existing COBOL program IDs for prompt context
 	existingPrograms := queryProgramIDs(ctx, neo4jClient, logger)
@@ -424,7 +436,13 @@ func (s *IngestService) runBWPipeline(ctx context.Context, dir, extensionsStr st
 			continue
 		}
 
-		content, readErr := os.ReadFile(f.Path)
+		var content []byte
+		var readErr error
+		if jarContent, ok := bwScanResult.JARContents[f.Path]; ok {
+			content = jarContent
+		} else {
+			content, readErr = os.ReadFile(f.Path)
+		}
 		if readErr != nil {
 			logger.Error("failed to read file", zap.String("file", f.Path), zap.Error(readErr))
 			continue
@@ -555,10 +573,18 @@ func (s *IngestService) StartOracleAnalysis() error {
 	s.mu.Unlock()
 
 	if s.app.Neo4jService.client == nil {
-		s.mu.Lock()
-		s.running = false
-		s.mu.Unlock()
-		return fmt.Errorf("not connected to Neo4j")
+		if s.app.cfg.Neo4j.URI == "" {
+			s.mu.Lock()
+			s.running = false
+			s.mu.Unlock()
+			return fmt.Errorf("Neo4j not configured (set connection details in Settings)")
+		}
+		if err := s.app.Neo4jService.tryConnect(s.app.ctx); err != nil {
+			s.mu.Lock()
+			s.running = false
+			s.mu.Unlock()
+			return fmt.Errorf("Neo4j connection failed: %w", err)
+		}
 	}
 
 	ctx, cancel := context.WithCancel(s.app.ctx)
@@ -666,12 +692,11 @@ func (s *IngestService) runOracleAnalysis(ctx context.Context) error {
 
 	// Create in-process MCP client for COBOL graph
 	s.emit("progress", map[string]any{"phase": "init", "message": "Initializing COBOL graph MCP..."})
-	reader := s.app.Neo4jService.reader
 	var batchWriter *n4j.BatchWriter
 	if s.app.Neo4jService.client != nil {
-		batchWriter = n4j.NewBatchWriter(s.app.Neo4jService.client, 500, logger)
+		batchWriter = n4j.NewBatchWriter(s.app.Neo4jService.client, 500, "default", logger)
 	}
-	server := mcpkg.NewServer(reader, batchWriter)
+	server := mcpkg.NewServer(s.app.Neo4jService.client, batchWriter)
 	graphClient, err := modernize.NewMCPClientInProcess(ctx, server)
 	if err != nil {
 		return fmt.Errorf("creating in-process graph MCP: %w", err)
@@ -706,7 +731,7 @@ func (s *IngestService) runOracleAnalysis(ctx context.Context) error {
 		logger.Warn("migrations failed (may already be applied)", zap.Error(err))
 	}
 
-	writer := n4j.NewBatchWriter(neo4jClient, cfg.Ingest.BatchSize, logger)
+	writer := n4j.NewBatchWriter(neo4jClient, cfg.Ingest.BatchSize, "default", logger)
 	if err := writer.WriteExternalDBResult(ctx, result); err != nil {
 		return fmt.Errorf("writing results to neo4j: %w", err)
 	}
@@ -738,6 +763,8 @@ func classifyBWExtension(path string) string {
 	switch ext {
 	case ".java":
 		return "Java"
+	case ".class":
+		return "Java Bytecode"
 	case ".md":
 		return "Markdown"
 	case ".xml":
@@ -746,6 +773,22 @@ func classifyBWExtension(path string) string {
 		return "Businessware"
 	case ".txt":
 		return "Text"
+	case ".properties":
+		return "Properties"
+	case ".json":
+		return "JSON"
+	case ".yml", ".yaml":
+		return "YAML"
+	case ".mf":
+		return "Manifest"
+	case ".vsdx":
+		return "Visio Diagram"
+	case ".drawio":
+		return "DrawIO Diagram"
+	case ".svg":
+		return "SVG Diagram"
+	case ".puml", ".plantuml":
+		return "PlantUML Diagram"
 	default:
 		return "Unknown"
 	}

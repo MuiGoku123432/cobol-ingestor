@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"sync"
+	"sync/atomic"
 
 	"cobol-ingestor/internal/graph"
 
@@ -12,22 +13,95 @@ import (
 	"go.uber.org/zap"
 )
 
+// WriteStats tracks write operation metrics for pipeline reporting.
+type WriteStats struct {
+	NodesWritten        atomic.Int64
+	RelationshipsWritten atomic.Int64
+	WriteErrors         atomic.Int64
+	Pass2WriteErrors    atomic.Int64
+	Pass3WriteErrors    atomic.Int64
+}
+
 // BatchWriter writes graph data to Neo4j in batches.
 // All write methods are safe for concurrent use.
 type BatchWriter struct {
 	mu        sync.Mutex
 	client    *Client
 	batchSize int
+	codebase  string
 	logger    *zap.Logger
+	Stats     WriteStats
 }
 
 // NewBatchWriter creates a new batch writer.
-func NewBatchWriter(client *Client, batchSize int, logger *zap.Logger) *BatchWriter {
+// codebase scopes all merge keys for multi-codebase support ("default" = no prefix).
+func NewBatchWriter(client *Client, batchSize int, codebase string, logger *zap.Logger) *BatchWriter {
+	if codebase == "" {
+		codebase = "default"
+	}
 	return &BatchWriter{
 		client:    client,
 		batchSize: batchSize,
+		codebase:  codebase,
 		logger:    logger,
 	}
+}
+
+// ScopedKey prefixes a merge key value with codebase for uniqueness.
+// Returns the raw value unchanged when codebase is "default" (backward compat).
+func ScopedKey(codebase, value string) string {
+	if codebase == "" || codebase == "default" {
+		return value
+	}
+	return codebase + "::" + value
+}
+
+// isSharedLabel returns true for node types shared across codebases.
+func isSharedLabel(label string) bool {
+	switch label {
+	case "Copybook", "File", "BusinessDomain", "DBTable",
+		"ExternalDatabase", "ExternalDBTable":
+		return true
+	}
+	return false
+}
+
+// WriteSharedNodes merges shared nodes and appends the codebase to the codebases list.
+func (w *BatchWriter) WriteSharedNodes(ctx context.Context, label, mergeKey string, nodes []map[string]any) error {
+	if len(nodes) == 0 {
+		return nil
+	}
+
+	w.mu.Lock()
+	defer w.mu.Unlock()
+
+	cypher := fmt.Sprintf(
+		"UNWIND $rows AS row MERGE (n:%s {%s: row.%s}) SET n += row, "+
+			"n.codebases = CASE WHEN $cb IN coalesce(n.codebases, []) "+
+			"THEN n.codebases ELSE coalesce(n.codebases, []) + [$cb] END",
+		label, mergeKey, mergeKey,
+	)
+
+	for i := 0; i < len(nodes); i += w.batchSize {
+		end := i + w.batchSize
+		if end > len(nodes) {
+			end = len(nodes)
+		}
+		batch := nodes[i:end]
+
+		session := w.client.NewSession(ctx)
+		_, err := session.ExecuteWrite(ctx, func(tx neo4j.ManagedTransaction) (any, error) {
+			_, err := tx.Run(ctx, cypher, map[string]any{"rows": batch, "cb": w.codebase})
+			return nil, err
+		})
+		session.Close(ctx)
+		if err != nil {
+			return fmt.Errorf("writing shared %s nodes: %w", label, err)
+		}
+	}
+
+	w.logger.Debug("wrote shared nodes", zap.String("label", label), zap.Int("count", len(nodes)))
+	return nil
 }
 
 // WriteNodes merges nodes of a given label using UNWIND.
@@ -194,6 +268,8 @@ func mergeKeyForLabel(label string) string {
 
 // WritePass1Result converts a Pass1Result to maps and writes nodes then relationships.
 func (w *BatchWriter) WritePass1Result(ctx context.Context, result *graph.Pass1Result) error {
+	cb := w.codebase
+
 	// Count CALLS targets per program for callTargetCount property
 	callTargetCounts := make(map[string]int)
 	for _, r := range result.Relationships {
@@ -202,18 +278,19 @@ func (w *BatchWriter) WritePass1Result(ctx context.Context, result *graph.Pass1R
 		}
 	}
 
-	// Write Programs
+	// Write Programs (scoped)
 	if len(result.Programs) > 0 {
 		nodes := make([]map[string]any, len(result.Programs))
 		for i, p := range result.Programs {
 			nodes[i] = map[string]any{
 				"id":               p.ID,
-				"programId":        p.ProgramID,
+				"programId":        ScopedKey(cb, p.ProgramID),
 				"filePath":         p.FilePath,
 				"language":         p.Language,
 				"lineCount":        p.LineCount,
 				"executionMode":    p.ExecutionMode,
 				"callTargetCount":  callTargetCounts[p.ProgramID],
+				"codebase":         cb,
 			}
 		}
 		if err := w.WriteNodes(ctx, "Program", "programId", nodes); err != nil {
@@ -221,15 +298,16 @@ func (w *BatchWriter) WritePass1Result(ctx context.Context, result *graph.Pass1R
 		}
 	}
 
-	// Write Paragraphs
+	// Write Paragraphs (scoped)
 	if len(result.Paragraphs) > 0 {
 		nodes := make([]map[string]any, len(result.Paragraphs))
 		for i, p := range result.Paragraphs {
 			nodes[i] = map[string]any{
 				"id":        p.ID,
 				"name":      p.Name,
-				"programId": p.ProgramID,
-				"mergeId":   p.ProgramID + "." + p.Name,
+				"programId": ScopedKey(cb, p.ProgramID),
+				"mergeId":   ScopedKey(cb, p.ProgramID+"."+p.Name),
+				"codebase":  cb,
 			}
 		}
 		if err := w.WriteNodes(ctx, "Paragraph", "mergeId", nodes); err != nil {
@@ -237,15 +315,16 @@ func (w *BatchWriter) WritePass1Result(ctx context.Context, result *graph.Pass1R
 		}
 	}
 
-	// Write Sections
+	// Write Sections (scoped)
 	if len(result.Sections) > 0 {
 		nodes := make([]map[string]any, len(result.Sections))
 		for i, s := range result.Sections {
 			nodes[i] = map[string]any{
 				"id":        s.ID,
 				"name":      s.Name,
-				"programId": s.ProgramID,
-				"mergeId":   s.ProgramID + "." + s.Name,
+				"programId": ScopedKey(cb, s.ProgramID),
+				"mergeId":   ScopedKey(cb, s.ProgramID+"."+s.Name),
+				"codebase":  cb,
 			}
 		}
 		if err := w.WriteNodes(ctx, "Section", "mergeId", nodes); err != nil {
@@ -253,7 +332,7 @@ func (w *BatchWriter) WritePass1Result(ctx context.Context, result *graph.Pass1R
 		}
 	}
 
-	// Write Copybooks
+	// Write Copybooks (shared)
 	if len(result.Copybooks) > 0 {
 		nodes := make([]map[string]any, len(result.Copybooks))
 		for i, c := range result.Copybooks {
@@ -262,12 +341,12 @@ func (w *BatchWriter) WritePass1Result(ctx context.Context, result *graph.Pass1R
 				"name": c.Name,
 			}
 		}
-		if err := w.WriteNodes(ctx, "Copybook", "name", nodes); err != nil {
+		if err := w.WriteSharedNodes(ctx, "Copybook", "name", nodes); err != nil {
 			return err
 		}
 	}
 
-	// Write DataItems
+	// Write DataItems (scoped)
 	if len(result.DataItems) > 0 {
 		nodes := make([]map[string]any, len(result.DataItems))
 		for i, d := range result.DataItems {
@@ -275,10 +354,11 @@ func (w *BatchWriter) WritePass1Result(ctx context.Context, result *graph.Pass1R
 				"id":        d.ID,
 				"name":      d.Name,
 				"level":     d.Level,
-				"programId": d.ProgramID,
-				"fqn":       d.FQN,
+				"programId": ScopedKey(cb, d.ProgramID),
+				"fqn":       ScopedKey(cb, d.FQN),
 				"picture":   d.Picture,
 				"usage":     d.Usage,
+				"codebase":  cb,
 			}
 		}
 		if err := w.WriteNodes(ctx, "DataItem", "fqn", nodes); err != nil {
@@ -286,7 +366,7 @@ func (w *BatchWriter) WritePass1Result(ctx context.Context, result *graph.Pass1R
 		}
 	}
 
-	// Write Conditions (88-level)
+	// Write Conditions (88-level, scoped)
 	if len(result.Conditions) > 0 {
 		nodes := make([]map[string]any, len(result.Conditions))
 		for i, c := range result.Conditions {
@@ -295,8 +375,9 @@ func (w *BatchWriter) WritePass1Result(ctx context.Context, result *graph.Pass1R
 				"name":      c.Name,
 				"parent":    c.Parent,
 				"value":     c.Value,
-				"programId": c.ProgramID,
-				"fqn":       c.FQN,
+				"programId": ScopedKey(cb, c.ProgramID),
+				"fqn":       ScopedKey(cb, c.FQN),
+				"codebase":  cb,
 			}
 		}
 		if err := w.WriteNodes(ctx, "Condition", "fqn", nodes); err != nil {
@@ -304,7 +385,7 @@ func (w *BatchWriter) WritePass1Result(ctx context.Context, result *graph.Pass1R
 		}
 	}
 
-	// Write Parameters (LINKAGE SECTION)
+	// Write Parameters (LINKAGE SECTION, scoped)
 	if len(result.Parameters) > 0 {
 		nodes := make([]map[string]any, len(result.Parameters))
 		for i, p := range result.Parameters {
@@ -313,8 +394,9 @@ func (w *BatchWriter) WritePass1Result(ctx context.Context, result *graph.Pass1R
 				"name":      p.Name,
 				"level":     p.Level,
 				"direction": p.Direction,
-				"programId": p.ProgramID,
-				"fqn":       p.FQN,
+				"programId": ScopedKey(cb, p.ProgramID),
+				"fqn":       ScopedKey(cb, p.FQN),
+				"codebase":  cb,
 			}
 		}
 		if err := w.WriteNodes(ctx, "Parameter", "fqn", nodes); err != nil {
@@ -322,34 +404,35 @@ func (w *BatchWriter) WritePass1Result(ctx context.Context, result *graph.Pass1R
 		}
 	}
 
-	// Write FileDefinitions
+	// Write FileDefinitions (shared)
 	if len(result.FileDefs) > 0 {
 		nodes := make([]map[string]any, len(result.FileDefs))
 		for i, f := range result.FileDefs {
 			nodes[i] = map[string]any{
 				"id":            f.ID,
 				"name":          f.Name,
-				"programId":     f.ProgramID,
+				"programId":     ScopedKey(cb, f.ProgramID),
 				"organization":  f.Organization,
 				"vsamType":      f.VSAMType,
 				"dataStoreType": f.DataStoreType,
 			}
 		}
-		if err := w.WriteNodes(ctx, "File", "name", nodes); err != nil {
+		if err := w.WriteSharedNodes(ctx, "File", "name", nodes); err != nil {
 			return err
 		}
 	}
 
-	// Write SQLStatements
+	// Write SQLStatements (scoped)
 	if len(result.SQLStatements) > 0 {
 		nodes := make([]map[string]any, len(result.SQLStatements))
 		for i, s := range result.SQLStatements {
 			nodes[i] = map[string]any{
-				"id":          s.ID,
+				"id":          ScopedKey(cb, s.ID),
 				"text":        s.Text,
-				"programId":   s.ProgramID,
+				"programId":   ScopedKey(cb, s.ProgramID),
 				"type":        s.Type,
 				"targetTable": s.TargetTable,
+				"codebase":    cb,
 			}
 		}
 		if err := w.WriteNodes(ctx, "SQLStatement", "id", nodes); err != nil {
@@ -357,14 +440,15 @@ func (w *BatchWriter) WritePass1Result(ctx context.Context, result *graph.Pass1R
 		}
 	}
 
-	// Write CICSTransactions
+	// Write CICSTransactions (scoped)
 	if len(result.CICSTxns) > 0 {
 		nodes := make([]map[string]any, len(result.CICSTxns))
 		for i, c := range result.CICSTxns {
 			nodes[i] = map[string]any{
-				"id":        c.ID,
+				"id":        ScopedKey(cb, c.ID),
 				"command":   c.Command,
-				"programId": c.ProgramID,
+				"programId": ScopedKey(cb, c.ProgramID),
+				"codebase":  cb,
 			}
 		}
 		if err := w.WriteNodes(ctx, "CICSTransaction", "id", nodes); err != nil {
@@ -372,16 +456,17 @@ func (w *BatchWriter) WritePass1Result(ctx context.Context, result *graph.Pass1R
 		}
 	}
 
-	// Write ExternalInterfaces
+	// Write ExternalInterfaces (scoped)
 	if len(result.ExternalInterfaces) > 0 {
 		nodes := make([]map[string]any, len(result.ExternalInterfaces))
 		for i, e := range result.ExternalInterfaces {
 			nodes[i] = map[string]any{
-				"id":        e.ID,
+				"id":        ScopedKey(cb, e.ID),
 				"type":      e.Type,
 				"details":   e.Details,
 				"paragraph": e.Paragraph,
-				"programId": e.ProgramID,
+				"programId": ScopedKey(cb, e.ProgramID),
+				"codebase":  cb,
 			}
 		}
 		if err := w.WriteNodes(ctx, "ExternalInterface", "id", nodes); err != nil {
@@ -389,7 +474,7 @@ func (w *BatchWriter) WritePass1Result(ctx context.Context, result *graph.Pass1R
 		}
 	}
 
-	// Write DBTables + ACCESSES relationships
+	// Write DBTables + ACCESSES relationships (shared)
 	if len(result.DBTables) > 0 {
 		nodes := make([]map[string]any, len(result.DBTables))
 		for i, t := range result.DBTables {
@@ -399,7 +484,7 @@ func (w *BatchWriter) WritePass1Result(ctx context.Context, result *graph.Pass1R
 				"schema": t.Schema,
 			}
 		}
-		if err := w.WriteNodes(ctx, "DBTable", "name", nodes); err != nil {
+		if err := w.WriteSharedNodes(ctx, "DBTable", "name", nodes); err != nil {
 			return err
 		}
 
@@ -412,7 +497,7 @@ func (w *BatchWriter) WritePass1Result(ctx context.Context, result *graph.Pass1R
 			var accessRows []map[string]any
 			for _, t := range result.DBTables {
 				accessRows = append(accessRows, map[string]any{
-					"fromKey": programID,
+					"fromKey": ScopedKey(cb, programID),
 					"toKey":   t.Name,
 					"props": map[string]any{
 						"operations": t.Operations,
@@ -426,16 +511,17 @@ func (w *BatchWriter) WritePass1Result(ctx context.Context, result *graph.Pass1R
 		}
 	}
 
-	// Write IDMSSchema nodes
+	// Write IDMSSchema nodes (scoped)
 	if len(result.IDMSSchemas) > 0 {
 		nodes := make([]map[string]any, len(result.IDMSSchemas))
 		for i, s := range result.IDMSSchemas {
 			nodes[i] = map[string]any{
-				"id":            s.ID,
+				"id":            ScopedKey(cb, s.ID),
 				"schemaName":    s.SchemaName,
 				"subschemaName": s.SubschemaName,
-				"programId":     s.ProgramID,
+				"programId":     ScopedKey(cb, s.ProgramID),
 				"protocolMode":  s.ProtocolMode,
+				"codebase":      cb,
 			}
 		}
 		if err := w.WriteNodes(ctx, "IDMSSchema", "id", nodes); err != nil {
@@ -443,16 +529,17 @@ func (w *BatchWriter) WritePass1Result(ctx context.Context, result *graph.Pass1R
 		}
 	}
 
-	// Write IDMSRecord nodes
+	// Write IDMSRecord nodes (scoped)
 	if len(result.IDMSRecords) > 0 {
 		nodes := make([]map[string]any, len(result.IDMSRecords))
 		for i, r := range result.IDMSRecords {
 			nodes[i] = map[string]any{
 				"id":        r.ID,
-				"name":      r.Name,
+				"name":      ScopedKey(cb, r.Name),
 				"area":      r.Area,
 				"schema":    r.Schema,
-				"programId": r.ProgramID,
+				"programId": ScopedKey(cb, r.ProgramID),
+				"codebase":  cb,
 			}
 		}
 		if err := w.WriteNodes(ctx, "IDMSRecord", "name", nodes); err != nil {
@@ -460,15 +547,16 @@ func (w *BatchWriter) WritePass1Result(ctx context.Context, result *graph.Pass1R
 		}
 	}
 
-	// Write IDMSArea nodes
+	// Write IDMSArea nodes (scoped)
 	if len(result.IDMSAreas) > 0 {
 		nodes := make([]map[string]any, len(result.IDMSAreas))
 		for i, a := range result.IDMSAreas {
 			nodes[i] = map[string]any{
 				"id":        a.ID,
-				"name":      a.Name,
+				"name":      ScopedKey(cb, a.Name),
 				"usageMode": a.UsageMode,
 				"schema":    a.Schema,
+				"codebase":  cb,
 			}
 		}
 		if err := w.WriteNodes(ctx, "IDMSArea", "name", nodes); err != nil {
@@ -476,16 +564,17 @@ func (w *BatchWriter) WritePass1Result(ctx context.Context, result *graph.Pass1R
 		}
 	}
 
-	// Write IDMSSet nodes
+	// Write IDMSSet nodes (scoped)
 	if len(result.IDMSSets) > 0 {
 		nodes := make([]map[string]any, len(result.IDMSSets))
 		for i, s := range result.IDMSSets {
 			nodes[i] = map[string]any{
 				"id":           s.ID,
-				"name":         s.Name,
+				"name":         ScopedKey(cb, s.Name),
 				"ownerRecord":  s.OwnerRecord,
 				"memberRecord": s.MemberRecord,
 				"schema":       s.Schema,
+				"codebase":     cb,
 			}
 		}
 		if err := w.WriteNodes(ctx, "IDMSSet", "name", nodes); err != nil {
@@ -505,9 +594,10 @@ func (w *BatchWriter) WritePass1Result(ctx context.Context, result *graph.Pass1R
 			if !knownPrograms[r.ToKey] && !seen[r.ToKey] {
 				seen[r.ToKey] = true
 				stubNodes = append(stubNodes, map[string]any{
-					"programId": r.ToKey,
+					"programId": ScopedKey(cb, r.ToKey),
 					"id":        r.ToKey,
 					"language":  "UNKNOWN",
+					"codebase":  cb,
 				})
 			}
 		}
@@ -518,7 +608,7 @@ func (w *BatchWriter) WritePass1Result(ctx context.Context, result *graph.Pass1R
 		}
 	}
 
-	// Write Relationships
+	// Write Relationships — scope fromKey/toKey based on label
 	grouped := groupRelationships(result.Relationships)
 	for key, rels := range grouped {
 		rows := make([]map[string]any, len(rels))
@@ -527,9 +617,17 @@ func (w *BatchWriter) WritePass1Result(ctx context.Context, result *graph.Pass1R
 			if props == nil {
 				props = map[string]any{}
 			}
+			fromKey := r.FromKey
+			if !isSharedLabel(key.fromLabel) {
+				fromKey = ScopedKey(cb, fromKey)
+			}
+			toKey := r.ToKey
+			if !isSharedLabel(key.toLabel) {
+				toKey = ScopedKey(cb, toKey)
+			}
 			rows[i] = map[string]any{
-				"fromKey": r.FromKey,
-				"toKey":   r.ToKey,
+				"fromKey": fromKey,
+				"toKey":   toKey,
 				"props":   props,
 			}
 		}
@@ -558,7 +656,9 @@ func groupRelationships(rels []graph.Relationship) map[relGroupKey][]graph.Relat
 
 // WritePass2Result writes Pass 2 deep semantic analysis results to Neo4j.
 func (w *BatchWriter) WritePass2Result(ctx context.Context, result *graph.Pass2Result) error {
+	cb := w.codebase
 	programID := result.ProgramID
+	scopedPID := ScopedKey(cb, programID)
 	var rels []graph.Relationship
 
 	// PERFORMS relationships — use composite mergeId for Paragraph nodes
@@ -566,9 +666,9 @@ func (w *BatchWriter) WritePass2Result(ctx context.Context, result *graph.Pass2R
 		rel := graph.Relationship{
 			Type:      graph.RelPerforms,
 			FromLabel: "Paragraph",
-			FromKey:   programID + "." + p.FromParagraph,
+			FromKey:   ScopedKey(cb, programID+"."+p.FromParagraph),
 			ToLabel:   "Paragraph",
-			ToKey:     programID + "." + p.ToParagraph,
+			ToKey:     ScopedKey(cb, programID+"."+p.ToParagraph),
 			Properties: map[string]any{
 				"isLoop":    p.IsLoop,
 				"condition": p.Condition,
@@ -580,9 +680,9 @@ func (w *BatchWriter) WritePass2Result(ctx context.Context, result *graph.Pass2R
 			rels = append(rels, graph.Relationship{
 				Type:      graph.RelPerformsThru,
 				FromLabel: "Paragraph",
-				FromKey:   programID + "." + p.FromParagraph,
+				FromKey:   ScopedKey(cb, programID+"."+p.FromParagraph),
 				ToLabel:   "Paragraph",
-				ToKey:     programID + "." + p.ThruParagraph,
+				ToKey:     ScopedKey(cb, programID+"."+p.ThruParagraph),
 			})
 		}
 	}
@@ -599,7 +699,7 @@ func (w *BatchWriter) WritePass2Result(ctx context.Context, result *graph.Pass2R
 		rels = append(rels, graph.Relationship{
 			Type:      relType,
 			FromLabel: "Program",
-			FromKey:   programID,
+			FromKey:   scopedPID,
 			ToLabel:   "File",
 			ToKey:     f.FileName,
 			Properties: map[string]any{
@@ -636,7 +736,7 @@ func (w *BatchWriter) WritePass2Result(ctx context.Context, result *graph.Pass2R
 			flowRows = append(flowRows, map[string]any{
 				"fromName": d.FromItem,
 				"toName":   d.ToItem,
-				"pid":      programID,
+				"pid":      scopedPID,
 				"context":  d.Context,
 			})
 		}
@@ -646,7 +746,8 @@ func (w *BatchWriter) WritePass2Result(ctx context.Context, result *graph.Pass2R
 				"MATCH (dst:DataItem {name: row.toName, programId: row.pid}) "+
 				"MERGE (src)-[r:MOVES_TO]->(dst) SET r.context = row.context",
 			flowRows); err != nil {
-			w.logger.Warn("failed to write MOVES_TO relationships", zap.Error(err))
+			w.logger.Error("failed to write MOVES_TO relationships", zap.Error(err))
+			w.Stats.Pass2WriteErrors.Add(1)
 		}
 	}
 
@@ -654,18 +755,20 @@ func (w *BatchWriter) WritePass2Result(ctx context.Context, result *graph.Pass2R
 	if len(result.DataHierarchy) > 0 {
 		nodes := make([]map[string]any, len(result.DataHierarchy))
 		for i, d := range result.DataHierarchy {
-			fqn := fmt.Sprintf("%s.%02d.%s", programID, d.Level, d.Name)
+			fqn := ScopedKey(cb, fmt.Sprintf("%s.%02d.%s", programID, d.Level, d.Name))
 			nodes[i] = map[string]any{
 				"name":      d.Name,
 				"level":     d.Level,
-				"programId": programID,
+				"programId": scopedPID,
 				"fqn":       fqn,
 				"picture":   d.Picture,
 				"copybook":  d.Copybook,
+				"codebase":  cb,
 			}
 		}
 		if err := w.WriteNodes(ctx, "DataItem", "fqn", nodes); err != nil {
-			w.logger.Warn("failed to write DataItem nodes from hierarchy", zap.Error(err))
+			w.logger.Error("failed to write DataItem nodes from hierarchy", zap.Error(err))
+			w.Stats.Pass2WriteErrors.Add(1)
 		}
 	}
 
@@ -680,10 +783,10 @@ func (w *BatchWriter) WritePass2Result(ctx context.Context, result *graph.Pass2R
 		var childRows []map[string]any
 		for _, d := range result.DataHierarchy {
 			if d.Parent != "" {
-				childFQN := fmt.Sprintf("%s.%02d.%s", programID, d.Level, d.Name)
+				childFQN := ScopedKey(cb, fmt.Sprintf("%s.%02d.%s", programID, d.Level, d.Name))
 				parentLevel := findParentLevel(result.DataHierarchy, d.Parent, d.Name)
 				if parentLevel > 0 {
-					parentFQN := fmt.Sprintf("%s.%02d.%s", programID, parentLevel, d.Parent)
+					parentFQN := ScopedKey(cb, fmt.Sprintf("%s.%02d.%s", programID, parentLevel, d.Parent))
 					childRows = append(childRows, map[string]any{
 						"childFQN":  childFQN,
 						"parentFQN": parentFQN,
@@ -694,7 +797,7 @@ func (w *BatchWriter) WritePass2Result(ctx context.Context, result *graph.Pass2R
 						"childFQN":  childFQN,
 						"parentFQN": "",
 						"parentName": d.Parent,
-						"pid":        programID,
+						"pid":        scopedPID,
 					})
 				}
 			}
@@ -717,7 +820,8 @@ func (w *BatchWriter) WritePass2Result(ctx context.Context, result *graph.Pass2R
 					"MATCH (parent:DataItem {fqn: row.parentFQN}) "+
 					"MERGE (child)-[:CHILD_OF]->(parent)",
 				fqnRows); err != nil {
-				w.logger.Warn("failed to write CHILD_OF relationships (FQN)", zap.Error(err))
+				w.logger.Error("failed to write CHILD_OF relationships (FQN)", zap.Error(err))
+			w.Stats.Pass2WriteErrors.Add(1)
 			}
 		}
 		if len(fallbackRows) > 0 {
@@ -727,7 +831,8 @@ func (w *BatchWriter) WritePass2Result(ctx context.Context, result *graph.Pass2R
 					"MATCH (parent:DataItem {name: row.parentName, programId: row.pid}) "+
 					"MERGE (child)-[:CHILD_OF]->(parent)",
 				fallbackRows); err != nil {
-				w.logger.Warn("failed to write CHILD_OF relationships (fallback)", zap.Error(err))
+				w.logger.Error("failed to write CHILD_OF relationships (fallback)", zap.Error(err))
+			w.Stats.Pass2WriteErrors.Add(1)
 			}
 		}
 	}
@@ -746,14 +851,14 @@ func (w *BatchWriter) WritePass2Result(ctx context.Context, result *graph.Pass2R
 			targetLevel, targetOk := levelByName[r.Redefines]
 			if itemOk && targetOk {
 				fqnRows = append(fqnRows, map[string]any{
-					"itemFQN":   fmt.Sprintf("%s.%02d.%s", programID, itemLevel, r.Item),
-					"targetFQN": fmt.Sprintf("%s.%02d.%s", programID, targetLevel, r.Redefines),
+					"itemFQN":   ScopedKey(cb, fmt.Sprintf("%s.%02d.%s", programID, itemLevel, r.Item)),
+					"targetFQN": ScopedKey(cb, fmt.Sprintf("%s.%02d.%s", programID, targetLevel, r.Redefines)),
 				})
 			} else {
 				fallbackRows = append(fallbackRows, map[string]any{
 					"itemName":   r.Item,
 					"targetName": r.Redefines,
-					"pid":        programID,
+					"pid":        scopedPID,
 				})
 			}
 		}
@@ -765,7 +870,8 @@ func (w *BatchWriter) WritePass2Result(ctx context.Context, result *graph.Pass2R
 					"MATCH (target:DataItem {fqn: row.targetFQN}) "+
 					"MERGE (item)-[:REDEFINES]->(target)",
 				fqnRows); err != nil {
-				w.logger.Warn("failed to write REDEFINES relationships (FQN)", zap.Error(err))
+				w.logger.Error("failed to write REDEFINES relationships (FQN)", zap.Error(err))
+			w.Stats.Pass2WriteErrors.Add(1)
 			}
 		}
 		if len(fallbackRows) > 0 {
@@ -775,7 +881,8 @@ func (w *BatchWriter) WritePass2Result(ctx context.Context, result *graph.Pass2R
 					"MATCH (target:DataItem {name: row.targetName, programId: row.pid}) "+
 					"MERGE (item)-[:REDEFINES]->(target)",
 				fallbackRows); err != nil {
-				w.logger.Warn("failed to write REDEFINES relationships (fallback)", zap.Error(err))
+				w.logger.Error("failed to write REDEFINES relationships (fallback)", zap.Error(err))
+			w.Stats.Pass2WriteErrors.Add(1)
 			}
 		}
 	}
@@ -787,7 +894,7 @@ func (w *BatchWriter) WritePass2Result(ctx context.Context, result *graph.Pass2R
 			defRows = append(defRows, map[string]any{
 				"itemName": c.DataItem,
 				"cbName":   c.Copybook,
-				"pid":      programID,
+				"pid":      scopedPID,
 			})
 		}
 		if err := w.batchUpdate(ctx,
@@ -796,7 +903,8 @@ func (w *BatchWriter) WritePass2Result(ctx context.Context, result *graph.Pass2R
 				"MATCH (cb:Copybook {name: row.cbName}) "+
 				"MERGE (item)-[:DEFINED_IN]->(cb)",
 			defRows); err != nil {
-			w.logger.Warn("failed to write DEFINED_IN relationships", zap.Error(err))
+			w.logger.Error("failed to write DEFINED_IN relationships", zap.Error(err))
+			w.Stats.Pass2WriteErrors.Add(1)
 		}
 	}
 
@@ -809,7 +917,7 @@ func (w *BatchWriter) WritePass2Result(ctx context.Context, result *graph.Pass2R
 			}
 			clRows = append(clRows, map[string]any{
 				"name":  cl.Paragraph,
-				"pid":   programID,
+				"pid":   scopedPID,
 				"entry": fmt.Sprintf("[%s] %s", cl.Type, cl.Condition),
 			})
 		}
@@ -817,7 +925,8 @@ func (w *BatchWriter) WritePass2Result(ctx context.Context, result *graph.Pass2R
 			"UNWIND $rows AS row MATCH (p:Paragraph {name: row.name, programId: row.pid}) "+
 				"SET p.conditionalLogic = coalesce(p.conditionalLogic, []) + [row.entry]",
 			clRows); err != nil {
-			w.logger.Warn("failed to update conditional logic", zap.Error(err))
+			w.logger.Error("failed to update conditional logic", zap.Error(err))
+			w.Stats.Pass2WriteErrors.Add(1)
 		}
 	}
 
@@ -827,9 +936,9 @@ func (w *BatchWriter) WritePass2Result(ctx context.Context, result *graph.Pass2R
 			rels = append(rels, graph.Relationship{
 				Type:      graph.RelCalls,
 				FromLabel: "Program",
-				FromKey:   programID,
+				FromKey:   scopedPID,
 				ToLabel:   "Program",
-				ToKey:     target,
+				ToKey:     ScopedKey(cb, target),
 				Properties: map[string]any{
 					"isDynamic":     true,
 					"resolvedFrom":  dc.Variable,
@@ -848,7 +957,7 @@ func (w *BatchWriter) WritePass2Result(ctx context.Context, result *graph.Pass2R
 			}
 			ehRows = append(ehRows, map[string]any{
 				"name":    eh.Paragraph,
-				"pid":     programID,
+				"pid":     scopedPID,
 				"pattern": eh.Pattern,
 				"details": eh.Details,
 			})
@@ -857,7 +966,8 @@ func (w *BatchWriter) WritePass2Result(ctx context.Context, result *graph.Pass2R
 			"UNWIND $rows AS row MATCH (p:Paragraph {name: row.name, programId: row.pid}) "+
 				"SET p.errorPattern = row.pattern, p.errorDetails = row.details",
 			ehRows); err != nil {
-			w.logger.Warn("failed to update error handling", zap.Error(err))
+			w.logger.Error("failed to update error handling", zap.Error(err))
+			w.Stats.Pass2WriteErrors.Add(1)
 		}
 	}
 
@@ -879,9 +989,9 @@ func (w *BatchWriter) WritePass2Result(ctx context.Context, result *graph.Pass2R
 					idmsRels = append(idmsRels, graph.Relationship{
 						Type:       graph.RelNavigates,
 						FromLabel:  "Program",
-						FromKey:    programID,
+						FromKey:    scopedPID,
 						ToLabel:    "IDMSRecord",
-						ToKey:      op.Record,
+						ToKey:      ScopedKey(cb, op.Record),
 						Properties: props,
 					})
 				}
@@ -890,9 +1000,9 @@ func (w *BatchWriter) WritePass2Result(ctx context.Context, result *graph.Pass2R
 					idmsRels = append(idmsRels, graph.Relationship{
 						Type:       graph.RelStoresIn,
 						FromLabel:  "Program",
-						FromKey:    programID,
+						FromKey:    scopedPID,
 						ToLabel:    "IDMSRecord",
-						ToKey:      op.Record,
+						ToKey:      ScopedKey(cb, op.Record),
 						Properties: props,
 					})
 				}
@@ -901,9 +1011,9 @@ func (w *BatchWriter) WritePass2Result(ctx context.Context, result *graph.Pass2R
 					idmsRels = append(idmsRels, graph.Relationship{
 						Type:       graph.RelModifiesRec,
 						FromLabel:  "Program",
-						FromKey:    programID,
+						FromKey:    scopedPID,
 						ToLabel:    "IDMSRecord",
-						ToKey:      op.Record,
+						ToKey:      ScopedKey(cb, op.Record),
 						Properties: props,
 					})
 				}
@@ -912,9 +1022,9 @@ func (w *BatchWriter) WritePass2Result(ctx context.Context, result *graph.Pass2R
 					idmsRels = append(idmsRels, graph.Relationship{
 						Type:       graph.RelErasesRec,
 						FromLabel:  "Program",
-						FromKey:    programID,
+						FromKey:    scopedPID,
 						ToLabel:    "IDMSRecord",
-						ToKey:      op.Record,
+						ToKey:      ScopedKey(cb, op.Record),
 						Properties: props,
 					})
 				}
@@ -923,9 +1033,9 @@ func (w *BatchWriter) WritePass2Result(ctx context.Context, result *graph.Pass2R
 					idmsRels = append(idmsRels, graph.Relationship{
 						Type:       graph.RelConnectsSet,
 						FromLabel:  "Program",
-						FromKey:    programID,
+						FromKey:    scopedPID,
 						ToLabel:    "IDMSSet",
-						ToKey:      op.Set,
+						ToKey:      ScopedKey(cb, op.Set),
 						Properties: props,
 					})
 				}
@@ -934,9 +1044,9 @@ func (w *BatchWriter) WritePass2Result(ctx context.Context, result *graph.Pass2R
 					idmsRels = append(idmsRels, graph.Relationship{
 						Type:       graph.RelDisconnectsSet,
 						FromLabel:  "Program",
-						FromKey:    programID,
+						FromKey:    scopedPID,
 						ToLabel:    "IDMSSet",
-						ToKey:      op.Set,
+						ToKey:      ScopedKey(cb, op.Set),
 						Properties: props,
 					})
 				}
@@ -945,9 +1055,9 @@ func (w *BatchWriter) WritePass2Result(ctx context.Context, result *graph.Pass2R
 					idmsRels = append(idmsRels, graph.Relationship{
 						Type:       graph.RelReadyArea,
 						FromLabel:  "Program",
-						FromKey:    programID,
+						FromKey:    scopedPID,
 						ToLabel:    "IDMSArea",
-						ToKey:      op.Area,
+						ToKey:      ScopedKey(cb, op.Area),
 						Properties: props,
 					})
 				}
@@ -970,7 +1080,8 @@ func (w *BatchWriter) WritePass2Result(ctx context.Context, result *graph.Pass2R
 					}
 				}
 				if err := w.WriteRelationships(ctx, string(key.relType), key.fromLabel, mergeKeyForLabel(key.fromLabel), key.toLabel, mergeKeyForLabel(key.toLabel), rows); err != nil {
-					w.logger.Warn("failed to write IDMS relationships", zap.String("type", string(key.relType)), zap.Error(err))
+					w.logger.Error("failed to write IDMS relationships", zap.String("type", string(key.relType)), zap.Error(err))
+				w.Stats.Pass2WriteErrors.Add(1)
 				}
 			}
 		}
@@ -985,7 +1096,7 @@ func (w *BatchWriter) WritePass2Result(ctx context.Context, result *graph.Pass2R
 			}
 			annRows = append(annRows, map[string]any{
 				"name": a.Paragraph,
-				"pid":  programID,
+				"pid":  scopedPID,
 				"desc": a.Description,
 				"cat":  a.Category,
 			})
@@ -994,7 +1105,8 @@ func (w *BatchWriter) WritePass2Result(ctx context.Context, result *graph.Pass2R
 			"UNWIND $rows AS row MATCH (p:Paragraph {name: row.name, programId: row.pid}) "+
 				"SET p.description = row.desc, p.category = row.cat",
 			annRows); err != nil {
-			w.logger.Warn("failed to update paragraph annotations", zap.Error(err))
+			w.logger.Error("failed to update paragraph annotations", zap.Error(err))
+			w.Stats.Pass2WriteErrors.Add(1)
 		}
 	}
 
@@ -1003,7 +1115,9 @@ func (w *BatchWriter) WritePass2Result(ctx context.Context, result *graph.Pass2R
 
 // WritePass3Result writes Pass 3 cross-cutting analysis results to Neo4j.
 func (w *BatchWriter) WritePass3Result(ctx context.Context, result *graph.Pass3Result) error {
-	// MERGE BusinessDomain nodes
+	cb := w.codebase
+
+	// MERGE BusinessDomain nodes (shared)
 	if len(result.BusinessDomains) > 0 {
 		nodes := make([]map[string]any, len(result.BusinessDomains))
 		for i, d := range result.BusinessDomains {
@@ -1013,7 +1127,7 @@ func (w *BatchWriter) WritePass3Result(ctx context.Context, result *graph.Pass3R
 				"description": d.Description,
 			}
 		}
-		if err := w.WriteNodes(ctx, "BusinessDomain", "name", nodes); err != nil {
+		if err := w.WriteSharedNodes(ctx, "BusinessDomain", "name", nodes); err != nil {
 			return fmt.Errorf("writing BusinessDomain nodes: %w", err)
 		}
 	}
@@ -1023,7 +1137,7 @@ func (w *BatchWriter) WritePass3Result(ctx context.Context, result *graph.Pass3R
 		rows := make([]map[string]any, len(result.DomainMembers))
 		for i, m := range result.DomainMembers {
 			rows[i] = map[string]any{
-				"fromKey": m.ProgramID,
+				"fromKey": ScopedKey(cb, m.ProgramID),
 				"toKey":   m.DomainName,
 				"props":   map[string]any{"confidence": m.Confidence},
 			}
@@ -1037,13 +1151,14 @@ func (w *BatchWriter) WritePass3Result(ctx context.Context, result *graph.Pass3R
 	if len(result.DeadCodeFlags) > 0 {
 		rows := make([]map[string]any, len(result.DeadCodeFlags))
 		for i, dc := range result.DeadCodeFlags {
-			rows[i] = map[string]any{"pid": dc.ProgramID, "reason": dc.Reason}
+			rows[i] = map[string]any{"pid": ScopedKey(cb, dc.ProgramID), "reason": dc.Reason}
 		}
 		if err := w.batchUpdate(ctx,
 			"UNWIND $rows AS row MATCH (p:Program {programId: row.pid}) "+
 				"SET p.deadCode = true, p.deadCodeReason = row.reason",
 			rows); err != nil {
-			w.logger.Warn("failed to set dead code flags", zap.Error(err))
+			w.logger.Error("failed to set dead code flags", zap.Error(err))
+			w.Stats.Pass3WriteErrors.Add(1)
 		}
 	}
 
@@ -1052,7 +1167,7 @@ func (w *BatchWriter) WritePass3Result(ctx context.Context, result *graph.Pass3R
 		rows := make([]map[string]any, len(result.RiskFlags))
 		for i, rf := range result.RiskFlags {
 			rows[i] = map[string]any{
-				"pid":      rf.ProgramID,
+				"pid":      ScopedKey(cb, rf.ProgramID),
 				"score":    rf.Score,
 				"riskType": rf.RiskType,
 				"details":  rf.Details,
@@ -1062,7 +1177,8 @@ func (w *BatchWriter) WritePass3Result(ctx context.Context, result *graph.Pass3R
 			"UNWIND $rows AS row MATCH (p:Program {programId: row.pid}) "+
 				"SET p.riskScore = row.score, p.riskType = row.riskType, p.riskDetails = row.details",
 			rows); err != nil {
-			w.logger.Warn("failed to set risk flags", zap.Error(err))
+			w.logger.Error("failed to set risk flags", zap.Error(err))
+			w.Stats.Pass3WriteErrors.Add(1)
 		}
 	}
 
@@ -1071,7 +1187,7 @@ func (w *BatchWriter) WritePass3Result(ctx context.Context, result *graph.Pass3R
 		rows := make([]map[string]any, len(result.BridgePrograms))
 		for i, bp := range result.BridgePrograms {
 			rows[i] = map[string]any{
-				"pid":     bp.ProgramID,
+				"pid":     ScopedKey(cb, bp.ProgramID),
 				"domains": bp.Domains,
 				"reason":  bp.Reason,
 			}
@@ -1080,7 +1196,8 @@ func (w *BatchWriter) WritePass3Result(ctx context.Context, result *graph.Pass3R
 			"UNWIND $rows AS row MATCH (p:Program {programId: row.pid}) "+
 				"SET p.isBridge = true, p.bridgeDomains = row.domains, p.bridgeReason = row.reason",
 			rows); err != nil {
-			w.logger.Warn("failed to set bridge program flags", zap.Error(err))
+			w.logger.Error("failed to set bridge program flags", zap.Error(err))
+			w.Stats.Pass3WriteErrors.Add(1)
 		}
 	}
 
@@ -1099,7 +1216,8 @@ func (w *BatchWriter) WritePass3Result(ctx context.Context, result *graph.Pass3R
 			"UNWIND $rows AS row MATCH (c:Copybook {name: row.name}) "+
 				"SET c.riskLevel = row.risk, c.programCount = row.count, c.riskReason = row.reason",
 			rows); err != nil {
-			w.logger.Warn("failed to set copybook risks", zap.Error(err))
+			w.logger.Error("failed to set copybook risks", zap.Error(err))
+			w.Stats.Pass3WriteErrors.Add(1)
 		}
 	}
 
@@ -1108,7 +1226,7 @@ func (w *BatchWriter) WritePass3Result(ctx context.Context, result *graph.Pass3R
 		rows := make([]map[string]any, len(result.ModernizationCandidates))
 		for i, mc := range result.ModernizationCandidates {
 			rows[i] = map[string]any{
-				"pid":      mc.ProgramID,
+				"pid":      ScopedKey(cb, mc.ProgramID),
 				"score":    mc.Score,
 				"reason":   mc.Reason,
 				"approach": mc.Approach,
@@ -1118,7 +1236,8 @@ func (w *BatchWriter) WritePass3Result(ctx context.Context, result *graph.Pass3R
 			"UNWIND $rows AS row MATCH (p:Program {programId: row.pid}) "+
 				"SET p.modernizationScore = row.score, p.modernizationReason = row.reason, p.modernizationApproach = row.approach",
 			rows); err != nil {
-			w.logger.Warn("failed to set modernization candidates", zap.Error(err))
+			w.logger.Error("failed to set modernization candidates", zap.Error(err))
+			w.Stats.Pass3WriteErrors.Add(1)
 		}
 	}
 
@@ -1127,7 +1246,7 @@ func (w *BatchWriter) WritePass3Result(ctx context.Context, result *graph.Pass3R
 		rows := make([]map[string]any, len(result.VolumeEstimates))
 		for i, ve := range result.VolumeEstimates {
 			rows[i] = map[string]any{
-				"pid":      ve.ProgramID,
+				"pid":      ScopedKey(cb, ve.ProgramID),
 				"estimate": ve.Estimate,
 				"reason":   ve.Reason,
 			}
@@ -1136,10 +1255,12 @@ func (w *BatchWriter) WritePass3Result(ctx context.Context, result *graph.Pass3R
 			"UNWIND $rows AS row MATCH (p:Program {programId: row.pid}) "+
 				"SET p.volumeEstimate = row.estimate, p.volumeReason = row.reason",
 			rows); err != nil {
-			w.logger.Warn("failed to set volume estimates", zap.Error(err))
+			w.logger.Error("failed to set volume estimates", zap.Error(err))
+			w.Stats.Pass3WriteErrors.Add(1)
 		}
 	}
 
+	writeErrors := w.Stats.Pass3WriteErrors.Load()
 	w.logger.Info("wrote pass 3 results",
 		zap.Int("domains", len(result.BusinessDomains)),
 		zap.Int("members", len(result.DomainMembers)),
@@ -1149,24 +1270,32 @@ func (w *BatchWriter) WritePass3Result(ctx context.Context, result *graph.Pass3R
 		zap.Int("copybookRisks", len(result.CopybookRisks)),
 		zap.Int("modernizationCandidates", len(result.ModernizationCandidates)),
 		zap.Int("volumeEstimates", len(result.VolumeEstimates)),
+		zap.Int64("write_errors", writeErrors),
 	)
+
+	if writeErrors > 0 {
+		return fmt.Errorf("pass 3 completed with %d write errors (see logs for details)", writeErrors)
+	}
 
 	return nil
 }
 
 // WriteJCLResult writes JCL analysis results to Neo4j.
 func (w *BatchWriter) WriteJCLResult(ctx context.Context, result *graph.JCLAnalysisResult) error {
-	// Write JCLJob nodes
+	cb := w.codebase
+
+	// Write JCLJob nodes (scoped)
 	if len(result.Jobs) > 0 {
 		nodes := make([]map[string]any, len(result.Jobs))
 		for i, j := range result.Jobs {
 			nodes[i] = map[string]any{
 				"id":       j.ID,
-				"jobName":  j.JobName,
+				"jobName":  ScopedKey(cb, j.JobName),
 				"class":    j.Class,
 				"msgclass": j.MsgClass,
 				"region":   j.Region,
 				"cond":     j.Cond,
+				"codebase": cb,
 			}
 		}
 		if err := w.WriteNodes(ctx, "JCLJob", "jobName", nodes); err != nil {
@@ -1174,18 +1303,19 @@ func (w *BatchWriter) WriteJCLResult(ctx context.Context, result *graph.JCLAnaly
 		}
 	}
 
-	// Write JCLStep nodes
+	// Write JCLStep nodes (scoped)
 	if len(result.Steps) > 0 {
 		nodes := make([]map[string]any, len(result.Steps))
 		for i, s := range result.Steps {
 			nodes[i] = map[string]any{
-				"id":       s.ID,
+				"id":       ScopedKey(cb, s.ID),
 				"stepName": s.StepName,
 				"program":  s.Program,
 				"proc":     s.Proc,
 				"cond":     s.Cond,
-				"jobName":  s.JobName,
+				"jobName":  ScopedKey(cb, s.JobName),
 				"order":    s.Order,
+				"codebase": cb,
 			}
 		}
 		if err := w.WriteNodes(ctx, "JCLStep", "id", nodes); err != nil {
@@ -1193,19 +1323,20 @@ func (w *BatchWriter) WriteJCLResult(ctx context.Context, result *graph.JCLAnaly
 		}
 	}
 
-	// Write DDCard nodes
+	// Write DDCard nodes (scoped)
 	if len(result.DDCards) > 0 {
 		nodes := make([]map[string]any, len(result.DDCards))
 		for i, dd := range result.DDCards {
 			nodes[i] = map[string]any{
-				"id":       dd.ID,
+				"id":       ScopedKey(cb, dd.ID),
 				"ddName":   dd.DDName,
 				"dsname":   dd.DSName,
 				"disp":     dd.Disp,
 				"isInput":  dd.IsInput,
 				"isOutput": dd.IsOutput,
-				"jobName":  dd.JobName,
+				"jobName":  ScopedKey(cb, dd.JobName),
 				"stepName": dd.StepName,
+				"codebase": cb,
 			}
 		}
 		if err := w.WriteNodes(ctx, "DDCard", "id", nodes); err != nil {
@@ -1213,7 +1344,7 @@ func (w *BatchWriter) WriteJCLResult(ctx context.Context, result *graph.JCLAnaly
 		}
 	}
 
-	// Write relationships
+	// Write relationships — scope keys based on label
 	grouped := groupRelationships(result.Relationships)
 	for key, rels := range grouped {
 		rows := make([]map[string]any, len(rels))
@@ -1222,9 +1353,17 @@ func (w *BatchWriter) WriteJCLResult(ctx context.Context, result *graph.JCLAnaly
 			if props == nil {
 				props = map[string]any{}
 			}
+			fromKey := r.FromKey
+			if !isSharedLabel(key.fromLabel) {
+				fromKey = ScopedKey(cb, fromKey)
+			}
+			toKey := r.ToKey
+			if !isSharedLabel(key.toLabel) {
+				toKey = ScopedKey(cb, toKey)
+			}
 			rows[i] = map[string]any{
-				"fromKey": r.FromKey,
-				"toKey":   r.ToKey,
+				"fromKey": fromKey,
+				"toKey":   toKey,
 				"props":   props,
 			}
 		}

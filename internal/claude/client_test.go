@@ -210,3 +210,44 @@ func (m *truncateMock) Complete(_ context.Context, req llm.CompletionRequest) (*
 func (m *truncateMock) Name() string                        { return "truncate-mock" }
 func (m *truncateMock) HealthCheck(_ context.Context) error { return nil }
 func (m *truncateMock) Close() error                        { return nil }
+
+func TestCopilotProvider_NoPrefillMessage(t *testing.T) {
+	mock := &llm.MockProvider{
+		ProviderName: "copilot",
+		Responses:    []string{`{"programId": "COPILOT-TEST"}`},
+	}
+	client := newTestClient(t, mock)
+
+	resp, err := client.AnalyzeStructural(context.Background(), "TEST.CBL", "IDENTIFICATION DIVISION.")
+	require.NoError(t, err)
+
+	// Response should NOT be prepended with "{" for copilot provider.
+	assert.Equal(t, `{"programId": "COPILOT-TEST"}`, resp)
+
+	// No assistant prefill message should be in the request.
+	require.Len(t, mock.Calls, 1)
+	msgs := mock.Calls[0].Messages
+	lastMsg := msgs[len(msgs)-1]
+	assert.Equal(t, llm.RoleUser, lastMsg.Role, "last message should be user, not assistant prefill")
+}
+
+func TestAnthropicProvider_HasPrefillMessage(t *testing.T) {
+	mock := &llm.MockProvider{
+		ProviderName: "anthropic",
+		Responses:    []string{`"programId": "ANTHROPIC-TEST"}`},
+	}
+	client := newTestClient(t, mock)
+
+	resp, err := client.AnalyzeStructural(context.Background(), "TEST.CBL", "IDENTIFICATION DIVISION.")
+	require.NoError(t, err)
+
+	// Response should be prepended with "{" for anthropic provider.
+	assert.Equal(t, `{"programId": "ANTHROPIC-TEST"}`, resp)
+
+	// Last message should be assistant prefill.
+	require.Len(t, mock.Calls, 1)
+	msgs := mock.Calls[0].Messages
+	lastMsg := msgs[len(msgs)-1]
+	assert.Equal(t, llm.RoleAssistant, lastMsg.Role, "last message should be assistant prefill")
+	assert.Equal(t, "{", lastMsg.Content)
+}

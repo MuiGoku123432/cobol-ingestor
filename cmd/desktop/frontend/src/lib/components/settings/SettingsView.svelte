@@ -7,6 +7,10 @@
   let message = $state('');
   let testingNeo4j = $state(false);
   let dockerStatus = $state<any>(null);
+  let modelOptions = $state<{id: string, name: string}[]>([]);
+  let modelsLoading = $state(false);
+  let modelsError = $state('');
+  let customModel = $state(false);
 
   async function loadConfig() {
     loading = true;
@@ -86,9 +90,28 @@
     }
   }
 
+  async function loadModels() {
+    modelsLoading = true;
+    modelsError = '';
+    try {
+      // @ts-ignore
+      modelOptions = await window.go.main.ChatService.ListModels();
+      // Check if current chatModel is in the fetched list
+      customModel = config.chatModel !== ''
+        && modelOptions.length > 0
+        && !modelOptions.some((m: any) => m.id === config.chatModel);
+    } catch (e: any) {
+      modelsError = 'Authenticate your LLM provider to load models';
+      modelOptions = [];
+    } finally {
+      modelsLoading = false;
+    }
+  }
+
   $effect(() => {
     loadConfig();
     checkDocker();
+    loadModels();
   });
 
   const providers = [
@@ -237,13 +260,41 @@
       <div class="field-row">
         <div class="field">
           <label>Chat Model</label>
-          <input type="text" bind:value={config.chatModel} placeholder="claude-opus-4-6" />
+          {#if modelsError}
+            <div class="hint">{modelsError}</div>
+            <input type="text" bind:value={config.chatModel} placeholder="claude-opus-4-6" />
+          {:else if modelsLoading}
+            <select disabled><option>Loading models...</option></select>
+          {:else}
+            <select value={customModel ? '__custom' : config.chatModel}
+                    onchange={(e) => {
+                      const v = e.currentTarget.value;
+                      if (v === '__custom') {
+                        customModel = true;
+                        config.chatModel = '';
+                      } else {
+                        customModel = false;
+                        config.chatModel = v;
+                      }
+                    }}>
+              {#each modelOptions as m}
+                <option value={m.id}>{m.name}</option>
+              {/each}
+              <option value="__custom">Custom...</option>
+            </select>
+          {/if}
         </div>
         <div class="field">
           <label>Max Tokens</label>
           <input type="number" bind:value={config.chatMaxTokens} min="1000" />
         </div>
       </div>
+      {#if customModel && !modelsError}
+        <div class="field">
+          <label>Custom Model ID</label>
+          <input type="text" bind:value={config.chatModel} placeholder="Enter model ID" />
+        </div>
+      {/if}
     </section>
 
     <!-- BusinessWare -->
@@ -265,6 +316,10 @@
         <div class="field">
           <label>Token Limit</label>
           <input type="number" bind:value={config.bwTokenLimit} min="1000" />
+        </div>
+        <div class="field">
+          <label>Max Output Tokens</label>
+          <input type="number" bind:value={config.bwMaxTokens} min="1000" />
         </div>
       </div>
     </section>
@@ -301,6 +356,10 @@
         <input type="text" bind:value={config.oracleWalletPath} placeholder="/path/to/wallet" />
       </div>
       <div class="field">
+        <label>TNS Admin Path</label>
+        <input type="text" bind:value={config.oracleTnsAdmin} placeholder="/path/to/tns_admin" />
+      </div>
+      <div class="field">
         <label>SQLcl Path</label>
         <input type="text" bind:value={config.oracleSqlclPath} placeholder="sql (auto-detected if empty)" />
       </div>
@@ -318,6 +377,24 @@
             <option value="mysql">MySQL</option>
             <option value="sqlserver">SQL Server</option>
           </select>
+        </div>
+      </div>
+      <div class="field">
+        <label>MCP Command</label>
+        <input type="text" bind:value={config.extDbMcpCmd} placeholder="npx @some/db-mcp-server --db postgres" />
+      </div>
+      <div class="field">
+        <label>MCP URL</label>
+        <input type="text" bind:value={config.extDbMcpUrl} placeholder="http://localhost:3100/sse" />
+      </div>
+      <div class="field-row">
+        <div class="field">
+          <label>Max Iterations</label>
+          <input type="number" bind:value={config.extDbMaxIterations} min="1" max="100" />
+        </div>
+        <div class="field">
+          <label>Max Tokens</label>
+          <input type="number" bind:value={config.extDbMaxTokens} min="1000" />
         </div>
       </div>
     </section>
@@ -453,6 +530,12 @@
   .docker-ok {
     font-size: 12px;
     color: #3fb950;
+  }
+
+  .hint {
+    font-size: 11px;
+    color: #8b949e;
+    margin-bottom: 4px;
   }
 
   .muted {

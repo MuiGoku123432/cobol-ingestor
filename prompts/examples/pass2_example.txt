@@ -1,0 +1,30 @@
+EXAMPLE INPUT:
+       PROCEDURE DIVISION.
+       0000-MAIN.
+           PERFORM 1000-INIT.
+           PERFORM 2000-PROCESS UNTIL WS-EOF = 'Y'.
+           PERFORM 3000-CLEANUP.
+           STOP RUN.
+       1000-INIT.
+           OPEN INPUT CUSTOMER-FILE.
+           MOVE SPACES TO WS-ERROR-MSG.
+           IF WS-FILE-STATUS NOT = '00'
+               MOVE 'FILE OPEN FAILED' TO WS-ERROR-MSG
+               PERFORM 9000-ERROR
+           END-IF.
+       2000-PROCESS.
+           READ CUSTOMER-FILE
+               AT END MOVE 'Y' TO WS-EOF.
+           EVALUATE TRUE
+               WHEN CUST-TYPE = 'A'
+                   PERFORM 2100-PROCESS-TYPE-A
+               WHEN CUST-TYPE = 'B'
+                   PERFORM 2100-PROCESS-TYPE-A
+               WHEN OTHER
+                   CONTINUE
+           END-EVALUATE.
+       9000-ERROR.
+           DISPLAY WS-ERROR-MSG.
+
+EXPECTED OUTPUT:
+{"performs":[{"fromParagraph":"0000-MAIN","toParagraph":"1000-INIT","thruParagraph":"","isLoop":false,"condition":""},{"fromParagraph":"0000-MAIN","toParagraph":"2000-PROCESS","thruParagraph":"","isLoop":true,"condition":"UNTIL WS-EOF = 'Y'"},{"fromParagraph":"0000-MAIN","toParagraph":"3000-CLEANUP","thruParagraph":"","isLoop":false,"condition":""},{"fromParagraph":"1000-INIT","toParagraph":"9000-ERROR","thruParagraph":"","isLoop":false,"condition":""},{"fromParagraph":"2000-PROCESS","toParagraph":"2100-PROCESS-TYPE-A","thruParagraph":"","isLoop":false,"condition":""}],"dataFlows":[{"fromItem":"SPACES","toItem":"WS-ERROR-MSG","context":"1000-INIT"},{"fromItem":"'FILE OPEN FAILED'","toItem":"WS-ERROR-MSG","context":"1000-INIT"},{"fromItem":"'Y'","toItem":"WS-EOF","context":"2000-PROCESS"}],"fileOperations":[{"operation":"OPEN","fileName":"CUSTOMER-FILE","paragraph":"1000-INIT"},{"operation":"READ","fileName":"CUSTOMER-FILE","paragraph":"2000-PROCESS"}],"sqlStatements":[],"cicsCommands":[],"dataHierarchy":[],"redefines":[],"copybookDefinitions":[],"annotations":[{"paragraph":"0000-MAIN","description":"Orchestrates file processing: initializes, loops through customer records, and cleans up","category":"PROCESSING"},{"paragraph":"1000-INIT","description":"Opens customer file and validates file status, routing to error handler on failure","category":"INIT"},{"paragraph":"2000-PROCESS","description":"Reads next customer record and routes to type-specific processing based on CUST-TYPE","category":"PROCESSING"},{"paragraph":"9000-ERROR","description":"Displays error message to operator","category":"ERROR-HANDLING"}],"conditionalLogic":[{"paragraph":"1000-INIT","condition":"IF WS-FILE-STATUS NOT = '00'","variables":["WS-FILE-STATUS"],"type":"IF"},{"paragraph":"2000-PROCESS","condition":"EVALUATE TRUE WHEN CUST-TYPE = 'A' / 'B' / OTHER","variables":["CUST-TYPE"],"type":"EVALUATE"}],"dynamicCallResolution":[],"errorHandling":[{"paragraph":"1000-INIT","pattern":"FILE-STATUS","details":"Checks WS-FILE-STATUS after OPEN and routes to 9000-ERROR on failure"}],"idmsOperations":[]}

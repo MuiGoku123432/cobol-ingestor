@@ -1,6 +1,8 @@
 <script lang="ts">
   // @ts-ignore - Wails runtime
   import { EventsOn } from 'wailsjs/runtime/runtime';
+  import { usePersistedState } from '../../stores/persisted.svelte';
+  import MarkdownContent from './MarkdownContent.svelte';
 
   interface Message {
     role: string;
@@ -15,15 +17,18 @@
     toolCalls: number;
   }
 
+  let saved = usePersistedState('swarm', {
+    discoveryMode: true,
+    multiRound: false,
+    targetLang: 'Java',
+    framework: 'Spring Boot',
+    integrations: '',
+  });
+
   let messages = $state<Message[]>([]);
   let input = $state('');
   let streaming = $state(false);
   let streamedContent = $state('');
-  let discoveryMode = $state(true);
-  let multiRound = $state(false);
-  let targetLang = $state('Java');
-  let framework = $state('Spring Boot');
-  let integrations = $state('');
   let sessionId = $state('');
   let agents = $state<AgentState[]>([]);
 
@@ -41,7 +46,7 @@
       const allMsgs = messages.map((m) => ({ role: m.role, content: m.content }));
       // @ts-ignore
       await window.go.main.ChatService.SendSwarm(
-        sessionId, allMsgs, discoveryMode, multiRound, targetLang, framework, integrations
+        sessionId, allMsgs, saved.discoveryMode, saved.multiRound, saved.targetLang, saved.framework, saved.integrations
       );
     } catch (e: any) {
       messages = [...messages, { role: 'assistant', content: `Error: ${e.message || e}` }];
@@ -103,15 +108,15 @@
   <div class="swarm-main">
     <div class="mode-bar">
       <label class="toggle">
-        <input type="checkbox" bind:checked={discoveryMode} />
-        <span>{discoveryMode ? 'Discovery' : 'Migration'}</span>
+        <input type="checkbox" bind:checked={saved.discoveryMode} />
+        <span>{saved.discoveryMode ? 'Discovery' : 'Migration'}</span>
       </label>
       <label class="toggle">
-        <input type="checkbox" bind:checked={multiRound} />
+        <input type="checkbox" bind:checked={saved.multiRound} />
         <span>Multi-Round</span>
       </label>
-      {#if !discoveryMode}
-        <select bind:value={targetLang}>
+      {#if !saved.discoveryMode}
+        <select bind:value={saved.targetLang}>
           {#each languages as lang}
             <option>{lang}</option>
           {/each}
@@ -142,13 +147,17 @@
       {#each messages as msg}
         <div class="message" class:user={msg.role === 'user'} class:assistant={msg.role === 'assistant'}>
           <div class="role">{msg.role}</div>
-          <div class="content">{msg.content}</div>
+          {#if msg.role === 'assistant'}
+            <MarkdownContent content={msg.content} />
+          {:else}
+            <div class="content">{msg.content}</div>
+          {/if}
         </div>
       {/each}
       {#if streaming && streamedContent}
         <div class="message assistant streaming">
           <div class="role">coordinator</div>
-          <div class="content">{streamedContent}</div>
+          <MarkdownContent content={streamedContent} />
         </div>
       {/if}
     </div>
@@ -280,10 +289,10 @@
     border-radius: 8px;
     font-size: 13px;
     line-height: 1.5;
-    white-space: pre-wrap;
   }
 
   .message.user {
+    white-space: pre-wrap;
     align-self: flex-end;
     background: #1f3a5f;
   }

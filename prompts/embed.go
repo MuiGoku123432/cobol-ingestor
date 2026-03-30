@@ -25,3 +25,9 @@ var ExtDBAnalysis string
 
 //go:embed bw_ingest.tmpl
 var BWIngest string
+
+//go:embed examples/pass1_example.txt
+var Pass1Example string
+
+//go:embed examples/pass2_example.txt
+var Pass2Example string

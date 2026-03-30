@@ -34,6 +34,9 @@ func main() {
 			app.ChatService,
 			app.ConfigService,
 			app.QueryStore,
+			app.StrategyService,
+			app.BrowserService,
+			app.ExportService,
 		},
 	})
 	if err != nil {
