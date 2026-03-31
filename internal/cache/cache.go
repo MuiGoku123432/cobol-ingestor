@@ -10,6 +10,26 @@ import (
 	_ "modernc.org/sqlite"
 )
 
+// sqlBatchSize limits the number of SQL placeholders per query to stay well
+// under SQLite's 32,766 variable cap.
+const sqlBatchSize = 500
+
+// chunkPaths splits paths into sub-slices of at most size elements.
+func chunkPaths(paths []string, size int) [][]string {
+	if size <= 0 {
+		size = sqlBatchSize
+	}
+	var chunks [][]string
+	for i := 0; i < len(paths); i += size {
+		end := i + size
+		if end > len(paths) {
+			end = len(paths)
+		}
+		chunks = append(chunks, paths[i:end])
+	}
+	return chunks
+}
+
 // Cache tracks file hashes in SQLite for incremental processing.
 type Cache struct {
 	db *sql.DB
@@ -177,34 +197,36 @@ func (c *Cache) BatchIsChanged(pathHashes map[string]string) ([]string, error) {
 		return nil, nil
 	}
 
-	// Build query with placeholders
 	paths := make([]string, 0, len(pathHashes))
 	for p := range pathHashes {
 		paths = append(paths, p)
 	}
 
-	placeholders := make([]string, len(paths))
-	args := make([]any, len(paths))
-	for i, p := range paths {
-		placeholders[i] = "?"
-		args[i] = p
-	}
-
-	query := "SELECT file_path, content_hash FROM file_cache WHERE file_path IN (" +
-		strings.Join(placeholders, ",") + ")"
-	rows, err := c.db.Query(query, args...)
-	if err != nil {
-		return nil, fmt.Errorf("batch cache query: %w", err)
-	}
-	defer rows.Close()
-
-	cached := make(map[string]string)
-	for rows.Next() {
-		var path, hash string
-		if err := rows.Scan(&path, &hash); err != nil {
-			return nil, fmt.Errorf("scanning cache row: %w", err)
+	cached := make(map[string]string, len(paths))
+	for _, chunk := range chunkPaths(paths, sqlBatchSize) {
+		placeholders := make([]string, len(chunk))
+		args := make([]any, len(chunk))
+		for i, p := range chunk {
+			placeholders[i] = "?"
+			args[i] = p
 		}
-		cached[path] = hash
+
+		query := "SELECT file_path, content_hash FROM file_cache WHERE file_path IN (" +
+			strings.Join(placeholders, ",") + ")"
+		rows, err := c.db.Query(query, args...)
+		if err != nil {
+			return nil, fmt.Errorf("batch cache query: %w", err)
+		}
+
+		for rows.Next() {
+			var path, hash string
+			if err := rows.Scan(&path, &hash); err != nil {
+				rows.Close()
+				return nil, fmt.Errorf("scanning cache row: %w", err)
+			}
+			cached[path] = hash
+		}
+		rows.Close()
 	}
 
 	var changed []string
@@ -232,29 +254,32 @@ func (c *Cache) BatchIsChangedForPass(pathHashes map[string]string, pass int) ([
 		paths = append(paths, p)
 	}
 
-	placeholders := make([]string, len(paths))
-	args := make([]any, len(paths))
-	for i, p := range paths {
-		placeholders[i] = "?"
-		args[i] = p
-	}
-	args = append(args, pass)
-
-	query := "SELECT file_path, content_hash FROM pass_cache WHERE file_path IN (" +
-		strings.Join(placeholders, ",") + ") AND pass = ?"
-	rows, err := c.db.Query(query, args...)
-	if err != nil {
-		return nil, fmt.Errorf("batch pass cache query: %w", err)
-	}
-	defer rows.Close()
-
-	cached := make(map[string]string)
-	for rows.Next() {
-		var path, hash string
-		if err := rows.Scan(&path, &hash); err != nil {
-			return nil, fmt.Errorf("scanning pass cache row: %w", err)
+	cached := make(map[string]string, len(paths))
+	for _, chunk := range chunkPaths(paths, sqlBatchSize) {
+		placeholders := make([]string, len(chunk))
+		args := make([]any, len(chunk)+1)
+		for i, p := range chunk {
+			placeholders[i] = "?"
+			args[i] = p
 		}
-		cached[path] = hash
+		args[len(chunk)] = pass
+
+		query := "SELECT file_path, content_hash FROM pass_cache WHERE file_path IN (" +
+			strings.Join(placeholders, ",") + ") AND pass = ?"
+		rows, err := c.db.Query(query, args...)
+		if err != nil {
+			return nil, fmt.Errorf("batch pass cache query: %w", err)
+		}
+
+		for rows.Next() {
+			var path, hash string
+			if err := rows.Scan(&path, &hash); err != nil {
+				rows.Close()
+				return nil, fmt.Errorf("scanning pass cache row: %w", err)
+			}
+			cached[path] = hash
+		}
+		rows.Close()
 	}
 
 	var changed []string
@@ -297,35 +322,37 @@ func (c *Cache) BatchLookupClassification(pathHashes map[string]string) (hits ma
 		paths = append(paths, p)
 	}
 
-	placeholders := make([]string, len(paths))
-	args := make([]any, len(paths))
-	for i, p := range paths {
-		placeholders[i] = "?"
-		args[i] = p
-	}
-
-	query := "SELECT file_path, content_hash, file_type, classifier, COALESCE(confidence, 0.0) FROM classify_cache WHERE file_path IN (" +
-		strings.Join(placeholders, ",") + ")"
-	rows, err := c.db.Query(query, args...)
-	if err != nil {
-		return nil, nil, fmt.Errorf("batch classify lookup: %w", err)
-	}
-	defer rows.Close()
-
-	cached := make(map[string]struct {
+	type classifyRow struct {
 		hash, fileType, classifier string
 		confidence                 float64
-	})
-	for rows.Next() {
-		var path, hash, ft, cls string
-		var conf float64
-		if err := rows.Scan(&path, &hash, &ft, &cls, &conf); err != nil {
-			return nil, nil, fmt.Errorf("scanning classify row: %w", err)
+	}
+	cached := make(map[string]classifyRow, len(paths))
+
+	for _, chunk := range chunkPaths(paths, sqlBatchSize) {
+		placeholders := make([]string, len(chunk))
+		args := make([]any, len(chunk))
+		for i, p := range chunk {
+			placeholders[i] = "?"
+			args[i] = p
 		}
-		cached[path] = struct {
-			hash, fileType, classifier string
-			confidence                 float64
-		}{hash, ft, cls, conf}
+
+		query := "SELECT file_path, content_hash, file_type, classifier, COALESCE(confidence, 0.0) FROM classify_cache WHERE file_path IN (" +
+			strings.Join(placeholders, ",") + ")"
+		rows, err := c.db.Query(query, args...)
+		if err != nil {
+			return nil, nil, fmt.Errorf("batch classify lookup: %w", err)
+		}
+
+		for rows.Next() {
+			var path, hash, ft, cls string
+			var conf float64
+			if err := rows.Scan(&path, &hash, &ft, &cls, &conf); err != nil {
+				rows.Close()
+				return nil, nil, fmt.Errorf("scanning classify row: %w", err)
+			}
+			cached[path] = classifyRow{hash, ft, cls, conf}
+		}
+		rows.Close()
 	}
 
 	for _, p := range paths {
