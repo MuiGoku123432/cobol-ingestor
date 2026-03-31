@@ -21,11 +21,11 @@ type ScanBWResult struct {
 }
 
 // DefaultBWExtensions lists the default file extensions for Businessware scanning.
-var DefaultBWExtensions = []string{".java", ".md", ".bw", ".txt", ".xml", ".vsdx", ".drawio", ".svg", ".puml", ".plantuml", ".jar"}
+var DefaultBWExtensions = []string{".java", ".md", ".bw", ".txt", ".xml", ".vsdx", ".drawio", ".svg", ".puml", ".plantuml", ".jar", ".war", ".ear"}
 
 // ScanBW walks rootDir and discovers Businessware files matching the given extensions.
 // JAR files are extracted in-memory and their entries are added as virtual files.
-func ScanBW(ctx context.Context, rootDir string, extensions []string, logger *zap.Logger) (*ScanBWResult, error) {
+func ScanBW(ctx context.Context, rootDir string, extensions []string, logger *zap.Logger, maxDepth int) (*ScanBWResult, error) {
 	start := time.Now()
 	result := &ScanBWResult{
 		ScanResult:  &ScanResult{},
@@ -73,9 +73,9 @@ func ScanBW(ctx context.Context, rootDir string, extensions []string, logger *za
 			return nil
 		}
 
-		// Handle JAR files: extract entries as virtual files
-		if ext == ".jar" {
-			entries, extractErr := ExtractJAR(ctx, path, javapPath, logger)
+		// Handle JAR/WAR/EAR files: extract entries as virtual files
+		if ext == ".jar" || ext == ".war" || ext == ".ear" {
+			entries, extractErr := ExtractJAR(ctx, path, javapPath, logger, maxDepth)
 			if extractErr != nil {
 				logger.Error("failed to extract JAR (skipping)",
 					zap.String("jar", path),
