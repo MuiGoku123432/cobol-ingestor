@@ -7,6 +7,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"sync"
 	"time"
 
 	"cobol-ingestor/internal/graph"
@@ -25,7 +26,11 @@ var DefaultBWExtensions = []string{".java", ".md", ".bw", ".txt", ".xml", ".vsdx
 
 // ScanBW walks rootDir and discovers Businessware files matching the given extensions.
 // JAR files are extracted in-memory and their entries are added as virtual files.
-func ScanBW(ctx context.Context, rootDir string, extensions []string, logger *zap.Logger, maxDepth int) (*ScanBWResult, error) {
+func ScanBW(ctx context.Context, rootDir string, extensions []string, logger *zap.Logger, maxDepth int, maxWorkers int) (*ScanBWResult, error) {
+	if maxWorkers < 1 {
+		maxWorkers = 1
+	}
+
 	start := time.Now()
 	result := &ScanBWResult{
 		ScanResult:  &ScanResult{},
@@ -50,6 +55,8 @@ func ScanBW(ctx context.Context, rootDir string, extensions []string, logger *za
 		logger.Info("javap not found on PATH, will use Go-native .class parser for JAR entries")
 	}
 
+	// Phase 1: Walk and collect regular files + JAR paths
+	var jarPaths []string
 	err := filepath.WalkDir(rootDir, func(path string, d fs.DirEntry, err error) error {
 		if err != nil {
 			result.Errors = append(result.Errors, fmt.Errorf("walk %s: %w", path, err))
@@ -60,7 +67,6 @@ func ScanBW(ctx context.Context, rootDir string, extensions []string, logger *za
 			return ctx.Err()
 		}
 
-		// Skip hidden directories
 		if d.IsDir() && strings.HasPrefix(d.Name(), ".") {
 			return filepath.SkipDir
 		}
@@ -73,21 +79,9 @@ func ScanBW(ctx context.Context, rootDir string, extensions []string, logger *za
 			return nil
 		}
 
-		// Handle JAR/WAR/EAR files: extract entries as virtual files
+		// Collect JAR/WAR/EAR paths for concurrent extraction
 		if ext == ".jar" || ext == ".war" || ext == ".ear" {
-			entries, extractErr := ExtractJAR(ctx, path, javapPath, logger, maxDepth)
-			if extractErr != nil {
-				logger.Error("failed to extract JAR (skipping)",
-					zap.String("jar", path),
-					zap.Error(extractErr),
-				)
-				result.Errors = append(result.Errors, fmt.Errorf("extract JAR %s: %w", path, extractErr))
-				return nil
-			}
-			for _, entry := range entries {
-				result.Files = append(result.Files, entry.FileInfo)
-				result.JARContents[entry.FileInfo.Path] = entry.Content
-			}
+			jarPaths = append(jarPaths, path)
 			return nil
 		}
 
@@ -115,6 +109,53 @@ func ScanBW(ctx context.Context, rootDir string, extensions []string, logger *za
 	})
 	if err != nil {
 		return nil, fmt.Errorf("walking %s: %w", rootDir, err)
+	}
+
+	// Phase 2: Extract JARs concurrently
+	if len(jarPaths) > 0 {
+		type jarResult struct {
+			entries []JAREntry
+			err     error
+			path    string
+		}
+
+		var mu sync.Mutex
+		var wg sync.WaitGroup
+		sem := make(chan struct{}, maxWorkers)
+
+		var jarResults []jarResult
+
+		for _, jp := range jarPaths {
+			if ctx.Err() != nil {
+				break
+			}
+			wg.Add(1)
+			sem <- struct{}{}
+			go func(p string) {
+				defer wg.Done()
+				defer func() { <-sem }()
+				entries, err := ExtractJAR(ctx, p, javapPath, logger, maxDepth, maxWorkers)
+				mu.Lock()
+				jarResults = append(jarResults, jarResult{entries: entries, err: err, path: p})
+				mu.Unlock()
+			}(jp)
+		}
+		wg.Wait()
+
+		for _, jr := range jarResults {
+			if jr.err != nil {
+				logger.Error("failed to extract JAR (skipping)",
+					zap.String("jar", jr.path),
+					zap.Error(jr.err),
+				)
+				result.Errors = append(result.Errors, fmt.Errorf("extract JAR %s: %w", jr.path, jr.err))
+				continue
+			}
+			for _, entry := range jr.entries {
+				result.Files = append(result.Files, entry.FileInfo)
+				result.JARContents[entry.FileInfo.Path] = entry.Content
+			}
+		}
 	}
 
 	result.Duration = time.Since(start)

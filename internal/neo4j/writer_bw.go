@@ -80,35 +80,47 @@ func (w *BatchWriter) WriteBWResult(ctx context.Context, result *graph.BWResult)
 		}
 	}
 
-	// 5. MATCH+MERGE BW_REFERENCES (BWEntity → Program/Copybook)
+	// 5. MATCH+MERGE BW_REFERENCES (BWEntity → Program/Copybook) — batched by target type
 	if len(result.CobolReferences) > 0 {
+		var programRows, copybookRows []map[string]any
 		for _, ref := range result.CobolReferences {
 			entityMergeID := result.File.Path + "." + ref.EntityName
-			var cypher string
-			switch ref.TargetType {
-			case "Copybook":
-				cypher = "MATCH (e:BWEntity {mergeId: $mergeId}) " +
-					"MATCH (t:Copybook {name: $target}) " +
-					"MERGE (e)-[r:BW_REFERENCES]->(t) " +
-					"SET r.referenceType = $refType, r.description = $desc"
-			default: // "Program"
-				cypher = "MATCH (e:BWEntity {mergeId: $mergeId}) " +
-					"MATCH (t:Program {programId: $target}) " +
-					"MERGE (e)-[r:BW_REFERENCES]->(t) " +
-					"SET r.referenceType = $refType, r.description = $desc"
-			}
-
-			rows := []map[string]any{{
+			row := map[string]any{
 				"mergeId": entityMergeID,
 				"target":  ref.TargetName,
 				"refType": ref.ReferenceType,
 				"desc":    ref.Description,
-			}}
-			if err := w.batchUpdate(ctx, "UNWIND $rows AS row "+cypher, rows); err != nil {
-				// Silently skip missing COBOL targets
-				w.logger.Debug("BW_REFERENCES target not found (skipping)",
-					zap.String("entity", ref.EntityName),
-					zap.String("target", ref.TargetName),
+			}
+			if ref.TargetType == "Copybook" {
+				copybookRows = append(copybookRows, row)
+			} else {
+				programRows = append(programRows, row)
+			}
+		}
+
+		if len(programRows) > 0 {
+			cypher := "UNWIND $rows AS row " +
+				"MATCH (e:BWEntity {mergeId: row.mergeId}) " +
+				"MATCH (t:Program {programId: row.target}) " +
+				"MERGE (e)-[r:BW_REFERENCES]->(t) " +
+				"SET r.referenceType = row.refType, r.description = row.desc"
+			if err := w.batchUpdate(ctx, cypher, programRows); err != nil {
+				w.logger.Debug("BW_REFERENCES Program batch had missing targets",
+					zap.Int("count", len(programRows)),
+					zap.Error(err),
+				)
+			}
+		}
+
+		if len(copybookRows) > 0 {
+			cypher := "UNWIND $rows AS row " +
+				"MATCH (e:BWEntity {mergeId: row.mergeId}) " +
+				"MATCH (t:Copybook {name: row.target}) " +
+				"MERGE (e)-[r:BW_REFERENCES]->(t) " +
+				"SET r.referenceType = row.refType, r.description = row.desc"
+			if err := w.batchUpdate(ctx, cypher, copybookRows); err != nil {
+				w.logger.Debug("BW_REFERENCES Copybook batch had missing targets",
+					zap.Int("count", len(copybookRows)),
 					zap.Error(err),
 				)
 			}

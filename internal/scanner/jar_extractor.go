@@ -12,6 +12,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"sync"
 	"sync/atomic"
 
 	"cobol-ingestor/internal/graph"
@@ -45,7 +46,11 @@ func isNestedArchive(name string) bool {
 // entries, and extracts analyzable ones in-memory. .class files are disassembled
 // using javap (falling back to Go-native parsing if unavailable). Nested archives
 // are recursively extracted up to maxDepth levels.
-func ExtractJAR(ctx context.Context, jarPath string, javapPath string, logger *zap.Logger, maxDepth int) ([]JAREntry, error) {
+func ExtractJAR(ctx context.Context, jarPath string, javapPath string, logger *zap.Logger, maxDepth int, maxWorkers int) ([]JAREntry, error) {
+	if maxWorkers < 1 {
+		maxWorkers = 1
+	}
+
 	jarHash, err := hashFile(jarPath)
 	if err != nil {
 		return nil, fmt.Errorf("hashing JAR %s: %w", jarPath, err)
@@ -58,7 +63,7 @@ func ExtractJAR(ctx context.Context, jarPath string, javapPath string, logger *z
 	defer r.Close()
 
 	var totalExtracted int64
-	entries, err := extractArchiveFromReader(ctx, r.File, jarPath, jarHash, javapPath, logger, 0, maxDepth, &totalExtracted)
+	entries, err := extractArchiveFromReader(ctx, r.File, jarPath, jarHash, javapPath, logger, 0, maxDepth, &totalExtracted, maxWorkers)
 	if err != nil {
 		return nil, err
 	}
@@ -85,19 +90,27 @@ func extractArchiveFromReader(
 	depth int,
 	maxDepth int,
 	totalExtracted *int64,
+	maxWorkers int,
 ) ([]JAREntry, error) {
+	var mu sync.Mutex
 	var entries []JAREntry
+	var wg sync.WaitGroup
+	sem := make(chan struct{}, maxWorkers)
+	var firstErr atomic.Value
 
 	for _, f := range files {
 		if ctx.Err() != nil {
 			return nil, ctx.Err()
+		}
+		if errVal := firstErr.Load(); errVal != nil {
+			return nil, errVal.(error)
 		}
 
 		if f.FileInfo().IsDir() {
 			continue
 		}
 
-		// Check nested archive first
+		// Nested archives recurse inline (not parallelized) to avoid goroutine explosion
 		if isNestedArchive(f.Name) {
 			if depth >= maxDepth {
 				logger.Debug("skipping nested archive (depth limit reached)",
@@ -119,7 +132,6 @@ func extractArchiveFromReader(
 				continue
 			}
 
-			// Check total extraction limit
 			if atomic.AddInt64(totalExtracted, int64(len(data))) > maxTotalExtraction {
 				logger.Warn("total extraction size limit reached, skipping remaining nested archives",
 					zap.String("archive", basePath),
@@ -141,12 +153,14 @@ func extractArchiveFromReader(
 			nestedPath := basePath + "!/" + f.Name
 			nestedEntries, err := extractArchiveFromReader(
 				ctx, nestedReader.File, nestedPath, jarHash, javapPath, logger,
-				depth+1, maxDepth, totalExtracted,
+				depth+1, maxDepth, totalExtracted, maxWorkers,
 			)
 			if err != nil {
 				return nil, err
 			}
+			mu.Lock()
 			entries = append(entries, nestedEntries...)
+			mu.Unlock()
 			continue
 		}
 
@@ -154,64 +168,85 @@ func extractArchiveFromReader(
 			continue
 		}
 
-		data, err := readZipEntry(f)
-		if err != nil {
-			logger.Warn("failed to read JAR entry",
-				zap.String("archive", basePath),
-				zap.String("entry", f.Name),
-				zap.Error(err),
-			)
-			continue
-		}
+		// Parallelize leaf entry processing
+		wg.Add(1)
+		sem <- struct{}{}
+		go func(zf *zip.File) {
+			defer wg.Done()
+			defer func() { <-sem }()
 
-		// Check total extraction limit
-		if atomic.AddInt64(totalExtracted, int64(len(data))) > maxTotalExtraction {
-			logger.Warn("total extraction size limit reached, skipping remaining entries",
-				zap.String("archive", basePath),
-			)
-			break
-		}
-
-		var content []byte
-		ext := strings.ToLower(filepath.Ext(f.Name))
-
-		if ext == ".class" {
-			text, disErr := disassembleClass(data, f.Name, javapPath)
-			if disErr != nil {
-				// Fall back to Go-native parser
-				classInfo, parseErr := ParseClassFile(data)
-				if parseErr != nil {
-					logger.Warn("failed to parse .class entry (skipping)",
-						zap.String("archive", basePath),
-						zap.String("entry", f.Name),
-						zap.Error(parseErr),
-					)
-					continue
-				}
-				content = []byte(classInfo.FormatAsText())
-			} else {
-				content = []byte(text)
+			if ctx.Err() != nil {
+				return
 			}
-		} else {
-			content = data
-		}
 
-		virtualPath := basePath + "!/" + f.Name
-		lineCount := countLines(content)
+			data, err := readZipEntry(zf)
+			if err != nil {
+				logger.Warn("failed to read JAR entry",
+					zap.String("archive", basePath),
+					zap.String("entry", zf.Name),
+					zap.Error(err),
+				)
+				return
+			}
 
-		entries = append(entries, JAREntry{
-			FileInfo: graph.FileInfo{
-				Path:      virtualPath,
-				Type:      graph.FileTypeBW,
-				Hash:      jarHash,
-				Size:      int64(len(content)),
-				LineCount: lineCount,
-			},
-			Content:   content,
-			JARPath:   basePath,
-			JARHash:   jarHash,
-			EntryPath: f.Name,
-		})
+			if atomic.AddInt64(totalExtracted, int64(len(data))) > maxTotalExtraction {
+				logger.Warn("total extraction size limit reached, skipping entry",
+					zap.String("archive", basePath),
+					zap.String("entry", zf.Name),
+				)
+				return
+			}
+
+			var content []byte
+			ext := strings.ToLower(filepath.Ext(zf.Name))
+
+			if ext == ".class" {
+				text, disErr := disassembleClass(data, zf.Name, javapPath)
+				if disErr != nil {
+					classInfo, parseErr := ParseClassFile(data)
+					if parseErr != nil {
+						logger.Warn("failed to parse .class entry (skipping)",
+							zap.String("archive", basePath),
+							zap.String("entry", zf.Name),
+							zap.Error(parseErr),
+						)
+						return
+					}
+					content = []byte(classInfo.FormatAsText())
+				} else {
+					content = []byte(text)
+				}
+			} else {
+				content = data
+			}
+
+			virtualPath := basePath + "!/" + zf.Name
+			lineCount := countLines(content)
+
+			entry := JAREntry{
+				FileInfo: graph.FileInfo{
+					Path:      virtualPath,
+					Type:      graph.FileTypeBW,
+					Hash:      jarHash,
+					Size:      int64(len(content)),
+					LineCount: lineCount,
+				},
+				Content:   content,
+				JARPath:   basePath,
+				JARHash:   jarHash,
+				EntryPath: zf.Name,
+			}
+
+			mu.Lock()
+			entries = append(entries, entry)
+			mu.Unlock()
+		}(f)
+	}
+
+	wg.Wait()
+
+	if errVal := firstErr.Load(); errVal != nil {
+		return nil, errVal.(error)
 	}
 
 	return entries, nil
