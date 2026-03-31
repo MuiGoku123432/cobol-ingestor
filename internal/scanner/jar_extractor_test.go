@@ -4,6 +4,7 @@ import (
 	"archive/zip"
 	"bytes"
 	"context"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -59,7 +60,7 @@ func TestExtractJAR_TextEntries(t *testing.T) {
 	}
 	createTestJAR(t, jarPath, entries)
 
-	result, err := ExtractJAR(context.Background(), jarPath, "", logger, 3)
+	result, err := ExtractJAR(context.Background(), jarPath, "", logger, 3, 4)
 	require.NoError(t, err)
 	assert.Len(t, result, 3)
 
@@ -86,7 +87,7 @@ func TestExtractJAR_SkipsNonAnalyzable(t *testing.T) {
 	}
 	createTestJAR(t, jarPath, entries)
 
-	result, err := ExtractJAR(context.Background(), jarPath, "", logger, 3)
+	result, err := ExtractJAR(context.Background(), jarPath, "", logger, 3, 4)
 	require.NoError(t, err)
 	assert.Len(t, result, 1)
 	assert.Equal(t, "com/example/Main.java", result[0].EntryPath)
@@ -102,7 +103,7 @@ func TestExtractJAR_VirtualPaths(t *testing.T) {
 	}
 	createTestJAR(t, jarPath, entries)
 
-	result, err := ExtractJAR(context.Background(), jarPath, "", logger, 3)
+	result, err := ExtractJAR(context.Background(), jarPath, "", logger, 3, 4)
 	require.NoError(t, err)
 	require.Len(t, result, 1)
 
@@ -128,7 +129,7 @@ func TestExtractJAR_NestedJARExtracted(t *testing.T) {
 	}
 	createTestJAR(t, jarPath, entries)
 
-	result, err := ExtractJAR(context.Background(), jarPath, "", logger, 3)
+	result, err := ExtractJAR(context.Background(), jarPath, "", logger, 3, 4)
 	require.NoError(t, err)
 
 	// Should have: App.java + Helper.java + inner-config.xml = 3
@@ -173,7 +174,7 @@ func TestExtractJAR_NestedDepthLimit(t *testing.T) {
 	createTestJAR(t, jarPath, entries)
 
 	// maxDepth=2: depth 0 (top), depth 1 (level1), depth 2 (level2) — level3 should be skipped
-	result, err := ExtractJAR(context.Background(), jarPath, "", logger, 2)
+	result, err := ExtractJAR(context.Background(), jarPath, "", logger, 2, 4)
 	require.NoError(t, err)
 
 	pathSet := make(map[string]bool)
@@ -208,7 +209,7 @@ func TestExtractJAR_NestedWAR(t *testing.T) {
 	}
 	createTestJAR(t, jarPath, entries)
 
-	result, err := ExtractJAR(context.Background(), jarPath, "", logger, 3)
+	result, err := ExtractJAR(context.Background(), jarPath, "", logger, 3, 4)
 	require.NoError(t, err)
 
 	pathMap := make(map[string]bool)
@@ -231,7 +232,7 @@ func TestExtractJAR_ManifestIncluded(t *testing.T) {
 	}
 	createTestJAR(t, jarPath, entries)
 
-	result, err := ExtractJAR(context.Background(), jarPath, "", logger, 3)
+	result, err := ExtractJAR(context.Background(), jarPath, "", logger, 3, 4)
 	require.NoError(t, err)
 	assert.Len(t, result, 1)
 	assert.Contains(t, string(result[0].Content), "Main-Class")
@@ -248,7 +249,7 @@ func TestExtractJAR_HashConsistency(t *testing.T) {
 	}
 	createTestJAR(t, jarPath, entries)
 
-	result, err := ExtractJAR(context.Background(), jarPath, "", logger, 3)
+	result, err := ExtractJAR(context.Background(), jarPath, "", logger, 3, 4)
 	require.NoError(t, err)
 	require.Len(t, result, 2)
 
@@ -316,6 +317,35 @@ func TestIsNestedArchive(t *testing.T) {
 	}
 }
 
+func TestExtractJAR_ParallelEntries(t *testing.T) {
+	logger := zap.NewNop()
+	dir := t.TempDir()
+	jarPath := filepath.Join(dir, "big.jar")
+
+	// Create a JAR with many entries to exercise parallel processing
+	entries := make(map[string][]byte, 50)
+	for i := 0; i < 50; i++ {
+		name := fmt.Sprintf("com/example/Class%d.java", i)
+		entries[name] = []byte(fmt.Sprintf("public class Class%d { int x = %d; }", i, i))
+	}
+	createTestJAR(t, jarPath, entries)
+
+	result, err := ExtractJAR(context.Background(), jarPath, "", logger, 3, 8)
+	require.NoError(t, err)
+	assert.Len(t, result, 50)
+
+	// Verify all entries extracted with correct content
+	contentMap := make(map[string]string)
+	for _, e := range result {
+		contentMap[e.EntryPath] = string(e.Content)
+	}
+	for i := 0; i < 50; i++ {
+		name := fmt.Sprintf("com/example/Class%d.java", i)
+		expected := fmt.Sprintf("public class Class%d { int x = %d; }", i, i)
+		assert.Equal(t, expected, contentMap[name], "entry %s content mismatch", name)
+	}
+}
+
 func TestScanBW_WithJAR(t *testing.T) {
 	logger := zap.NewNop()
 	dir := t.TempDir()
@@ -331,7 +361,7 @@ func TestScanBW_WithJAR(t *testing.T) {
 	}
 	createTestJAR(t, jarPath, entries)
 
-	result, err := ScanBW(context.Background(), dir, nil, logger, 3)
+	result, err := ScanBW(context.Background(), dir, nil, logger, 3, 4)
 	require.NoError(t, err)
 
 	// Should have: Main.java + 2 JAR entries = 3 files

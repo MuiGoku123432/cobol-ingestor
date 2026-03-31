@@ -6,7 +6,10 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"sort"
 	"strings"
+	"sync"
+	"sync/atomic"
 
 	"cobol-ingestor/internal/auth"
 	"cobol-ingestor/internal/cache"
@@ -415,7 +418,7 @@ func runBW(cmd *cobra.Command, args []string) error {
 	)
 
 	// Scan BW files
-	bwScanResult, err := scanner.ScanBW(ctx, cfg.BW.Dir, extensions, logger, cfg.BW.MaxJARDepth)
+	bwScanResult, err := scanner.ScanBW(ctx, cfg.BW.Dir, extensions, logger, cfg.BW.MaxJARDepth, cfg.BW.MaxWorkers)
 	if err != nil {
 		return fmt.Errorf("scanning BW files: %w", err)
 	}
@@ -493,22 +496,40 @@ func runBW(cmd *cobra.Command, args []string) error {
 
 	// Process files with worker pool
 	const bwPassNumber = 99
-	type bwWorkItem struct {
-		file   graph.FileInfo
-		chunks []chunker.BWChunk
+
+	// Batch cache check (change 5: single SQLite query instead of N)
+	pathHashes := make(map[string]string, len(scanResult.Files))
+	fileByPath := make(map[string]graph.FileInfo, len(scanResult.Files))
+	for _, f := range scanResult.Files {
+		pathHashes[f.Path] = f.Hash
+		fileByPath[f.Path] = f
 	}
 
-	// Build work items, skipping cached files
-	var workItems []bwWorkItem
-	skipped := 0
-	for _, f := range scanResult.Files {
-		changed, cacheErr := fileCache.IsChangedForPass(f.Path, f.Hash, bwPassNumber)
-		if cacheErr != nil {
-			logger.Warn("cache check failed", zap.String("file", f.Path), zap.Error(cacheErr))
-			changed = true
+	changedPaths, batchCacheErr := fileCache.BatchIsChangedForPass(pathHashes, bwPassNumber)
+	if batchCacheErr != nil {
+		logger.Warn("batch cache check failed, processing all files", zap.Error(batchCacheErr))
+		changedPaths = make([]string, 0, len(scanResult.Files))
+		for _, f := range scanResult.Files {
+			changedPaths = append(changedPaths, f.Path)
 		}
-		if !changed {
-			skipped++
+	}
+	changedSet := make(map[string]bool, len(changedPaths))
+	for _, p := range changedPaths {
+		changedSet[p] = true
+	}
+	skipped := len(scanResult.Files) - len(changedPaths)
+
+	// Build chunk work items — each chunk is an independent work item (change 2)
+	type bwChunkItem struct {
+		file        graph.FileInfo
+		chunk       chunker.BWChunk
+		fileType    string
+		totalChunks int
+	}
+
+	var chunkItems []bwChunkItem
+	for _, f := range scanResult.Files {
+		if !changedSet[f.Path] {
 			continue
 		}
 
@@ -530,101 +551,161 @@ func runBW(cmd *cobra.Command, args []string) error {
 			continue
 		}
 
-		workItems = append(workItems, bwWorkItem{file: f, chunks: chunks})
+		fileType := classifyBWExtension(f.Path)
+		for _, chunk := range chunks {
+			chunkItems = append(chunkItems, bwChunkItem{
+				file:        f,
+				chunk:       chunk,
+				fileType:    fileType,
+				totalChunks: len(chunks),
+			})
+		}
 	}
 
 	logger.Info("BW work plan",
-		zap.Int("to_process", len(workItems)),
+		zap.Int("chunk_items", len(chunkItems)),
 		zap.Int("skipped_cached", skipped),
 		zap.Int("total_files", len(scanResult.Files)),
 	)
 
-	// Process with bounded concurrency
+	// Process chunks with bounded concurrency (change 2: each chunk is independent)
 	sem := make(chan struct{}, cfg.BW.MaxWorkers)
-	type bwResult struct {
-		file   graph.FileInfo
-		result *graph.BWResult
-		err    error
+	type bwChunkResult struct {
+		filePath string
+		fileType string
+		file     graph.FileInfo
+		index    int
+		total    int
+		entities []graph.BWEntity
+		rels     []graph.BWRelationship
+		refs     []graph.BWCobolReference
+		summary  string
+		err      error
 	}
-	resultCh := make(chan bwResult, len(workItems))
+	resultCh := make(chan bwChunkResult, len(chunkItems))
 
-	for _, item := range workItems {
+	for _, item := range chunkItems {
 		sem <- struct{}{}
-		go func(wi bwWorkItem) {
+		go func(ci bwChunkItem) {
 			defer func() { <-sem }()
 
-			// For multi-chunk files, concatenate results
-			var allEntities []graph.BWEntity
-			var allRels []graph.BWRelationship
-			var allRefs []graph.BWCobolReference
-			var summary string
-
-			fileType := classifyBWExtension(wi.file.Path)
-
-			for _, chunk := range wi.chunks {
-				resp, analyzeErr := claudeClient.AnalyzeBW(ctx, wi.file.Path, fileType, chunk.Content, existingPrograms, cfg.BW.MaxTokens)
-				if analyzeErr != nil {
-					resultCh <- bwResult{file: wi.file, err: fmt.Errorf("analyzing %s chunk %d: %w", wi.file.Path, chunk.Index, analyzeErr)}
-					return
-				}
-
-				parsed, parseErr := parser.ParseBWResponse(resp, wi.file.Path)
-				if parseErr != nil {
-					resultCh <- bwResult{file: wi.file, err: fmt.Errorf("parsing %s chunk %d: %w", wi.file.Path, chunk.Index, parseErr)}
-					return
-				}
-
-				allEntities = append(allEntities, parsed.Entities...)
-				allRels = append(allRels, parsed.Relationships...)
-				allRefs = append(allRefs, parsed.CobolReferences...)
-				if summary == "" {
-					summary = parsed.File.Summary
-				}
+			resp, analyzeErr := claudeClient.AnalyzeBW(ctx, ci.file.Path, ci.fileType, ci.chunk.Content, existingPrograms, cfg.BW.MaxTokens)
+			if analyzeErr != nil {
+				resultCh <- bwChunkResult{filePath: ci.file.Path, file: ci.file, index: ci.chunk.Index, total: ci.totalChunks, err: fmt.Errorf("analyzing %s chunk %d: %w", ci.file.Path, ci.chunk.Index, analyzeErr)}
+				return
 			}
 
-			merged := &graph.BWResult{
+			parsed, parseErr := parser.ParseBWResponse(resp, ci.file.Path)
+			if parseErr != nil {
+				resultCh <- bwChunkResult{filePath: ci.file.Path, file: ci.file, index: ci.chunk.Index, total: ci.totalChunks, err: fmt.Errorf("parsing %s chunk %d: %w", ci.file.Path, ci.chunk.Index, parseErr)}
+				return
+			}
+
+			resultCh <- bwChunkResult{
+				filePath: ci.file.Path,
+				fileType: ci.fileType,
+				file:     ci.file,
+				index:    ci.chunk.Index,
+				total:    ci.totalChunks,
+				entities: parsed.Entities,
+				rels:     parsed.Relationships,
+				refs:     parsed.CobolReferences,
+				summary:  parsed.File.Summary,
+			}
+		}(item)
+	}
+
+	// Collect chunk results and merge per file
+	fileChunks := make(map[string][]bwChunkResult)
+	fileErrors := make(map[string]bool)
+	for range len(chunkItems) {
+		res := <-resultCh
+		if res.err != nil {
+			logger.Error("BW chunk processing failed", zap.String("file", res.filePath), zap.Error(res.err))
+			fileErrors[res.filePath] = true
+		}
+		fileChunks[res.filePath] = append(fileChunks[res.filePath], res)
+	}
+
+	// Async Neo4j writer goroutine (change 4)
+	type mergedBWResult struct {
+		file   graph.FileInfo
+		result *graph.BWResult
+	}
+	writeCh := make(chan mergedBWResult, len(fileChunks))
+	var processedCount atomic.Int64
+	var errorsCount atomic.Int64
+	var totalEntitiesCount atomic.Int64
+	var totalRefsCount atomic.Int64
+
+	var writeWg sync.WaitGroup
+	writeWg.Add(1)
+	go func() {
+		defer writeWg.Done()
+		for mr := range writeCh {
+			if writeErr := writer.WriteBWResult(ctx, mr.result); writeErr != nil {
+				logger.Error("failed to write BW result", zap.String("file", mr.file.Path), zap.Error(writeErr))
+				errorsCount.Add(1)
+				continue
+			}
+			if cacheErr := fileCache.MarkProcessedForPass(mr.file.Path, mr.file.Hash, bwPassNumber); cacheErr != nil {
+				logger.Warn("failed to update cache", zap.String("file", mr.file.Path), zap.Error(cacheErr))
+			}
+			processedCount.Add(1)
+			totalEntitiesCount.Add(int64(len(mr.result.Entities)))
+			totalRefsCount.Add(int64(len(mr.result.CobolReferences)))
+		}
+	}()
+
+	// Merge chunks per file and send to writer
+	for filePath, chunks := range fileChunks {
+		if fileErrors[filePath] {
+			errorsCount.Add(1)
+			continue
+		}
+
+		// Sort by chunk index for deterministic merge
+		sort.Slice(chunks, func(i, j int) bool { return chunks[i].index < chunks[j].index })
+
+		var allEntities []graph.BWEntity
+		var allRels []graph.BWRelationship
+		var allRefs []graph.BWCobolReference
+		var summary string
+		var fileInfo graph.FileInfo
+		var fileType string
+
+		for _, c := range chunks {
+			allEntities = append(allEntities, c.entities...)
+			allRels = append(allRels, c.rels...)
+			allRefs = append(allRefs, c.refs...)
+			if summary == "" {
+				summary = c.summary
+			}
+			fileInfo = c.file
+			fileType = c.fileType
+		}
+
+		writeCh <- mergedBWResult{
+			file: fileInfo,
+			result: &graph.BWResult{
 				File: graph.BWFile{
-					Path:     wi.file.Path,
+					Path:     filePath,
 					FileType: fileType,
 					Summary:  summary,
 				},
 				Entities:        allEntities,
 				Relationships:   allRels,
 				CobolReferences: allRefs,
-			}
-
-			resultCh <- bwResult{file: wi.file, result: merged}
-		}(item)
+			},
+		}
 	}
+	close(writeCh)
+	writeWg.Wait()
 
-	// Collect results and write to Neo4j
-	processed := 0
-	errors := 0
-	totalEntities := 0
-	totalRefs := 0
-	for range len(workItems) {
-		res := <-resultCh
-		if res.err != nil {
-			logger.Error("BW processing failed", zap.String("file", res.file.Path), zap.Error(res.err))
-			errors++
-			continue
-		}
-
-		if writeErr := writer.WriteBWResult(ctx, res.result); writeErr != nil {
-			logger.Error("failed to write BW result", zap.String("file", res.file.Path), zap.Error(writeErr))
-			errors++
-			continue
-		}
-
-		// Mark as cached
-		if cacheErr := fileCache.MarkProcessedForPass(res.file.Path, res.file.Hash, bwPassNumber); cacheErr != nil {
-			logger.Warn("failed to update cache", zap.String("file", res.file.Path), zap.Error(cacheErr))
-		}
-
-		processed++
-		totalEntities += len(res.result.Entities)
-		totalRefs += len(res.result.CobolReferences)
-	}
+	processed := int(processedCount.Load())
+	errors := int(errorsCount.Load())
+	totalEntities := int(totalEntitiesCount.Load())
+	totalRefs := int(totalRefsCount.Load())
 
 	fmt.Printf("\nBusinessware Ingestion Complete\n")
 	fmt.Printf("  Files processed: %d\n", processed)
