@@ -415,7 +415,7 @@ func runBW(cmd *cobra.Command, args []string) error {
 	)
 
 	// Scan BW files
-	bwScanResult, err := scanner.ScanBW(ctx, cfg.BW.Dir, extensions, logger)
+	bwScanResult, err := scanner.ScanBW(ctx, cfg.BW.Dir, extensions, logger, cfg.BW.MaxJARDepth)
 	if err != nil {
 		return fmt.Errorf("scanning BW files: %w", err)
 	}

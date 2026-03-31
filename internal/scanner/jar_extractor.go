@@ -12,11 +12,15 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"sync/atomic"
 
 	"cobol-ingestor/internal/graph"
 
 	"go.uber.org/zap"
 )
+
+// maxTotalExtraction is the aggregate extraction size limit per top-level JAR (500MB).
+const maxTotalExtraction = 500 * 1024 * 1024
 
 // JAREntry represents a single analyzable file extracted from a JAR archive.
 type JAREntry struct {
@@ -27,10 +31,21 @@ type JAREntry struct {
 	EntryPath string         // Internal ZIP entry path
 }
 
+// isNestedArchive returns true if the entry name has a JAR/WAR/EAR/ZIP extension.
+func isNestedArchive(name string) bool {
+	ext := strings.ToLower(filepath.Ext(name))
+	switch ext {
+	case ".jar", ".war", ".ear", ".zip":
+		return true
+	}
+	return false
+}
+
 // ExtractJAR opens a JAR via archive/zip, computes a JAR-level SHA-256, iterates
 // entries, and extracts analyzable ones in-memory. .class files are disassembled
-// using javap (falling back to Go-native parsing if unavailable).
-func ExtractJAR(ctx context.Context, jarPath string, javapPath string, logger *zap.Logger) ([]JAREntry, error) {
+// using javap (falling back to Go-native parsing if unavailable). Nested archives
+// are recursively extracted up to maxDepth levels.
+func ExtractJAR(ctx context.Context, jarPath string, javapPath string, logger *zap.Logger, maxDepth int) ([]JAREntry, error) {
 	jarHash, err := hashFile(jarPath)
 	if err != nil {
 		return nil, fmt.Errorf("hashing JAR %s: %w", jarPath, err)
@@ -42,8 +57,38 @@ func ExtractJAR(ctx context.Context, jarPath string, javapPath string, logger *z
 	}
 	defer r.Close()
 
+	var totalExtracted int64
+	entries, err := extractArchiveFromReader(ctx, r.File, jarPath, jarHash, javapPath, logger, 0, maxDepth, &totalExtracted)
+	if err != nil {
+		return nil, err
+	}
+
+	logger.Info("extracted JAR entries",
+		zap.String("jar", jarPath),
+		zap.Int("entries", len(entries)),
+		zap.String("hash", jarHash),
+		zap.Int64("totalBytes", totalExtracted),
+	)
+
+	return entries, nil
+}
+
+// extractArchiveFromReader is the core recursive function that processes zip entries.
+// Virtual paths chain with "!/": outer.jar!/lib/inner.jar!/Foo.class
+func extractArchiveFromReader(
+	ctx context.Context,
+	files []*zip.File,
+	basePath string,
+	jarHash string,
+	javapPath string,
+	logger *zap.Logger,
+	depth int,
+	maxDepth int,
+	totalExtracted *int64,
+) ([]JAREntry, error) {
 	var entries []JAREntry
-	for _, f := range r.File {
+
+	for _, f := range files {
 		if ctx.Err() != nil {
 			return nil, ctx.Err()
 		}
@@ -52,26 +97,79 @@ func ExtractJAR(ctx context.Context, jarPath string, javapPath string, logger *z
 			continue
 		}
 
-		if !isAnalyzableEntry(f.Name) {
-			// Log warning for nested archives
-			ext := strings.ToLower(filepath.Ext(f.Name))
-			if ext == ".jar" || ext == ".war" || ext == ".ear" {
-				logger.Warn("skipping nested archive inside JAR",
-					zap.String("jar", jarPath),
+		// Check nested archive first
+		if isNestedArchive(f.Name) {
+			if depth >= maxDepth {
+				logger.Debug("skipping nested archive (depth limit reached)",
+					zap.String("archive", basePath),
+					zap.String("entry", f.Name),
+					zap.Int("depth", depth),
+					zap.Int("maxDepth", maxDepth),
+				)
+				continue
+			}
+
+			data, err := readZipEntry(f)
+			if err != nil {
+				logger.Warn("failed to read nested archive entry",
+					zap.String("archive", basePath),
+					zap.String("entry", f.Name),
+					zap.Error(err),
+				)
+				continue
+			}
+
+			// Check total extraction limit
+			if atomic.AddInt64(totalExtracted, int64(len(data))) > maxTotalExtraction {
+				logger.Warn("total extraction size limit reached, skipping remaining nested archives",
+					zap.String("archive", basePath),
 					zap.String("entry", f.Name),
 				)
+				continue
 			}
+
+			nestedReader, err := zip.NewReader(bytes.NewReader(data), int64(len(data)))
+			if err != nil {
+				logger.Warn("corrupt nested archive (skipping)",
+					zap.String("archive", basePath),
+					zap.String("entry", f.Name),
+					zap.Error(err),
+				)
+				continue
+			}
+
+			nestedPath := basePath + "!/" + f.Name
+			nestedEntries, err := extractArchiveFromReader(
+				ctx, nestedReader.File, nestedPath, jarHash, javapPath, logger,
+				depth+1, maxDepth, totalExtracted,
+			)
+			if err != nil {
+				return nil, err
+			}
+			entries = append(entries, nestedEntries...)
+			continue
+		}
+
+		if !isAnalyzableEntry(f.Name) {
 			continue
 		}
 
 		data, err := readZipEntry(f)
 		if err != nil {
 			logger.Warn("failed to read JAR entry",
-				zap.String("jar", jarPath),
+				zap.String("archive", basePath),
 				zap.String("entry", f.Name),
 				zap.Error(err),
 			)
 			continue
+		}
+
+		// Check total extraction limit
+		if atomic.AddInt64(totalExtracted, int64(len(data))) > maxTotalExtraction {
+			logger.Warn("total extraction size limit reached, skipping remaining entries",
+				zap.String("archive", basePath),
+			)
+			break
 		}
 
 		var content []byte
@@ -84,7 +182,7 @@ func ExtractJAR(ctx context.Context, jarPath string, javapPath string, logger *z
 				classInfo, parseErr := ParseClassFile(data)
 				if parseErr != nil {
 					logger.Warn("failed to parse .class entry (skipping)",
-						zap.String("jar", jarPath),
+						zap.String("archive", basePath),
 						zap.String("entry", f.Name),
 						zap.Error(parseErr),
 					)
@@ -98,7 +196,7 @@ func ExtractJAR(ctx context.Context, jarPath string, javapPath string, logger *z
 			content = data
 		}
 
-		virtualPath := jarPath + "!/" + f.Name
+		virtualPath := basePath + "!/" + f.Name
 		lineCount := countLines(content)
 
 		entries = append(entries, JAREntry{
@@ -110,17 +208,11 @@ func ExtractJAR(ctx context.Context, jarPath string, javapPath string, logger *z
 				LineCount: lineCount,
 			},
 			Content:   content,
-			JARPath:   jarPath,
+			JARPath:   basePath,
 			JARHash:   jarHash,
 			EntryPath: f.Name,
 		})
 	}
-
-	logger.Info("extracted JAR entries",
-		zap.String("jar", jarPath),
-		zap.Int("entries", len(entries)),
-		zap.String("hash", jarHash),
-	)
 
 	return entries, nil
 }
@@ -144,7 +236,6 @@ func isAnalyzableEntry(name string) bool {
 	// Blacklist (explicit reject for clarity)
 	switch ext {
 	case ".png", ".jpg", ".jpeg", ".gif", ".ico", ".bmp",
-		".jar", ".war", ".ear", ".zip",
 		".so", ".dll", ".dylib":
 		return false
 	}

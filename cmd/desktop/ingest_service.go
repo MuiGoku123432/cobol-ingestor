@@ -356,7 +356,7 @@ func (s *IngestService) runBWPipeline(ctx context.Context, dir, extensionsStr st
 
 	// Scan BW files
 	s.emit("progress", map[string]any{"phase": "scanning", "message": "Scanning BusinessWare files..."})
-	bwScanResult, err := scanner.ScanBW(ctx, cfg.BW.Dir, extensions, logger)
+	bwScanResult, err := scanner.ScanBW(ctx, cfg.BW.Dir, extensions, logger, cfg.BW.MaxJARDepth)
 	if err != nil {
 		return fmt.Errorf("scanning BW files: %w", err)
 	}
