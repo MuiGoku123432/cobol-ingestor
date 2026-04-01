@@ -312,7 +312,7 @@ func RunSwarm(ctx context.Context, p SwarmParams) error {
 
 		// Coordinator decision: do we need more info?
 		latestResults := allRounds[len(allRounds)-1].Results
-		decision, err := runCoordinatorDecision(ctx, latestResults, userQuery, promptData, provider, model, p.Emitter, round)
+		decision, err := runCoordinatorDecision(ctx, latestResults, userQuery, promptData, provider, model, p.Emitter, round, p.Logger)
 		if err != nil || decision.Satisfied {
 			break
 		}

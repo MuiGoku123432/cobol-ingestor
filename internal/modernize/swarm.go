@@ -6,12 +6,14 @@ import (
 	"fmt"
 	"net/http"
 	"sort"
+	"strings"
 	"sync"
 	"text/template"
 
 	"cobol-ingestor/internal/llm"
 
 	"github.com/gin-gonic/gin"
+	"go.uber.org/zap"
 )
 
 const (
@@ -356,6 +358,7 @@ func runCoordinatorDecision(
 	model string,
 	emitter EventEmitter,
 	round int,
+	logger *zap.Logger,
 ) (*coordinatorDecision, error) {
 	decisionPromptData := swarmPromptData{
 		TargetLanguage: promptData.TargetLanguage,
@@ -398,6 +401,12 @@ func runCoordinatorDecision(
 		if extracted := extractJSON(text); extracted != "" {
 			_ = json.Unmarshal([]byte(extracted), &decision)
 		}
+		if decision.Reasoning == "Could not parse decision response" && logger != nil {
+			logger.Warn("coordinator decision parse failed",
+				zap.String("raw_response", truncate(text, 500)),
+				zap.Error(err),
+			)
+		}
 	}
 
 	// Send coordinator_decision event
@@ -412,21 +421,33 @@ func runCoordinatorDecision(
 }
 
 // extractJSON tries to extract a JSON object from text that may contain markdown code blocks.
+// It correctly handles braces inside JSON string values.
 func extractJSON(s string) string {
-	// Look for ```json ... ``` or ``` ... ```
-	start := -1
-	for i := 0; i < len(s)-2; i++ {
-		if s[i] == '{' {
-			start = i
-			break
-		}
-	}
+	start := strings.Index(s, "{")
 	if start == -1 {
 		return ""
 	}
 	depth := 0
+	inString := false
+	escaped := false
 	for i := start; i < len(s); i++ {
-		switch s[i] {
+		c := s[i]
+		if escaped {
+			escaped = false
+			continue
+		}
+		if c == '\\' && inString {
+			escaped = true
+			continue
+		}
+		if c == '"' {
+			inString = !inString
+			continue
+		}
+		if inString {
+			continue
+		}
+		switch c {
 		case '{':
 			depth++
 		case '}':
