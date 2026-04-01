@@ -4,6 +4,9 @@
   import { refreshAuthStatus } from '../../stores/status';
   import { usePersistedState } from '../../stores/persisted.svelte';
   import MarkdownContent from './MarkdownContent.svelte';
+  import { Marked } from 'marked';
+
+  const marked = new Marked({ gfm: true, breaks: true });
 
   interface Message {
     role: string;
@@ -34,6 +37,17 @@
     framework: 'Spring Boot',
     integrations: '',
   });
+
+  let copiedIndex = $state(-1);
+
+  function copyMessage(content: string, index: number) {
+    const tmp = document.createElement('div');
+    tmp.innerHTML = marked.parse(content) as string;
+    navigator.clipboard.writeText(tmp.innerText).then(() => {
+      copiedIndex = index;
+      setTimeout(() => { copiedIndex = -1; }, 1500);
+    });
+  }
 
   let messages = $state<Message[]>([]);
   let input = $state('');
@@ -358,11 +372,18 @@
 
     <!-- Messages -->
     <div class="messages">
-      {#each messages as msg}
+      {#each messages as msg, i}
         <div class="message" class:user={msg.role === 'user'} class:assistant={msg.role === 'assistant'}>
           <div class="role">{msg.role}</div>
           {#if msg.role === 'assistant'}
             <MarkdownContent content={msg.content} />
+            <button class="copy-btn" title="Copy to clipboard" onclick={() => copyMessage(msg.content, i)}>
+              {#if copiedIndex === i}
+                <svg width="16" height="16" viewBox="0 0 16 16" fill="currentColor"><path d="M13.78 4.22a.75.75 0 0 1 0 1.06l-7.25 7.25a.75.75 0 0 1-1.06 0L2.22 9.28a.75.75 0 0 1 1.06-1.06L6 10.94l6.72-6.72a.75.75 0 0 1 1.06 0Z"/></svg>
+              {:else}
+                <svg width="16" height="16" viewBox="0 0 16 16" fill="currentColor"><path d="M0 6.75C0 5.784.784 5 1.75 5h1.5a.75.75 0 0 1 0 1.5h-1.5a.25.25 0 0 0-.25.25v7.5c0 .138.112.25.25.25h7.5a.25.25 0 0 0 .25-.25v-1.5a.75.75 0 0 1 1.5 0v1.5A1.75 1.75 0 0 1 9.25 16h-7.5A1.75 1.75 0 0 1 0 14.25Z"/><path d="M5 1.75C5 .784 5.784 0 6.75 0h7.5C15.216 0 16 .784 16 1.75v7.5A1.75 1.75 0 0 1 14.25 11h-7.5A1.75 1.75 0 0 1 5 9.25Zm1.75-.25a.25.25 0 0 0-.25.25v7.5c0 .138.112.25.25.25h7.5a.25.25 0 0 0 .25-.25v-7.5a.25.25 0 0 0-.25-.25Z"/></svg>
+              {/if}
+            </button>
           {:else}
             <div class="content">{msg.content}</div>
           {/if}
@@ -384,6 +405,13 @@
           <div class="message assistant streaming">
             <div class="role">{saved.swarmMode ? 'coordinator' : 'assistant'}</div>
             <MarkdownContent content={streamedContent} />
+            <button class="copy-btn" title="Copy to clipboard" onclick={() => copyMessage(streamedContent, -2)}>
+              {#if copiedIndex === -2}
+                <svg width="16" height="16" viewBox="0 0 16 16" fill="currentColor"><path d="M13.78 4.22a.75.75 0 0 1 0 1.06l-7.25 7.25a.75.75 0 0 1-1.06 0L2.22 9.28a.75.75 0 0 1 1.06-1.06L6 10.94l6.72-6.72a.75.75 0 0 1 1.06 0Z"/></svg>
+              {:else}
+                <svg width="16" height="16" viewBox="0 0 16 16" fill="currentColor"><path d="M0 6.75C0 5.784.784 5 1.75 5h1.5a.75.75 0 0 1 0 1.5h-1.5a.25.25 0 0 0-.25.25v7.5c0 .138.112.25.25.25h7.5a.25.25 0 0 0 .25-.25v-1.5a.75.75 0 0 1 1.5 0v1.5A1.75 1.75 0 0 1 9.25 16h-7.5A1.75 1.75 0 0 1 0 14.25Z"/><path d="M5 1.75C5 .784 5.784 0 6.75 0h7.5C15.216 0 16 .784 16 1.75v7.5A1.75 1.75 0 0 1 14.25 11h-7.5A1.75 1.75 0 0 1 5 9.25Zm1.75-.25a.25.25 0 0 0-.25.25v7.5c0 .138.112.25.25.25h7.5a.25.25 0 0 0 .25-.25v-7.5a.25.25 0 0 0-.25-.25Z"/></svg>
+              {/if}
+            </button>
           </div>
         {/if}
       {/if}
@@ -717,6 +745,7 @@
   }
 
   .message {
+    position: relative;
     max-width: 85%;
     padding: 10px 14px;
     border-radius: 8px;
@@ -820,5 +849,30 @@
     cursor: pointer;
     font-size: 13px;
     align-self: flex-end;
+  }
+
+  .copy-btn {
+    position: absolute;
+    top: 8px;
+    right: 8px;
+    background: none;
+    border: none;
+    color: #8b949e;
+    cursor: pointer;
+    opacity: 0;
+    transition: opacity 0.15s;
+    padding: 4px;
+    border-radius: 4px;
+    display: flex;
+    align-items: center;
+  }
+
+  .copy-btn:hover {
+    color: #58a6ff;
+    background: #21262d;
+  }
+
+  .message:hover .copy-btn {
+    opacity: 1;
   }
 </style>
