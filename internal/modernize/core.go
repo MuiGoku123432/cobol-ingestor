@@ -165,6 +165,7 @@ func RunChat(ctx context.Context, p ChatParams) error {
 	}
 
 	p.Emitter.Emit("error", map[string]string{"error": "max tool iterations reached"})
+	p.Emitter.Emit("done", map[string]string{})
 	return nil
 }
 
@@ -334,6 +335,7 @@ func RunSwarm(ctx context.Context, p SwarmParams) error {
 	coordText, err := runCoordinatorSynthesis(ctx, promptData, provider, p.MCPClient, cache, tools, model, maxTokens, p.Emitter)
 	if err != nil {
 		p.Emitter.Emit("error", map[string]string{"error": fmt.Sprintf("Coordinator error: %v", err)})
+		p.Emitter.Emit("done", map[string]string{})
 		return nil
 	}
 

@@ -10,8 +10,26 @@
     content: string;
   }
 
+  interface AgentState {
+    id: string;
+    name: string;
+    status: string;
+    content: string;
+    toolCalls: number;
+    toolResults: number;
+  }
+
+  interface CoordinatorDecisionState {
+    round: number;
+    satisfied: boolean;
+    reasoning: string;
+    followUps: Record<string, string> | null;
+  }
+
   let saved = usePersistedState('chat', {
     discoveryMode: true,
+    swarmMode: false,
+    multiRound: false,
     targetLang: 'Java',
     framework: 'Spring Boot',
     integrations: '',
@@ -24,6 +42,14 @@
   let sessionId = $state('');
   let sessions = $state<any[]>([]);
   let toolCalls = $state<any[]>([]);
+
+  // Swarm-specific state
+  let agents = $state<AgentState[]>([]);
+  let currentRound = $state(0);
+  let maxRounds = $state(1);
+  let coordinatorDecision = $state<CoordinatorDecisionState | null>(null);
+  let synthesizing = $state(false);
+  let coordinatorToolCount = $state(0);
 
   async function loadSessions() {
     try {
@@ -60,13 +86,26 @@
     streaming = true;
     streamedContent = '';
     toolCalls = [];
+    agents = [];
+    currentRound = 0;
+    maxRounds = 1;
+    coordinatorDecision = null;
+    synthesizing = false;
+    coordinatorToolCount = 0;
 
     try {
       const allMsgs = messages.map((m) => ({ role: m.role, content: m.content }));
-      // @ts-ignore
-      await window.go.main.ChatService.SendChat(
-        sessionId, allMsgs, saved.discoveryMode, saved.targetLang, saved.framework, saved.integrations
-      );
+      if (saved.swarmMode) {
+        // @ts-ignore
+        await window.go.main.ChatService.SendSwarm(
+          sessionId, allMsgs, saved.discoveryMode, saved.multiRound, saved.targetLang, saved.framework, saved.integrations
+        );
+      } else {
+        // @ts-ignore
+        await window.go.main.ChatService.SendChat(
+          sessionId, allMsgs, saved.discoveryMode, saved.targetLang, saved.framework, saved.integrations
+        );
+      }
     } catch (e: any) {
       messages = [...messages, { role: 'assistant', content: `Error: ${e.message || e}` }];
       streaming = false;
@@ -78,9 +117,10 @@
     window.go.main.ChatService.CancelChat();
   }
 
-  // Event subscriptions
+  // Chat event subscriptions
   $effect(() => {
     const unsubs = [
+      // --- Chat events ---
       EventsOn('chat:text', (data: any) => {
         streamedContent += data?.content || '';
       }),
@@ -112,6 +152,77 @@
         streamedContent = '';
         streaming = false;
       }),
+
+      // --- Swarm events ---
+      EventsOn('swarm:round_start', (data: any) => {
+        currentRound = data?.round ?? 1;
+        maxRounds = data?.maxRounds ?? 1;
+        coordinatorDecision = null;
+      }),
+      EventsOn('swarm:round_complete', (_data: any) => {}),
+      EventsOn('swarm:agent_start', (data: any) => {
+        agents = [...agents, { id: data?.id, name: data?.name, status: 'running', content: '', toolCalls: 0, toolResults: 0 }];
+      }),
+      EventsOn('swarm:agent_progress', (data: any) => {
+        agents = agents.map((a) =>
+          a.id === data?.id ? { ...a, content: a.content + (data?.content || '') } : a
+        );
+      }),
+      EventsOn('swarm:agent_tool_start', (data: any) => {
+        agents = agents.map((a) =>
+          a.id === data?.id ? { ...a, toolCalls: a.toolCalls + 1 } : a
+        );
+      }),
+      EventsOn('swarm:agent_tool_result', (data: any) => {
+        agents = agents.map((a) =>
+          a.id === data?.id ? { ...a, toolResults: a.toolResults + 1 } : a
+        );
+      }),
+      EventsOn('swarm:agent_complete', (data: any) => {
+        agents = agents.map((a) =>
+          a.id === data?.id ? { ...a, status: 'done', content: data?.summary || a.content } : a
+        );
+      }),
+      EventsOn('swarm:coordinator_decision', (data: any) => {
+        coordinatorDecision = {
+          round: data?.round ?? 0,
+          satisfied: data?.satisfied ?? true,
+          reasoning: data?.reasoning ?? '',
+          followUps: data?.followUps ?? null,
+        };
+      }),
+      EventsOn('swarm:synthesis_start', () => {
+        synthesizing = true;
+        coordinatorToolCount = 0;
+      }),
+      EventsOn('swarm:coordinator_tool_start', () => {
+        coordinatorToolCount++;
+      }),
+      EventsOn('swarm:coordinator_tool_result', () => {}),
+      EventsOn('swarm:text', (data: any) => {
+        streamedContent += data?.content || '';
+      }),
+      EventsOn('swarm:session_created', (data: any) => {
+        if (data?.id) sessionId = data.id;
+        loadSessions();
+      }),
+      EventsOn('swarm:done', () => {
+        if (streamedContent) {
+          messages = [...messages, { role: 'assistant', content: streamedContent }];
+        }
+        streamedContent = '';
+        streaming = false;
+        synthesizing = false;
+      }),
+      EventsOn('swarm:error', (data: any) => {
+        const errorContent = streamedContent
+          ? streamedContent + `\n\nError: ${data?.error}`
+          : `Error: ${data?.error}`;
+        messages = [...messages, { role: 'assistant', content: errorContent }];
+        streamedContent = '';
+        streaming = false;
+        synthesizing = false;
+      }),
     ];
 
     return () => unsubs.forEach((fn) => fn());
@@ -123,7 +234,7 @@
 <div class="chat-layout">
   <!-- Session sidebar -->
   <div class="session-sidebar">
-    <button class="new-session" onclick={() => { sessionId = ''; messages = []; }}>
+    <button class="new-session" onclick={() => { sessionId = ''; messages = []; agents = []; coordinatorDecision = null; }}>
       + New Chat
     </button>
     {#each sessions as sess}
@@ -144,6 +255,16 @@
         <input type="checkbox" bind:checked={saved.discoveryMode} />
         <span>{saved.discoveryMode ? 'Discovery Mode' : 'Migration Mode'}</span>
       </label>
+      <label class="toggle swarm-toggle">
+        <input type="checkbox" bind:checked={saved.swarmMode} />
+        <span>Swarm</span>
+      </label>
+      {#if saved.swarmMode}
+        <label class="toggle">
+          <input type="checkbox" bind:checked={saved.multiRound} />
+          <span>Multi-Round</span>
+        </label>
+      {/if}
       {#if !saved.discoveryMode}
         <select bind:value={saved.targetLang}>
           {#each languages as lang}
@@ -154,6 +275,64 @@
         <input type="text" bind:value={saved.integrations} placeholder="Integrations" class="small-input" />
       {/if}
     </div>
+
+    <!-- Round progress (swarm multi-round) -->
+    {#if streaming && saved.swarmMode && maxRounds > 1 && currentRound > 0}
+      <div class="round-bar">
+        <span class="round-label">Round {currentRound} / {maxRounds}</span>
+        <div class="round-track">
+          <div class="round-fill" style="width: {(currentRound / maxRounds) * 100}%"></div>
+        </div>
+      </div>
+    {/if}
+
+    <!-- Agent cards (swarm) -->
+    {#if agents.length > 0}
+      <div class="agent-grid">
+        {#each agents as agent}
+          <div class="agent-card" class:done={agent.status === 'done'}>
+            <div class="agent-header">
+              <span class="agent-name">{agent.name}</span>
+              <span class="agent-status">{agent.status === 'done' ? 'Done' : 'Analyzing...'}</span>
+            </div>
+            <div class="agent-meta">{agent.toolCalls} tools called, {agent.toolResults} results</div>
+            {#if agent.content}
+              <div class="agent-content">{agent.content.slice(0, 200)}{agent.content.length > 200 ? '...' : ''}</div>
+            {/if}
+          </div>
+        {/each}
+      </div>
+    {/if}
+
+    <!-- Coordinator decision (swarm) -->
+    {#if coordinatorDecision}
+      <div class="coordinator-decision" class:satisfied={coordinatorDecision.satisfied}>
+        <div class="decision-header">
+          <span class="decision-label">Coordinator Decision</span>
+          <span class="decision-status">{coordinatorDecision.satisfied ? 'Satisfied' : 'Needs Follow-up'}</span>
+        </div>
+        {#if coordinatorDecision.reasoning}
+          <div class="decision-reasoning">{coordinatorDecision.reasoning}</div>
+        {/if}
+        {#if coordinatorDecision.followUps && Object.keys(coordinatorDecision.followUps).length > 0}
+          <div class="decision-followups">
+            {#each Object.entries(coordinatorDecision.followUps) as [agentId, question]}
+              <div class="followup-item">
+                <span class="followup-agent">{agentId}</span>: {question}
+              </div>
+            {/each}
+          </div>
+        {/if}
+      </div>
+    {/if}
+
+    <!-- Synthesis indicator (swarm) -->
+    {#if synthesizing && !streamedContent}
+      <div class="synthesis-indicator">
+        <span class="synthesis-spinner"></span>
+        <span>Compiling results...{coordinatorToolCount > 0 ? ` (${coordinatorToolCount} tools used)` : ''}</span>
+      </div>
+    {/if}
 
     <!-- Messages -->
     <div class="messages">
@@ -181,7 +360,7 @@
         {/if}
         {#if streamedContent}
           <div class="message assistant streaming">
-            <div class="role">assistant</div>
+            <div class="role">{saved.swarmMode ? 'coordinator' : 'assistant'}</div>
             <MarkdownContent content={streamedContent} />
           </div>
         {/if}
@@ -192,7 +371,7 @@
     <div class="input-bar">
       <textarea
         bind:value={input}
-        placeholder="Ask about your COBOL codebase..."
+        placeholder={saved.swarmMode ? 'Ask the swarm to investigate...' : 'Ask about your COBOL codebase...'}
         onkeydown={(e) => {
           if (e.key === 'Enter' && !e.shiftKey) {
             e.preventDefault();
@@ -205,7 +384,9 @@
       {#if streaming}
         <button class="btn-danger" onclick={cancelChat}>Stop</button>
       {:else}
-        <button class="btn-primary" onclick={sendMessage} disabled={!input.trim()}>Send</button>
+        <button class="btn-primary" onclick={sendMessage} disabled={!input.trim()}>
+          {saved.swarmMode ? 'Send Swarm' : 'Send'}
+        </button>
       {/if}
     </div>
   </div>
@@ -295,6 +476,11 @@
     cursor: pointer;
   }
 
+  .swarm-toggle span {
+    color: #d2a8ff;
+    font-weight: 500;
+  }
+
   .small-input,
   .mode-bar select {
     background: #161b22;
@@ -303,6 +489,165 @@
     color: #e1e4e8;
     padding: 4px 8px;
     font-size: 12px;
+  }
+
+  /* Round progress */
+  .round-bar {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    padding: 6px 12px;
+    border-bottom: 1px solid #21262d;
+    font-size: 12px;
+    color: #8b949e;
+  }
+
+  .round-label {
+    white-space: nowrap;
+    color: #d2a8ff;
+    font-weight: 500;
+  }
+
+  .round-track {
+    flex: 1;
+    height: 4px;
+    background: #21262d;
+    border-radius: 2px;
+    overflow: hidden;
+  }
+
+  .round-fill {
+    height: 100%;
+    background: #d2a8ff;
+    border-radius: 2px;
+    transition: width 0.3s ease;
+  }
+
+  /* Agent cards */
+  .agent-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fill, minmax(250px, 1fr));
+    gap: 8px;
+    padding: 8px 12px;
+    border-bottom: 1px solid #21262d;
+  }
+
+  .agent-card {
+    background: #161b22;
+    border: 1px solid #30363d;
+    border-radius: 6px;
+    padding: 10px;
+    font-size: 12px;
+  }
+
+  .agent-card.done {
+    border-color: #238636;
+  }
+
+  .agent-header {
+    display: flex;
+    justify-content: space-between;
+    margin-bottom: 4px;
+  }
+
+  .agent-name {
+    color: #d2a8ff;
+    font-weight: 500;
+  }
+
+  .agent-status {
+    color: #8b949e;
+    font-size: 11px;
+  }
+
+  .agent-meta {
+    color: #8b949e;
+    font-size: 11px;
+    margin-bottom: 6px;
+  }
+
+  .agent-content {
+    color: #c9d1d9;
+    font-size: 11px;
+    line-height: 1.4;
+  }
+
+  /* Coordinator decision */
+  .coordinator-decision {
+    padding: 8px 12px;
+    border-bottom: 1px solid #21262d;
+    background: #161b22;
+    font-size: 12px;
+  }
+
+  .coordinator-decision.satisfied {
+    border-left: 3px solid #238636;
+  }
+
+  .coordinator-decision:not(.satisfied) {
+    border-left: 3px solid #d29922;
+  }
+
+  .decision-header {
+    display: flex;
+    justify-content: space-between;
+    margin-bottom: 4px;
+  }
+
+  .decision-label {
+    color: #d2a8ff;
+    font-weight: 500;
+  }
+
+  .decision-status {
+    font-size: 11px;
+    color: #8b949e;
+  }
+
+  .decision-reasoning {
+    color: #c9d1d9;
+    margin-bottom: 4px;
+    line-height: 1.4;
+  }
+
+  .decision-followups {
+    margin-top: 4px;
+  }
+
+  .followup-item {
+    color: #8b949e;
+    font-size: 11px;
+    padding: 2px 0;
+  }
+
+  .followup-agent {
+    color: #d2a8ff;
+    font-weight: 500;
+  }
+
+  /* Synthesis indicator */
+  .synthesis-indicator {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    padding: 8px 12px;
+    border-bottom: 1px solid #21262d;
+    color: #d2a8ff;
+    font-size: 12px;
+  }
+
+  .synthesis-spinner {
+    display: inline-block;
+    width: 12px;
+    height: 12px;
+    border: 2px solid #30363d;
+    border-top-color: #d2a8ff;
+    border-radius: 50%;
+    animation: spin 0.8s linear infinite;
+  }
+
+  @keyframes spin {
+    to { transform: rotate(360deg); }
   }
 
   .messages {
