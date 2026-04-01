@@ -66,6 +66,7 @@ func (a *App) startup(ctx context.Context) {
 		a.cfg.DataDir = filepath.Join(home, ".cobol-graph")
 	}
 	_ = os.MkdirAll(a.cfg.DataDir, 0700)
+	_ = os.MkdirAll(filepath.Join(a.cfg.DataDir, "diagrams"), 0700)
 
 	// Try connecting to Neo4j with existing config (non-fatal)
 	if a.cfg.Neo4j.URI != "" {
@@ -116,7 +117,9 @@ func (a *App) initMCP() error {
 	var writer *n4j.BatchWriter
 	writer = n4j.NewBatchWriter(a.Neo4jService.client, 500, "default", a.logger)
 
-	server := mcpkg.NewServer(a.Neo4jService.client, writer)
+	server := mcpkg.NewServer(a.Neo4jService.client, writer, &mcpkg.ServerOptions{
+		DiagramOutputDir: filepath.Join(a.cfg.DataDir, "diagrams"),
+	})
 	mcpClient, err := modernize.NewMCPClientInProcess(a.ctx, server)
 	if err != nil {
 		return err

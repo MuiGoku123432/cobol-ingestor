@@ -697,7 +697,7 @@ func (s *IngestService) runOracleAnalysis(ctx context.Context) error {
 	if s.app.Neo4jService.client != nil {
 		batchWriter = n4j.NewBatchWriter(s.app.Neo4jService.client, 500, "default", logger)
 	}
-	server := mcpkg.NewServer(s.app.Neo4jService.client, batchWriter)
+	server := mcpkg.NewServer(s.app.Neo4jService.client, batchWriter, nil)
 	graphClient, err := modernize.NewMCPClientInProcess(ctx, server)
 	if err != nil {
 		return fmt.Errorf("creating in-process graph MCP: %w", err)

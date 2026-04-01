@@ -4,10 +4,6 @@
   import { refreshAuthStatus } from '../../stores/status';
   import { usePersistedState } from '../../stores/persisted.svelte';
   import MarkdownContent from './MarkdownContent.svelte';
-  import { Marked } from 'marked';
-
-  const marked = new Marked({ gfm: true, breaks: true });
-
   interface Message {
     role: string;
     content: string;
@@ -41,9 +37,7 @@
   let copiedIndex = $state(-1);
 
   function copyMessage(content: string, index: number) {
-    const tmp = document.createElement('div');
-    tmp.innerHTML = marked.parse(content) as string;
-    navigator.clipboard.writeText(tmp.innerText).then(() => {
+    navigator.clipboard.writeText(content).then(() => {
       copiedIndex = index;
       setTimeout(() => { copiedIndex = -1; }, 1500);
     });
@@ -56,6 +50,13 @@
   let sessionId = $state('');
   let sessions = $state<any[]>([]);
   let toolCalls = $state<any[]>([]);
+
+  // Diagram state
+  interface DiagramEntry {
+    filePath: string;
+    svgData: string;
+  }
+  let diagrams = $state<DiagramEntry[]>([]);
 
   // Swarm-specific state
   let agents = $state<AgentState[]>([]);
@@ -116,6 +117,7 @@
     streaming = true;
     streamedContent = '';
     toolCalls = [];
+    diagrams = [];
     agents = [];
     currentRound = 0;
     maxRounds = 1;
@@ -161,6 +163,11 @@
         toolCalls = toolCalls.map((tc) =>
           tc.id === data?.id ? { ...tc, status: 'done', result: data?.result } : tc
         );
+      }),
+      EventsOn('chat:diagram_generated', (data: any) => {
+        if (data?.svgData) {
+          diagrams = [...diagrams, { filePath: data.filePath || '', svgData: data.svgData }];
+        }
       }),
       EventsOn('chat:session_created', (data: any) => {
         if (data?.id) sessionId = data.id;
@@ -231,6 +238,11 @@
       EventsOn('swarm:coordinator_tool_result', () => {}),
       EventsOn('swarm:text', (data: any) => {
         streamedContent += data?.content || '';
+      }),
+      EventsOn('swarm:diagram_generated', (data: any) => {
+        if (data?.svgData) {
+          diagrams = [...diagrams, { filePath: data.filePath || '', svgData: data.svgData }];
+        }
       }),
       EventsOn('swarm:session_created', (data: any) => {
         if (data?.id) sessionId = data.id;
@@ -400,6 +412,16 @@
               </div>
             {/each}
           </div>
+        {/if}
+        {#if diagrams.length > 0}
+          {#each diagrams as diag}
+            <div class="diagram-preview">
+              <div class="diagram-svg">{@html diag.svgData}</div>
+              {#if diag.filePath}
+                <div class="diagram-path">{diag.filePath}</div>
+              {/if}
+            </div>
+          {/each}
         {/if}
         {#if streamedContent}
           <div class="message assistant streaming">
@@ -874,5 +896,32 @@
 
   .message:hover .copy-btn {
     opacity: 1;
+  }
+
+  /* Diagram preview */
+  .diagram-preview {
+    background: #161b22;
+    border: 1px solid #30363d;
+    border-radius: 8px;
+    padding: 12px;
+    max-width: 85%;
+    align-self: flex-start;
+  }
+
+  .diagram-svg {
+    overflow-x: auto;
+    max-width: 100%;
+  }
+
+  .diagram-svg :global(svg) {
+    max-width: 100%;
+    height: auto;
+  }
+
+  .diagram-path {
+    margin-top: 6px;
+    font-size: 10px;
+    color: #8b949e;
+    font-family: monospace;
   }
 </style>

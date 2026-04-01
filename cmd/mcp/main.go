@@ -35,7 +35,7 @@ func main() {
 	}
 
 	writer := n4j.NewBatchWriter(neo4jClient, 500, "default", logger)
-	server := mcpkg.NewServer(neo4jClient, writer)
+	server := mcpkg.NewServer(neo4jClient, writer, nil)
 
 	// If MCP_HTTP_PORT is set, run as Streamable HTTP server.
 	// Otherwise, run as stdio transport (for Claude Desktop / Claude Code).

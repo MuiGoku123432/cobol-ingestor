@@ -113,3 +113,9 @@ type GetCobolToExternalMappingsInput struct {
 type GetDataFlowPathsInput struct {
 	TableName string `json:"tableName,omitempty" jsonschema:"Filter by table name (DB2 or external). Leave empty for all flows."`
 }
+
+type GenerateMermaidDiagramInput struct {
+	Code     string `json:"code" jsonschema:"Mermaid diagram code (flowchart, sequence, class, ER)"`
+	Theme    string `json:"theme,omitempty" jsonschema:"Theme name: github-dark, tokyo-night, nord, catppuccin-mocha, etc."`
+	FileName string `json:"fileName,omitempty" jsonschema:"Output file name without extension"`
+}

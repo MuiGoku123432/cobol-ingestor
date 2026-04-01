@@ -177,5 +177,18 @@ func GetToolDefinitions() []llm.ToolDefinition {
 				"properties": map[string]any{},
 			},
 		},
+		{
+			Name:        "generate_mermaid_diagram",
+			Description: "Render a Mermaid diagram to SVG file. Use when the user asks for a visual diagram of call chains, data flows, program architecture, or any structural visualization.",
+			InputSchema: map[string]any{
+				"type": "object",
+				"properties": map[string]any{
+					"code":     map[string]any{"type": "string", "description": "Mermaid diagram code (flowchart, sequence, class, ER)"},
+					"theme":    map[string]any{"type": "string", "description": "Theme name: github-dark, tokyo-night, nord, catppuccin-mocha, etc."},
+					"fileName": map[string]any{"type": "string", "description": "Output file name without extension"},
+				},
+				"required": []any{"code"},
+			},
+		},
 	}
 }

@@ -155,6 +155,9 @@ func RunChat(ctx context.Context, p ChatParams) error {
 					"id":     block.ID,
 					"result": truncate(result, 500),
 				})
+				if block.Name == "generate_mermaid_diagram" {
+					emitDiagramEvent(p.Emitter, "chat", result)
+				}
 			}
 		}
 
@@ -401,4 +404,19 @@ func (ps *ProviderState) ListModels() ([]ModelInfo, error) {
 		return nil, nil
 	}
 	return []ModelInfo{{ID: model, Name: model}}, nil
+}
+
+// emitDiagramEvent parses a generate_mermaid_diagram tool result and emits
+// a diagram_generated event with the SVG data so the frontend can render inline.
+func emitDiagramEvent(emitter EventEmitter, prefix string, result string) {
+	var dr struct {
+		FilePath string `json:"filePath"`
+		SvgData  string `json:"svgData"`
+	}
+	if json.Unmarshal([]byte(result), &dr) == nil && dr.SvgData != "" {
+		emitter.Emit("diagram_generated", map[string]string{
+			"filePath": dr.FilePath,
+			"svgData":  dr.SvgData,
+		})
+	}
 }
