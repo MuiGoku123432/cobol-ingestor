@@ -12,7 +12,6 @@
     { id: 'analysis', label: 'Analysis', icon: '&#9878;' },
     { id: 'ingest', label: 'Ingest', icon: '&#9654;' },
     { id: 'chat', label: 'Chat', icon: '&#9993;' },
-    { id: 'swarm', label: 'Swarm', icon: '&#9881;' },
     { id: 'strategy', label: 'Strategy', icon: '&#9733;' },
     { id: 'graph', label: 'Graph', icon: '&#11052;' },
     { id: 'settings', label: 'Settings', icon: '&#9881;' },

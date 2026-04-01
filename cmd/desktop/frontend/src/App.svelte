@@ -6,7 +6,6 @@
   import AnalysisView from './lib/components/analysis/AnalysisView.svelte';
   import IngestView from './lib/components/ingest/IngestView.svelte';
   import ChatView from './lib/components/chat/ChatView.svelte';
-  import SwarmView from './lib/components/chat/SwarmView.svelte';
   import StrategyView from './lib/components/strategy/StrategyView.svelte';
   import GraphView from './lib/components/graph/GraphView.svelte';
   import SettingsView from './lib/components/settings/SettingsView.svelte';
@@ -28,8 +27,6 @@
       <IngestView />
     {:else if saved.currentView === 'chat'}
       <ChatView />
-    {:else if saved.currentView === 'swarm'}
-      <SwarmView />
     {:else if saved.currentView === 'strategy'}
       <StrategyView />
     {:else if saved.currentView === 'graph'}
