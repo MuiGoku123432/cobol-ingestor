@@ -493,6 +493,7 @@ func runBW(cmd *cobra.Command, args []string) error {
 
 	// Query existing COBOL program IDs for prompt context
 	existingPrograms := queryProgramIDs(ctx, neo4jClient, logger)
+	bwPromptOverhead := computeBWPromptOverhead(existingPrograms)
 
 	// Process files with worker pool
 	const bwPassNumber = 99
@@ -545,7 +546,7 @@ func runBW(cmd *cobra.Command, args []string) error {
 			continue
 		}
 
-		chunks, chunkErr := chunker.ChunkBWFile(f.Path, content, cfg.BW.TokenLimit)
+		chunks, chunkErr := chunker.ChunkBWFile(f.Path, content, cfg.BW.TokenLimit, bwPromptOverhead)
 		if chunkErr != nil {
 			logger.Error("failed to chunk file", zap.String("file", f.Path), zap.Error(chunkErr))
 			continue
@@ -720,6 +721,7 @@ func runBW(cmd *cobra.Command, args []string) error {
 }
 
 // queryProgramIDs fetches all existing COBOL program IDs from Neo4j for BW prompt context.
+// The result is capped to avoid unbounded token growth in the prompt.
 func queryProgramIDs(ctx context.Context, client *n4j.Client, logger *zap.Logger) string {
 	ids, err := client.QueryAllProgramIDs(ctx)
 	if err != nil {
@@ -729,7 +731,35 @@ func queryProgramIDs(ctx context.Context, client *n4j.Client, logger *zap.Logger
 	if len(ids) == 0 {
 		return "(none found)"
 	}
-	return strings.Join(ids, ", ")
+	return capProgramIDs(ids, 4000)
+}
+
+// capProgramIDs joins IDs until the token estimate reaches maxTokens,
+// then appends a summary of remaining IDs to prevent unbounded prompt growth.
+func capProgramIDs(ids []string, maxTokens int) string {
+	var sb strings.Builder
+	tokens := 0
+	for i, id := range ids {
+		entry := id
+		if i > 0 {
+			entry = ", " + id
+		}
+		entryTokens := chunker.EstimateTokens(entry)
+		if tokens+entryTokens > maxTokens {
+			remaining := len(ids) - i
+			fmt.Fprintf(&sb, " ... and %d more programs", remaining)
+			break
+		}
+		sb.WriteString(entry)
+		tokens += entryTokens
+	}
+	return sb.String()
+}
+
+// computeBWPromptOverhead returns the estimated token overhead for BW prompts
+// (system message + template + separator + prefill + margin + existingPrograms).
+func computeBWPromptOverhead(existingPrograms string) int {
+	return 2100 + chunker.EstimateTokens(existingPrograms)
 }
 
 // classifyBWExtension returns a human-readable file type from a path's extension.

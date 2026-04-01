@@ -356,6 +356,14 @@ func (c *Client) AnalyzeBW(ctx context.Context, fileName, fileType, content, exi
 		maxTokens = 16000
 	}
 
+	// Pre-flight token check: reject prompts that would exceed the context window
+	// rather than getting a cryptic 413 from the API.
+	fullUserMsg := userMsg.String() + "\n\n---\n\n" + content
+	estimatedTokens := len(fullUserMsg) * 10 / 32
+	if estimatedTokens > 160000 {
+		return "", fmt.Errorf("BW prompt too large: ~%d tokens (limit ~160000) for file %s", estimatedTokens, fileName)
+	}
+
 	resp, err := c.completeWithRetry(ctx, llm.CompletionRequest{
 		Model:     c.opusModel,
 		MaxTokens: maxTokens,

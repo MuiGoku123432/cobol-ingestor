@@ -34,7 +34,8 @@ type BWChunk struct {
 // Java files are split at class/method boundaries, markdown at heading boundaries,
 // and everything else at blank-line paragraph boundaries.
 // Content is shortened before chunking to reduce token consumption.
-func ChunkBWFile(path string, content []byte, tokenLimit int) ([]BWChunk, error) {
+// An optional promptOverheadTokens parameter overrides the default PromptOverheadTokens.
+func ChunkBWFile(path string, content []byte, tokenLimit int, promptOverheadTokens ...int) ([]BWChunk, error) {
 	ext := strings.ToLower(filepath.Ext(path))
 
 	// 1. Pre-process diagram formats: extract text from binary/compressed content
@@ -62,7 +63,11 @@ func ChunkBWFile(path string, content []byte, tokenLimit int) ([]BWChunk, error)
 	text = collapseBlankLines(text)
 
 	// 4. Reserve space for prompt overhead
-	effectiveLimit := tokenLimit - PromptOverheadTokens
+	overhead := PromptOverheadTokens
+	if len(promptOverheadTokens) > 0 && promptOverheadTokens[0] > 0 {
+		overhead = promptOverheadTokens[0]
+	}
+	effectiveLimit := tokenLimit - overhead
 	if effectiveLimit < 500 {
 		effectiveLimit = 500
 	}
@@ -309,6 +314,38 @@ func groupSectionsWithPreamble(path, ext, fullContent string, sections []string,
 			budget = reducedLimit // subsequent chunks have reduced budget
 		}
 
+		// Hard-split fallback: if a single section exceeds the budget, split by lines
+		if secTokens > budget {
+			if len(current) > 0 {
+				chunkContent := strings.Join(current, "\n")
+				if chunkIdx > 0 {
+					chunkContent = preamble + chunkContent
+				}
+				result = append(result, BWChunk{
+					FileName: path,
+					Content:  chunkContent,
+				})
+				current = nil
+				currentTokens = 0
+				chunkIdx++
+				budget = reducedLimit
+			}
+			subChunks := splitByLines(sec, budget)
+			for _, sub := range subChunks {
+				chunkContent := sub
+				if chunkIdx > 0 {
+					chunkContent = preamble + sub
+				}
+				result = append(result, BWChunk{
+					FileName: path,
+					Content:  chunkContent,
+				})
+				chunkIdx++
+				budget = reducedLimit
+			}
+			continue
+		}
+
 		current = append(current, sec)
 		currentTokens += secTokens
 	}
@@ -405,7 +442,43 @@ func splitBlankLines(content string) []string {
 	return sections
 }
 
+// splitByLines splits content into sub-chunks by lines when a single section
+// exceeds the token limit. This is the last-resort fallback for oversized sections.
+func splitByLines(content string, tokenLimit int) []string {
+	if tokenLimit <= 0 {
+		return []string{content}
+	}
+	lines := strings.Split(content, "\n")
+	var result []string
+	var current []string
+	currentTokens := 0
+
+	for _, line := range lines {
+		lineTokens := EstimateTokens(line)
+		// Account for the newline character that will be added when joining
+		joinOverhead := 0
+		if len(current) > 0 {
+			joinOverhead = 1
+		}
+		if currentTokens+lineTokens+joinOverhead > tokenLimit && len(current) > 0 {
+			result = append(result, strings.Join(current, "\n"))
+			current = nil
+			currentTokens = 0
+		}
+		if len(current) > 0 {
+			currentTokens++ // account for \n separator
+		}
+		current = append(current, line)
+		currentTokens += lineTokens
+	}
+	if len(current) > 0 {
+		result = append(result, strings.Join(current, "\n"))
+	}
+	return result
+}
+
 // groupSections groups sections into chunks that fit within the token limit.
+// Oversized single sections are split by lines as a fallback.
 func groupSections(path string, sections []string, tokenLimit int) []BWChunk {
 	var chunks []BWChunk
 	var current []string
@@ -421,6 +494,27 @@ func groupSections(path string, sections []string, tokenLimit int) []BWChunk {
 			})
 			current = nil
 			currentTokens = 0
+		}
+
+		// Hard-split fallback: if a single section exceeds the limit, split by lines
+		if secTokens > tokenLimit {
+			// Flush any accumulated content first
+			if len(current) > 0 {
+				chunks = append(chunks, BWChunk{
+					FileName: path,
+					Content:  strings.Join(current, "\n"),
+				})
+				current = nil
+				currentTokens = 0
+			}
+			subChunks := splitByLines(sec, tokenLimit)
+			for _, sub := range subChunks {
+				chunks = append(chunks, BWChunk{
+					FileName: path,
+					Content:  sub,
+				})
+			}
+			continue
 		}
 
 		current = append(current, sec)
