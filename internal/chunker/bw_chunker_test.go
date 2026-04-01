@@ -202,6 +202,72 @@ func TestChunkBWFile_PromptOverhead(t *testing.T) {
 	assert.Greater(t, len(chunks), 1, "should be chunked due to prompt overhead reservation")
 }
 
+func TestSplitByLines(t *testing.T) {
+	// Build content: 100 lines, each ~10 tokens (32 chars)
+	var lines []string
+	for i := 0; i < 100; i++ {
+		lines = append(lines, strings.Repeat("a", 32))
+	}
+	content := strings.Join(lines, "\n")
+
+	// Split with a generous limit that accounts for newline overhead
+	chunks := splitByLines(content, 120)
+	require.Greater(t, len(chunks), 1, "should split into multiple chunks")
+
+	for i, chunk := range chunks {
+		tokens := EstimateTokens(chunk)
+		assert.LessOrEqual(t, tokens, 120, "chunk %d has %d tokens, expected <= 120", i, tokens)
+	}
+
+	// Reassembled content should match original
+	reassembled := strings.Join(chunks, "\n")
+	assert.Equal(t, content, reassembled)
+}
+
+func TestGroupSections_OversizedSection(t *testing.T) {
+	// Create a single oversized section with many lines (~50k estimated tokens)
+	var lines []string
+	for i := 0; i < 5000; i++ {
+		lines = append(lines, strings.Repeat("x", 32)) // ~10 tokens per line
+	}
+	bigSection := strings.Join(lines, "\n")
+	sections := []string{bigSection}
+
+	// Token limit = 1000 tokens
+	chunks := groupSections("test.txt", sections, 1000)
+	require.Greater(t, len(chunks), 1, "oversized section should be split into multiple chunks")
+
+	for i, chunk := range chunks {
+		tokens := EstimateTokens(chunk.Content)
+		assert.LessOrEqual(t, tokens, 1000, "chunk %d has %d tokens, expected <= 1000", i, tokens)
+		assert.Equal(t, i, chunk.Index)
+		assert.Equal(t, len(chunks), chunk.Total)
+	}
+}
+
+func TestChunkBWFile_CustomPromptOverhead(t *testing.T) {
+	// Build content that fits within default overhead but not with large overhead.
+	// ~3000 tokens of content (9600 chars)
+	var sb strings.Builder
+	for i := 0; i < 30; i++ {
+		sb.WriteString(strings.Repeat("x", 320))
+		sb.WriteString("\n\n")
+	}
+	content := sb.String()
+
+	// With default overhead (2000), effectiveLimit = 10000 - 2000 = 8000. Content ~3000 → 1 chunk.
+	chunksDefault, err := ChunkBWFile("test.txt", []byte(content), 10000)
+	require.NoError(t, err)
+
+	// With large overhead (8000), effectiveLimit = 10000 - 8000 = 2000. Content ~3000 → multiple chunks.
+	chunksLarge, err := ChunkBWFile("test.txt", []byte(content), 10000, 8000)
+	require.NoError(t, err)
+
+	assert.Greater(t, len(chunksLarge), len(chunksDefault),
+		"large overhead (%d chunks) should produce more chunks than default (%d chunks)",
+		len(chunksLarge), len(chunksDefault))
+}
+
 func TestChunkBWFile_SingleChunkUnchanged(t *testing.T) {
 	input := `package com.example;
 
