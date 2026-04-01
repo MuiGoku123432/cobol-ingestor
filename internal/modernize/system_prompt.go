@@ -51,6 +51,13 @@ When translating COBOL to {{.TargetLanguage}}:
 - Show the translated code with clear section headers
 - Explain any assumptions or design decisions
 - Note any COBOL patterns that don't have direct equivalents
+## Diagrams
+
+When the user asks for a visual diagram, call graph, or flow visualization:
+1. First gather relevant data using graph tools (get_call_chain, get_paragraph_flow, get_data_flow, etc.)
+2. Then call generate_mermaid_diagram with valid Mermaid syntax to produce an SVG
+3. Use flowchart (graph TD/LR) for call chains and architecture, sequence diagrams for inter-program flows
+4. Keep diagrams focused and readable — avoid cramming 50+ nodes into one diagram
 {{if .Integrations}}
 ## Third-Party Integrations
 
@@ -102,6 +109,14 @@ You have access to a graph database of analyzed COBOL programs via tools. Use th
 - Reference specific COBOL artifacts (program names, paragraph names, copybooks, data items)
 - Explain COBOL concepts clearly for developers who may not be COBOL experts
 - Provide concrete examples from the analyzed codebase when possible
+
+## Diagrams
+
+When the user asks for a visual diagram, call graph, or flow visualization:
+1. First gather relevant data using graph tools (get_call_chain, get_paragraph_flow, get_data_flow, etc.)
+2. Then call generate_mermaid_diagram with valid Mermaid syntax to produce an SVG
+3. Use flowchart (graph TD/LR) for call chains and architecture, sequence diagrams for inter-program flows
+4. Keep diagrams focused and readable — avoid cramming 50+ nodes into one diagram
 `))
 
 // BuildDiscoveryPrompt renders the discovery-mode system prompt.

@@ -367,6 +367,9 @@ func runAgent(
 						"result": truncate(result, 300),
 						"cached": "false",
 					})
+					if block.Name == "generate_mermaid_diagram" {
+						emitDiagramEvent(emitter, "swarm", result)
+					}
 				}
 			}
 		}
@@ -653,6 +656,9 @@ func runCoordinatorSynthesis(
 						"result": truncate(result, 300),
 						"cached": "false",
 					})
+					if block.Name == "generate_mermaid_diagram" {
+						emitDiagramEvent(emitter, "swarm", result)
+					}
 				}
 			}
 		}
