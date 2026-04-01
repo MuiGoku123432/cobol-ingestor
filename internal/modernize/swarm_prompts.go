@@ -47,6 +47,13 @@ The coordinator specifically asks: {{.FollowUpQuery}}
 Focus your investigation on this question.
 {{end}}`
 
+const validationBlock = `
+
+## Validation Rules
+- Validate your findings against the Neo4j graph database using the tools available to you. Do not assert facts you have not confirmed with a tool call.
+- If you are uncertain about a finding or a tool returned incomplete/ambiguous data, say so explicitly. Flag gaps with "unverified" or "uncertain" rather than presenting assumptions as facts.
+`
+
 var structureAnalyzerPrompt = template.Must(template.New("structure").Parse(`You are a COBOL Structure Analyzer. Your job is to investigate the structural aspects of COBOL programs relevant to the user's question.
 
 Focus on: divisions, paragraphs, sections, control flow, dead code, and program organization.
@@ -60,7 +67,7 @@ Investigate thoroughly, then write a concise summary of your structural findings
 {{if .Integrations}}
 The modernized system should integrate with: {{.Integrations}}.
 {{end}}
-{{if .TargetLanguage}}The user is interested in translating to {{.TargetLanguage}}{{if .Framework}} using {{.Framework}}{{end}}.{{end}}` + crossPollinationBlock))
+{{if .TargetLanguage}}The user is interested in translating to {{.TargetLanguage}}{{if .Framework}} using {{.Framework}}{{end}}.{{end}}` + validationBlock + crossPollinationBlock))
 
 var dataFlowAnalystPrompt = template.Must(template.New("dataflow").Parse(`You are a COBOL Data Flow Analyst. Your job is to investigate data structures, data movement, and SQL usage relevant to the user's question.
 
@@ -76,7 +83,7 @@ Investigate thoroughly, then write a concise summary of your data flow findings 
 {{if .Integrations}}
 The modernized system should integrate with: {{.Integrations}}.
 {{end}}
-{{if .TargetLanguage}}The user is interested in translating to {{.TargetLanguage}}{{if .Framework}} using {{.Framework}}{{end}}.{{end}}` + crossPollinationBlock))
+{{if .TargetLanguage}}The user is interested in translating to {{.TargetLanguage}}{{if .Framework}} using {{.Framework}}{{end}}.{{end}}` + validationBlock + crossPollinationBlock))
 
 var dependencyMapperPrompt = template.Must(template.New("dependency").Parse(`You are a COBOL Dependency Mapper. Your job is to investigate call chains, copybook usage, CICS transactions, and blast radius relevant to the user's question.
 
@@ -92,7 +99,7 @@ Investigate thoroughly, then write a concise summary of your dependency findings
 {{if .Integrations}}
 The modernized system should integrate with: {{.Integrations}}.
 {{end}}
-{{if .TargetLanguage}}The user is interested in translating to {{.TargetLanguage}}{{if .Framework}} using {{.Framework}}{{end}}.{{end}}` + crossPollinationBlock))
+{{if .TargetLanguage}}The user is interested in translating to {{.TargetLanguage}}{{if .Framework}} using {{.Framework}}{{end}}.{{end}}` + validationBlock + crossPollinationBlock))
 
 var businessLogicExtractorPrompt = template.Must(template.New("business").Parse(`You are a COBOL Business Logic Extractor. Your job is to investigate business rules, domain classification, and modernization readiness relevant to the user's question.
 
@@ -107,11 +114,11 @@ Investigate thoroughly, then write a concise summary of your business logic find
 {{if .Integrations}}
 The modernized system should integrate with: {{.Integrations}}.
 {{end}}
-{{if .TargetLanguage}}The user is interested in translating to {{.TargetLanguage}}{{if .Framework}} using {{.Framework}}{{end}}.{{end}}` + crossPollinationBlock))
+{{if .TargetLanguage}}The user is interested in translating to {{.TargetLanguage}}{{if .Framework}} using {{.Framework}}{{end}}.{{end}}` + validationBlock + crossPollinationBlock))
 
 var coordinatorPrompt = template.Must(template.New("coordinator").Parse(`You are the Coordinator for a multi-agent COBOL analysis team. Four specialist agents have investigated different aspects of the user's question. Your job is to synthesize their findings into one cohesive, well-organized response.
 
-You have access to the same graph database tools the agents used. If you need to verify a claim or fill a gap in the agents' findings, use the tools directly.
+You have access to the same graph database tools the agents used. You must validate agent claims against the Neo4j database using tools before including them in your response. If an agent claim cannot be verified, either omit it or explicitly note the uncertainty. If you are not sure about something, say so — do not present unverified information as fact.
 
 ## Agent Findings
 
@@ -143,6 +150,7 @@ Rules:
 - Valid agent IDs for follow_ups: structure, dataflow, dependency, business
 - Only include follow_ups for agents that need to investigate further
 - Keep follow-up questions under 200 chars
+- If agent findings contain unverified claims or express uncertainty about key aspects of the user's question, set satisfied=false and ask the relevant agent to verify
 - If findings are sufficient, set satisfied=true and omit follow_ups
 
 You MUST call the submit_decision tool with your assessment. Do not respond with plain text.`))
