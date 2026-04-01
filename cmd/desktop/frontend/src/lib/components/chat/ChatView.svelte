@@ -64,6 +64,22 @@
     loadSessions();
   });
 
+  async function deleteSession(id: string) {
+    try {
+      // @ts-ignore
+      await window.go.main.ChatService.DeleteSession(id);
+      if (sessionId === id) {
+        sessionId = '';
+        messages = [];
+        agents = [];
+        coordinatorDecision = null;
+      }
+      await loadSessions();
+    } catch (e) {
+      console.error('Delete session failed:', e);
+    }
+  }
+
   async function loadSession(id: string) {
     try {
       // @ts-ignore
@@ -238,13 +254,19 @@
       + New Chat
     </button>
     {#each sessions as sess}
-      <button
-        class="session-item"
-        class:active={sessionId === sess.id}
-        onclick={() => loadSession(sess.id)}
-      >
-        {sess.title}
-      </button>
+      <div class="session-row" class:active={sessionId === sess.id}>
+        <button
+          class="session-item"
+          onclick={() => loadSession(sess.id)}
+        >
+          {sess.title}
+        </button>
+        <button
+          class="session-delete"
+          onclick={(e) => { e.stopPropagation(); deleteSession(sess.id); }}
+          title="Delete chat"
+        >&times;</button>
+      </div>
     {/each}
   </div>
 
@@ -422,6 +444,28 @@
     margin-bottom: 4px;
   }
 
+  .session-row {
+    display: flex;
+    align-items: center;
+    border-radius: 4px;
+  }
+
+  .session-row:hover .session-delete {
+    opacity: 1;
+  }
+
+  .session-row:hover {
+    background: #161b22;
+  }
+
+  .session-row.active {
+    background: #1f2937;
+  }
+
+  .session-row.active .session-item {
+    color: #58a6ff;
+  }
+
   .session-item {
     background: none;
     border: none;
@@ -430,20 +474,33 @@
     text-align: left;
     cursor: pointer;
     font-size: 12px;
-    border-radius: 4px;
+    flex: 1;
     white-space: nowrap;
     overflow: hidden;
     text-overflow: ellipsis;
+    min-width: 0;
   }
 
-  .session-item:hover {
-    background: #161b22;
+  .session-row:hover .session-item {
     color: #e1e4e8;
   }
 
-  .session-item.active {
-    background: #1f2937;
-    color: #58a6ff;
+  .session-delete {
+    background: none;
+    border: none;
+    color: #8b949e;
+    cursor: pointer;
+    font-size: 14px;
+    padding: 2px 6px;
+    opacity: 0;
+    flex-shrink: 0;
+    border-radius: 4px;
+    line-height: 1;
+  }
+
+  .session-delete:hover {
+    color: #f85149;
+    background: #21262d;
   }
 
   .chat-main {
