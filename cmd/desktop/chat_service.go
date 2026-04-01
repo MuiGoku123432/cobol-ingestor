@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"fmt"
+	"path/filepath"
 	"sync"
 
 	"cobol-ingestor/internal/modernize"
@@ -175,7 +176,7 @@ func (s *ChatService) ensureMCP() error {
 
 // SendChat sends a chat message and streams responses via Wails events.
 // Events: chat:text, chat:tool_start, chat:tool_result, chat:done, chat:error
-func (s *ChatService) SendChat(sessionID string, messages []ChatMessage, discoveryMode bool, targetLang, framework, integrations string) error {
+func (s *ChatService) SendChat(sessionID string, messages []ChatMessage, discoveryMode, generateDiagram bool, targetLang, framework, integrations string) error {
 	if !s.ps.IsReady() {
 		return fmt.Errorf("LLM provider not ready (configure in Settings)")
 	}
@@ -196,17 +197,19 @@ func (s *ChatService) SendChat(sessionID string, messages []ChatMessage, discove
 	go func() {
 		defer cancel()
 		err := modernize.RunChat(ctx, modernize.ChatParams{
-			Provider:      s.ps,
-			MCPClient:     s.mcpClient,
-			SessionStore:  s.sessionStore,
-			SessionID:     sessionID,
-			Messages:      toModernizeMessages(messages),
-			DiscoveryMode: discoveryMode,
-			TargetLang:    targetLang,
-			Framework:     framework,
-			Integrations:  integrations,
-			Emitter:       emitter,
-			Logger:        s.app.logger,
+			Provider:        s.ps,
+			MCPClient:       s.mcpClient,
+			SessionStore:    s.sessionStore,
+			SessionID:       sessionID,
+			Messages:        toModernizeMessages(messages),
+			DiscoveryMode:   discoveryMode,
+			GenerateDiagram: generateDiagram,
+			TargetLang:      targetLang,
+			Framework:       framework,
+			Integrations:    integrations,
+			Emitter:         emitter,
+			Logger:          s.app.logger,
+			DiagramOutputDir: filepath.Join(s.app.cfg.DataDir, "diagrams"),
 		})
 		if err != nil {
 			emitter.Emit("error", map[string]string{"error": err.Error()})
@@ -218,7 +221,7 @@ func (s *ChatService) SendChat(sessionID string, messages []ChatMessage, discove
 
 // SendSwarm sends a swarm query and streams responses via Wails events.
 // Events: swarm:agent_start, swarm:agent_progress, swarm:agent_complete, etc.
-func (s *ChatService) SendSwarm(sessionID string, messages []ChatMessage, discoveryMode, multiRound bool, targetLang, framework, integrations string) error {
+func (s *ChatService) SendSwarm(sessionID string, messages []ChatMessage, discoveryMode, multiRound, generateDiagram bool, targetLang, framework, integrations string) error {
 	if !s.ps.IsReady() {
 		return fmt.Errorf("LLM provider not ready (configure in Settings)")
 	}
@@ -239,18 +242,20 @@ func (s *ChatService) SendSwarm(sessionID string, messages []ChatMessage, discov
 	go func() {
 		defer cancel()
 		err := modernize.RunSwarm(ctx, modernize.SwarmParams{
-			Provider:      s.ps,
-			MCPClient:     s.mcpClient,
-			SessionStore:  s.sessionStore,
-			SessionID:     sessionID,
-			Messages:      toModernizeMessages(messages),
-			DiscoveryMode: discoveryMode,
-			MultiRound:    multiRound,
-			TargetLang:    targetLang,
-			Framework:     framework,
-			Integrations:  integrations,
-			Emitter:       emitter,
-			Logger:        s.app.logger,
+			Provider:         s.ps,
+			MCPClient:        s.mcpClient,
+			SessionStore:     s.sessionStore,
+			SessionID:        sessionID,
+			Messages:         toModernizeMessages(messages),
+			DiscoveryMode:    discoveryMode,
+			MultiRound:       multiRound,
+			GenerateDiagram:  generateDiagram,
+			TargetLang:       targetLang,
+			Framework:        framework,
+			Integrations:     integrations,
+			Emitter:          emitter,
+			Logger:           s.app.logger,
+			DiagramOutputDir: filepath.Join(s.app.cfg.DataDir, "diagrams"),
 		})
 		if err != nil {
 			emitter.Emit("error", map[string]string{"error": err.Error()})

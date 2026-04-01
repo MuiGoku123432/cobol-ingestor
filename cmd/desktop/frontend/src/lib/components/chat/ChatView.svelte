@@ -29,6 +29,7 @@
     discoveryMode: true,
     swarmMode: false,
     multiRound: false,
+    generateDiagram: false,
     targetLang: 'Java',
     framework: 'Spring Boot',
     integrations: '',
@@ -130,12 +131,12 @@
       if (saved.swarmMode) {
         // @ts-ignore
         await window.go.main.ChatService.SendSwarm(
-          sessionId, allMsgs, saved.discoveryMode, saved.multiRound, saved.targetLang, saved.framework, saved.integrations
+          sessionId, allMsgs, saved.discoveryMode, saved.multiRound, saved.generateDiagram, saved.targetLang, saved.framework, saved.integrations
         );
       } else {
         // @ts-ignore
         await window.go.main.ChatService.SendChat(
-          sessionId, allMsgs, saved.discoveryMode, saved.targetLang, saved.framework, saved.integrations
+          sessionId, allMsgs, saved.discoveryMode, saved.generateDiagram, saved.targetLang, saved.framework, saved.integrations
         );
       }
     } catch (e: any) {
@@ -313,6 +314,10 @@
           <span>Multi-Round</span>
         </label>
       {/if}
+      <label class="toggle">
+        <input type="checkbox" bind:checked={saved.generateDiagram} />
+        <span>Diagram</span>
+      </label>
       {#if !saved.discoveryMode}
         <select bind:value={saved.targetLang}>
           {#each languages as lang}

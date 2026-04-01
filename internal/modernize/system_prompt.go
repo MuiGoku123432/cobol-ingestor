@@ -51,14 +51,23 @@ When translating COBOL to {{.TargetLanguage}}:
 - Show the translated code with clear section headers
 - Explain any assumptions or design decisions
 - Note any COBOL patterns that don't have direct equivalents
-## Diagrams
+{{if .GenerateDiagram}}
+## Diagram Output
 
-When the user asks for a visual diagram, call graph, or flow visualization:
-1. First gather relevant data using graph tools (get_call_chain, get_paragraph_flow, get_data_flow, etc.)
-2. Then call generate_mermaid_diagram with valid Mermaid syntax to produce an SVG
-3. Use flowchart (graph TD/LR) for call chains and architecture, sequence diagrams for inter-program flows
-4. Keep diagrams focused and readable — avoid cramming 50+ nodes into one diagram
-{{if .Integrations}}
+You MUST include a Mermaid diagram in your response using a fenced code block:
+
+` + "```" + `mermaid
+graph TD
+  A --> B
+` + "```" + `
+
+Guidelines:
+- Use flowchart (graph TD/LR) for call chains, architecture, and program relationships
+- Use sequence diagrams for inter-program communication flows
+- Use ER diagrams for data structure relationships
+- Keep diagrams focused — max ~30 nodes for readability
+- The diagram will be automatically rendered to SVG
+{{end}}{{if .Integrations}}
 ## Third-Party Integrations
 
 The modernized system should integrate with: {{.Integrations}}.
@@ -66,12 +75,13 @@ When translating, map relevant COBOL I/O operations, batch processes, or data fl
 {{end}}`))
 
 // BuildSystemPrompt renders the system prompt with the given target language, framework, and integrations.
-func BuildSystemPrompt(targetLanguage, framework, integrations string) (string, error) {
+func BuildSystemPrompt(targetLanguage, framework, integrations string, generateDiagram bool) (string, error) {
 	var buf bytes.Buffer
-	err := systemPromptTmpl.Execute(&buf, map[string]string{
-		"TargetLanguage": targetLanguage,
-		"Framework":      framework,
-		"Integrations":   integrations,
+	err := systemPromptTmpl.Execute(&buf, map[string]any{
+		"TargetLanguage":  targetLanguage,
+		"Framework":       framework,
+		"Integrations":    integrations,
+		"GenerateDiagram": generateDiagram,
 	})
 	if err != nil {
 		return "", err
@@ -109,20 +119,30 @@ You have access to a graph database of analyzed COBOL programs via tools. Use th
 - Reference specific COBOL artifacts (program names, paragraph names, copybooks, data items)
 - Explain COBOL concepts clearly for developers who may not be COBOL experts
 - Provide concrete examples from the analyzed codebase when possible
+{{if .GenerateDiagram}}
+## Diagram Output
 
-## Diagrams
+You MUST include a Mermaid diagram in your response using a fenced code block:
 
-When the user asks for a visual diagram, call graph, or flow visualization:
-1. First gather relevant data using graph tools (get_call_chain, get_paragraph_flow, get_data_flow, etc.)
-2. Then call generate_mermaid_diagram with valid Mermaid syntax to produce an SVG
-3. Use flowchart (graph TD/LR) for call chains and architecture, sequence diagrams for inter-program flows
-4. Keep diagrams focused and readable — avoid cramming 50+ nodes into one diagram
-`))
+` + "```" + `mermaid
+graph TD
+  A --> B
+` + "```" + `
+
+Guidelines:
+- Use flowchart (graph TD/LR) for call chains, architecture, and program relationships
+- Use sequence diagrams for inter-program communication flows
+- Use ER diagrams for data structure relationships
+- Keep diagrams focused — max ~30 nodes for readability
+- The diagram will be automatically rendered to SVG
+{{end}}`))
 
 // BuildDiscoveryPrompt renders the discovery-mode system prompt.
-func BuildDiscoveryPrompt() (string, error) {
+func BuildDiscoveryPrompt(generateDiagram bool) (string, error) {
 	var buf bytes.Buffer
-	err := discoveryPromptTmpl.Execute(&buf, nil)
+	err := discoveryPromptTmpl.Execute(&buf, map[string]any{
+		"GenerateDiagram": generateDiagram,
+	})
 	if err != nil {
 		return "", err
 	}
