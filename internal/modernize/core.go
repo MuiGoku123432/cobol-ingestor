@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"sync"
 
 	"cobol-ingestor/internal/llm"
 
@@ -183,25 +184,184 @@ type SwarmParams struct {
 	Logger        *zap.Logger
 }
 
-// RunSwarm executes the swarm agent orchestration, emitting events via the Emitter.
-// For now this delegates to the chat path; the full swarm extraction is a follow-up.
-// TODO: Extract full swarm logic (parallel agents, coordinator, multi-round) from SwarmHandler.
+// RunSwarm executes the full swarm agent orchestration, emitting events via the Emitter.
+// It runs 4 specialist agents in parallel, coordinates multi-round follow-ups,
+// and produces a final synthesis — all transport-agnostic via EventEmitter.
 func RunSwarm(ctx context.Context, p SwarmParams) error {
-	// Reuse the chat path as a simplified swarm — single-agent mode.
-	// The full swarm refactoring with parallel agents will follow.
-	return RunChat(ctx, ChatParams{
-		Provider:      p.Provider,
-		MCPClient:     p.MCPClient,
-		SessionStore:  p.SessionStore,
-		SessionID:     p.SessionID,
-		Messages:      p.Messages,
-		DiscoveryMode: p.DiscoveryMode,
-		TargetLang:    p.TargetLang,
-		Framework:     p.Framework,
-		Integrations:  p.Integrations,
-		Emitter:       p.Emitter,
-		Logger:        p.Logger,
-	})
+	provider := p.Provider.Get()
+	if provider == nil {
+		return fmt.Errorf("not authenticated")
+	}
+
+	model := p.Provider.GetModel()
+	maxTokens := p.Provider.GetMaxTokens()
+	if maxTokens == 0 {
+		maxTokens = 16384
+	}
+
+	// Extract the user's latest question
+	userQuery := ""
+	for i := len(p.Messages) - 1; i >= 0; i-- {
+		if p.Messages[i].Role == "user" {
+			userQuery = p.Messages[i].Content
+			break
+		}
+	}
+	if userQuery == "" {
+		return fmt.Errorf("no user message found")
+	}
+
+	targetLanguage := p.TargetLang
+	framework := p.Framework
+	integrations := p.Integrations
+	if p.DiscoveryMode {
+		targetLanguage = ""
+		framework = ""
+		integrations = ""
+	}
+
+	promptData := swarmPromptData{
+		TargetLanguage: targetLanguage,
+		Framework:      framework,
+		Integrations:   integrations,
+	}
+
+	maxRounds := 1
+	if p.MultiRound {
+		maxRounds = 3
+	}
+
+	tools := GetToolDefinitions()
+	cache := newToolCache()
+	var allRounds []roundSummary
+	var followUpQueries map[string]string
+
+	for round := 1; round <= maxRounds; round++ {
+		if ctx.Err() != nil {
+			return ctx.Err()
+		}
+
+		// Emit round_start (multi-round only)
+		if maxRounds > 1 {
+			p.Emitter.Emit("round_start", map[string]any{
+				"round":     round,
+				"maxRounds": maxRounds,
+			})
+		}
+
+		// Determine which agents to run
+		agentsToRun, agentFollowUps := selectAgents(agentRoles, followUpQueries, round)
+
+		// Run agents in parallel
+		results := make([]agentResult, len(agentsToRun))
+		var wg sync.WaitGroup
+
+		for i, role := range agentsToRun {
+			wg.Add(1)
+			go func(idx int, role agentRole) {
+				defer wg.Done()
+
+				// Build per-agent prompt data with round context
+				agentPromptData := promptData
+				agentPromptData.Round = round
+				if round > 1 {
+					agentPromptData.PriorRounds = truncateRoundSummaries(allRounds, maxContextCharsPrior)
+				}
+				if q, ok := agentFollowUps[role.ID]; ok {
+					agentPromptData.FollowUpQuery = q
+				}
+
+				// Use round-aware agent ID for events
+				sseID := role.ID
+				if maxRounds > 1 {
+					sseID = fmt.Sprintf("%s-round-%d", role.ID, round)
+				}
+				sseRole := agentRole{ID: sseID, Name: role.Name, Prompt: role.Prompt}
+
+				summary, err := runAgent(ctx, sseRole, role.Prompt, userQuery, agentPromptData, provider, p.MCPClient, cache, tools, model, maxTokens, p.Emitter, round, maxRounds > 1)
+				if err != nil {
+					p.Emitter.Emit("agent_complete", map[string]string{
+						"id":      sseID,
+						"summary": fmt.Sprintf("Error: %v", err),
+					})
+					results[idx] = agentResult{Name: role.Name, Summary: fmt.Sprintf("Error: %v", err)}
+					return
+				}
+				results[idx] = agentResult{Name: role.Name, Summary: summary}
+			}(i, role)
+		}
+
+		wg.Wait()
+
+		if ctx.Err() != nil {
+			return ctx.Err()
+		}
+
+		allRounds = append(allRounds, roundSummary{Round: round, Results: results})
+
+		// Emit round_complete (multi-round only)
+		if maxRounds > 1 {
+			p.Emitter.Emit("round_complete", map[string]any{"round": round})
+		}
+
+		// If this is the last allowed round, skip decision
+		if round == maxRounds {
+			break
+		}
+
+		// Coordinator decision: do we need more info?
+		latestResults := allRounds[len(allRounds)-1].Results
+		decision, err := runCoordinatorDecision(ctx, latestResults, userQuery, promptData, provider, model, p.Emitter, round)
+		if err != nil || decision.Satisfied {
+			break
+		}
+		followUpQueries = decision.FollowUps
+	}
+
+	if ctx.Err() != nil {
+		return ctx.Err()
+	}
+
+	// Flatten all round results for final synthesis
+	finalResults := flattenRounds(allRounds, maxContextCharsLatest, maxContextCharsPrior)
+
+	// Final synthesis with tool access
+	p.Emitter.Emit("synthesis_start", map[string]string{})
+
+	promptData.UserQuery = userQuery
+	promptData.AgentResults = finalResults
+
+	coordText, err := runCoordinatorSynthesis(ctx, promptData, provider, p.MCPClient, cache, tools, model, maxTokens, p.Emitter)
+	if err != nil {
+		p.Emitter.Emit("error", map[string]string{"error": fmt.Sprintf("Coordinator error: %v", err)})
+		return nil
+	}
+
+	// Persist session
+	if p.SessionStore != nil {
+		allMessages := make([]chatInputMessage, len(p.Messages))
+		copy(allMessages, p.Messages)
+		if coordText != "" {
+			allMessages = append(allMessages, chatInputMessage{Role: "assistant", Content: coordText})
+		}
+
+		if p.SessionID == "" {
+			title := userQuery
+			if len(title) > 50 {
+				title = title[:50]
+			}
+			session, err := p.SessionStore.Create(title)
+			if err == nil {
+				_ = p.SessionStore.Update(session.ID, allMessages, "")
+				p.Emitter.Emit("session_created", map[string]string{"id": session.ID, "title": session.Title})
+			}
+		} else {
+			_ = p.SessionStore.Update(p.SessionID, allMessages, "")
+		}
+	}
+
+	p.Emitter.Emit("done", map[string]string{})
+	return nil
 }
 
 // ListModels returns available models from the provider.
