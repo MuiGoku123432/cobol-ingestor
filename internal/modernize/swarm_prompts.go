@@ -136,9 +136,18 @@ Synthesize the above findings into a single, comprehensive response that:
 
 Do not mention the individual agents or that this was a multi-agent analysis. Present the information as a unified analysis.`))
 
-var coordinatorDecisionPrompt = template.Must(template.New("coordinator_decision").Parse(`Review these investigation findings and determine if they sufficiently answer the user's question.
+var coordinatorDecisionSystemPrompt = template.Must(template.New("coordinator_decision_system").Parse(`You are a coordinator evaluating investigation findings. You must respond with JSON only — no prose, no markdown fences, no explanation outside the JSON.
 
-## Findings
+Format:
+{"satisfied": true/false, "reasoning": "brief explanation", "follow_ups": {"agentId": "targeted question"}}
+
+Rules:
+- Valid agent IDs: structure, dataflow, dependency, business
+- Only include follow_ups for agents that need to investigate further
+- Keep follow-up questions under 200 chars
+- If findings are sufficient, set satisfied=true and omit follow_ups`))
+
+var coordinatorDecisionUserPrompt = template.Must(template.New("coordinator_decision_user").Parse(`## Findings
 {{range .AgentResults}}### {{.Name}}
 {{.Summary}}
 {{end}}
@@ -146,12 +155,7 @@ var coordinatorDecisionPrompt = template.Must(template.New("coordinator_decision
 ## User Question
 {{.UserQuery}}
 
-Respond with JSON only:
-{"satisfied": true/false, "reasoning": "brief explanation", "follow_ups": {"agentId": "question"}}
-
-Valid agent IDs: structure, dataflow, dependency, business.
-Only include follow_ups for agents that need to investigate further. Keep questions under 200 chars.
-If findings are sufficient, set satisfied=true and omit follow_ups.`))
+Evaluate whether these findings sufficiently answer the user's question. Respond with JSON only.`))
 
 func buildSwarmPrompt(tmpl *template.Template, data swarmPromptData) (string, error) {
 	var buf bytes.Buffer

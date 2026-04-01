@@ -368,7 +368,12 @@ func runCoordinatorDecision(
 		AgentResults:   results,
 	}
 
-	systemPrompt, err := buildSwarmPrompt(coordinatorDecisionPrompt, decisionPromptData)
+	systemPrompt, err := buildSwarmPrompt(coordinatorDecisionSystemPrompt, decisionPromptData)
+	if err != nil {
+		return &coordinatorDecision{Satisfied: true}, err
+	}
+
+	userContent, err := buildSwarmPrompt(coordinatorDecisionUserPrompt, decisionPromptData)
 	if err != nil {
 		return &coordinatorDecision{Satisfied: true}, err
 	}
@@ -376,7 +381,7 @@ func runCoordinatorDecision(
 	messages := []llm.ChatMessage{
 		{
 			Role:    llm.RoleUser,
-			Content: []llm.ContentBlock{llm.NewTextContent("Evaluate the findings and respond with JSON.")},
+			Content: []llm.ContentBlock{llm.NewTextContent(userContent)},
 		},
 	}
 
