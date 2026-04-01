@@ -83,6 +83,42 @@ func truncateForContext(s string, maxChars int) string {
 	return s[:maxChars] + "..."
 }
 
+// summarizeForCoordinator extracts key findings from agent output to reduce noise.
+// It pulls structured lines (bullets, headers, numbered items) and COBOL artifact names,
+// dropping verbose prose paragraphs. Falls back to truncation if extraction yields nothing.
+func summarizeForCoordinator(s string, maxChars int) string {
+	if len(s) <= maxChars {
+		return s
+	}
+
+	var keyLines []string
+	for _, line := range strings.Split(s, "\n") {
+		trimmed := strings.TrimSpace(line)
+		if trimmed == "" {
+			continue
+		}
+		// Keep structured lines: bullets, numbered items, headers, lines with COBOL artifacts
+		if strings.HasPrefix(trimmed, "-") ||
+			strings.HasPrefix(trimmed, "*") ||
+			strings.HasPrefix(trimmed, "#") ||
+			(len(trimmed) > 0 && trimmed[0] >= '1' && trimmed[0] <= '9' && strings.Contains(trimmed[:min(3, len(trimmed))], ".")) ||
+			strings.Contains(trimmed, "PROGRAM-ID") ||
+			strings.Contains(trimmed, "COPY ") ||
+			strings.Contains(trimmed, "CALL ") ||
+			strings.Contains(trimmed, "PERFORM ") ||
+			strings.ContainsAny(trimmed, "→←") {
+			keyLines = append(keyLines, trimmed)
+		}
+	}
+
+	if len(keyLines) == 0 {
+		return truncateForContext(s, maxChars)
+	}
+
+	result := strings.Join(keyLines, "\n")
+	return truncateForContext(result, maxChars)
+}
+
 // coordinatorDecision represents the coordinator's assessment between rounds.
 type coordinatorDecision struct {
 	Satisfied bool              `json:"satisfied"`
@@ -173,6 +209,7 @@ func truncateRoundSummaries(rounds []roundSummary, maxChars int) []roundSummary 
 
 // flattenRounds creates a flat list of agent results for the coordinator.
 // The latest round gets higher char limits; prior rounds get lower limits.
+// Uses summarizeForCoordinator to extract key findings rather than naive truncation.
 func flattenRounds(rounds []roundSummary, latestMax, priorMax int) []agentResult {
 	if len(rounds) == 0 {
 		return nil
@@ -183,7 +220,7 @@ func flattenRounds(rounds []roundSummary, latestMax, priorMax int) []agentResult
 		for i, ar := range rounds[0].Results {
 			results[i] = agentResult{
 				Name:    ar.Name,
-				Summary: truncateForContext(ar.Summary, latestMax),
+				Summary: summarizeForCoordinator(ar.Summary, latestMax),
 			}
 		}
 		return results
@@ -198,7 +235,7 @@ func flattenRounds(rounds []roundSummary, latestMax, priorMax int) []agentResult
 		for _, ar := range r.Results {
 			all = append(all, agentResult{
 				Name:    fmt.Sprintf("%s (Round %d)", ar.Name, r.Round),
-				Summary: truncateForContext(ar.Summary, maxChars),
+				Summary: summarizeForCoordinator(ar.Summary, maxChars),
 			})
 		}
 	}
@@ -348,7 +385,35 @@ func runAgent(
 	return fullText, nil
 }
 
+// coordinatorDecisionTool is the tool definition used to enforce structured coordinator decisions.
+var coordinatorDecisionTool = llm.ToolDefinition{
+	Name:        "submit_decision",
+	Description: "Submit your coordinator decision about whether the agent findings sufficiently answer the user's question.",
+	InputSchema: map[string]any{
+		"type": "object",
+		"properties": map[string]any{
+			"satisfied": map[string]any{
+				"type":        "boolean",
+				"description": "Whether the findings sufficiently answer the user's question",
+			},
+			"reasoning": map[string]any{
+				"type":        "string",
+				"description": "Brief explanation of your decision",
+			},
+			"follow_ups": map[string]any{
+				"type":        "object",
+				"description": "Map of agentId to follow-up question. Valid IDs: structure, dataflow, dependency, business",
+				"additionalProperties": map[string]any{"type": "string"},
+			},
+		},
+		"required": []any{"satisfied", "reasoning"},
+	},
+}
+
 // runCoordinatorDecision asks the coordinator if the current findings are sufficient.
+// Uses a submit_decision tool call to enforce structured JSON output, with text-based
+// JSON parsing as a fallback. Defaults to Satisfied: false on parse failure so that
+// a retry round is triggered rather than silently ending investigation.
 func runCoordinatorDecision(
 	ctx context.Context,
 	results []agentResult,
@@ -370,12 +435,12 @@ func runCoordinatorDecision(
 
 	systemPrompt, err := buildSwarmPrompt(coordinatorDecisionSystemPrompt, decisionPromptData)
 	if err != nil {
-		return &coordinatorDecision{Satisfied: true}, err
+		return &coordinatorDecision{Satisfied: false, Reasoning: "failed to build system prompt"}, err
 	}
 
 	userContent, err := buildSwarmPrompt(coordinatorDecisionUserPrompt, decisionPromptData)
 	if err != nil {
-		return &coordinatorDecision{Satisfied: true}, err
+		return &coordinatorDecision{Satisfied: false, Reasoning: "failed to build user prompt"}, err
 	}
 
 	messages := []llm.ChatMessage{
@@ -389,28 +454,51 @@ func runCoordinatorDecision(
 		Model:       model,
 		System:      systemPrompt,
 		Messages:    messages,
+		Tools:       []llm.ToolDefinition{coordinatorDecisionTool},
 		MaxTokens:   1024,
 		Temperature: 0.2,
 	}
 
 	resp, err := provider.CompleteChat(ctx, chatReq)
 	if err != nil {
-		return &coordinatorDecision{Satisfied: true}, err
+		return &coordinatorDecision{Satisfied: false, Reasoning: "LLM request failed"}, err
 	}
 
-	text := resp.TextContent()
 	var decision coordinatorDecision
-	if err := json.Unmarshal([]byte(text), &decision); err != nil {
-		// Try to extract JSON from markdown code blocks
-		decision = coordinatorDecision{Satisfied: true, Reasoning: "Could not parse decision response"}
-		if extracted := extractJSON(text); extracted != "" {
-			_ = json.Unmarshal([]byte(extracted), &decision)
+	parsed := false
+
+	// Primary path: extract decision from tool call
+	if resp.StopReason == "tool_use" {
+		if blocks := resp.ToolUseBlocks(); len(blocks) > 0 {
+			if err := json.Unmarshal(blocks[0].Input, &decision); err == nil {
+				parsed = true
+			} else if logger != nil {
+				logger.Warn("coordinator tool call JSON parse failed",
+					zap.String("raw_input", string(blocks[0].Input)),
+					zap.Error(err),
+				)
+			}
 		}
-		if decision.Reasoning == "Could not parse decision response" && logger != nil {
-			logger.Warn("coordinator decision parse failed",
-				zap.String("raw_response", truncate(text, 500)),
-				zap.Error(err),
-			)
+	}
+
+	// Fallback: try text-based JSON parsing (existing logic)
+	if !parsed {
+		text := resp.TextContent()
+		if err := json.Unmarshal([]byte(text), &decision); err != nil {
+			decision = coordinatorDecision{Satisfied: false, Reasoning: "Could not parse decision response"}
+			if extracted := extractJSON(text); extracted != "" {
+				if jsonErr := json.Unmarshal([]byte(extracted), &decision); jsonErr != nil {
+					// Extraction found JSON but it didn't match our schema — keep default
+					decision = coordinatorDecision{Satisfied: false, Reasoning: "Could not parse decision response"}
+				}
+			}
+			if decision.Reasoning == "Could not parse decision response" && logger != nil {
+				logger.Warn("coordinator decision parse failed",
+					zap.String("raw_response", truncate(text, 500)),
+					zap.String("stop_reason", resp.StopReason),
+					zap.Error(err),
+				)
+			}
 		}
 	}
 
