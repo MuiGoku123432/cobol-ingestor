@@ -26,6 +26,8 @@
     .agent-card-header { display: flex; align-items: center; gap: 0.5rem; cursor: pointer; }
     .agent-card-detail { max-height: 0; overflow: hidden; transition: max-height 0.3s ease; }
     .agent-card-detail.expanded { max-height: 500px; overflow-y: auto; }
+    .copy-btn { position: absolute; top: 0.5rem; right: -2rem; opacity: 0; transition: opacity 0.15s; }
+    .group:hover .copy-btn { opacity: 1; }
   </style>
 </head>
 <body class="h-full bg-gray-950 text-gray-100 flex">
