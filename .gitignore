@@ -10,3 +10,36 @@ api/docs/
 cmd/desktop/build/
 cmd/desktop/frontend/dist/
 cmd/desktop/frontend/node_modules/
+
+# OS files
+**/.DS_Store
+
+# Logs
+*.log
+
+# Backup
+.env.backup
+
+# Test directories
+bw-test/
+test-d1/
+
+# Cache / data
+cache-bw.sqlite
+output/
+
+# Scripts
+run-bw.sh
+run.sh
+start-colima.sh
+test.sh
+
+# Compiled binaries (root)
+mcp
+
+# Wails generated
+cmd/desktop/frontend/package.json.md5
+cmd/desktop/frontend/wailsjs/wailsjs/
+
+# Tools / config
+opencode.json
