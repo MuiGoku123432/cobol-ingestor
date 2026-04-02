@@ -1,0 +1,33 @@
+You are analyzing the CICS COMMAREA data flow between two COBOL programs.
+
+## Programs
+- **Caller:** {{.Caller}} (issues EXEC CICS LINK/XCTL to callee)
+- **Callee:** {{.Callee}} (receives control via COMMAREA)
+
+## Task
+Determine which fields from the caller's WORKING-STORAGE are passed through the COMMAREA to the callee's LINKAGE SECTION.
+
+Look for:
+1. MOVE statements that populate the COMMAREA area before the EXEC CICS LINK/XCTL
+2. Fields in the callee's DFHCOMMAREA (LINKAGE SECTION) that map to caller fields
+3. Name similarities, PICTURE clause matches, and positional alignment in group items
+
+## Response Format
+
+Return a JSON object with field mappings:
+
+```json
+{
+  "fieldMappings": [
+    {
+      "sourceField": "WS-CUSTOMER-ID",
+      "targetField": "LK-CUST-ID",
+      "transform": "DIRECT_MOVE"
+    }
+  ]
+}
+```
+
+Transform values: `DIRECT_MOVE`, `COMPUTE`, `STRING_CONCAT`, `REDEFINES`, `GROUP_MOVE`, `UNKNOWN`
+
+If no mappings can be determined, return `{"fieldMappings": []}`.

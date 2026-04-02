@@ -75,6 +75,340 @@ func (w *BatchWriter) LinkDDCardsToFiles(ctx context.Context) error {
 	return nil
 }
 
+// DetectCICSFlows creates DATA_FLOWS_TO relationships for programs linked via CICS LINK/XCTL.
+// Parses ExternalInterface nodes of type CICS_LINK/CICS_XCTL to extract target program names
+// from the details field (e.g., "LINK PROGRAM('CUSTRPT')").
+func (w *BatchWriter) DetectCICSFlows(ctx context.Context) error {
+	session := w.client.NewSession(ctx)
+	defer session.Close(ctx)
+
+	res, err := session.ExecuteWrite(ctx, func(tx neo4j.ManagedTransaction) (any, error) {
+		result, err := tx.Run(ctx,
+			"MATCH (e:ExternalInterface) "+
+				"WHERE e.type IN ['CICS_LINK', 'CICS_XCTL'] "+
+				"AND e.details CONTAINS \"'\" "+
+				"WITH e, e.programId AS callerId, "+
+				"  substring(e.details, "+
+				"    apoc.text.indexOf(e.details, \"'\") + 1, "+
+				"    apoc.text.indexOf(e.details, \"'\", apoc.text.indexOf(e.details, \"'\") + 1) "+
+				"    - apoc.text.indexOf(e.details, \"'\") - 1 "+
+				"  ) AS targetName "+
+				"WHERE targetName <> '' "+
+				"MATCH (caller:Program {programId: callerId}) "+
+				"MATCH (callee:Program {programId: targetName}) "+
+				"WHERE caller <> callee "+
+				"MERGE (caller)-[r:DATA_FLOWS_TO]->(callee) "+
+				"SET r.channel = 'CICS_COMMAREA', r.sharedResource = 'COMMAREA' "+
+				"RETURN count(r) AS cnt",
+			nil)
+		if err != nil {
+			return int64(0), err
+		}
+		if result.Next(ctx) {
+			if val, ok := result.Record().Get("cnt"); ok {
+				if n, ok := val.(int64); ok {
+					return n, nil
+				}
+			}
+		}
+		return int64(0), nil
+	})
+	if err != nil {
+		return fmt.Errorf("detecting CICS flows: %w", err)
+	}
+
+	count := int(res.(int64))
+	if count > 0 {
+		w.logger.Info("detected CICS LINK/XCTL data flows", zap.Int("flows", count))
+	}
+	return nil
+}
+
+// DetectCICSQueueFlows creates DATA_FLOWS_TO relationships for programs sharing CICS TS/TD queues.
+// Matches ExternalInterface nodes where one program writes (WRITEQ) and another reads (READQ)
+// the same queue name.
+func (w *BatchWriter) DetectCICSQueueFlows(ctx context.Context) error {
+	session := w.client.NewSession(ctx)
+	defer session.Close(ctx)
+
+	res, err := session.ExecuteWrite(ctx, func(tx neo4j.ManagedTransaction) (any, error) {
+		result, err := tx.Run(ctx,
+			// Extract queue name and operation from CICS TS/TD interfaces
+			"MATCH (e:ExternalInterface) "+
+				"WHERE e.type IN ['CICS_TS', 'CICS_TD'] "+
+				"AND e.details CONTAINS \"'\" "+
+				"WITH e, e.programId AS pid, e.type AS qType, "+
+				"  substring(e.details, "+
+				"    apoc.text.indexOf(e.details, \"'\") + 1, "+
+				"    apoc.text.indexOf(e.details, \"'\", apoc.text.indexOf(e.details, \"'\") + 1) "+
+				"    - apoc.text.indexOf(e.details, \"'\") - 1 "+
+				"  ) AS queueName, "+
+				"  CASE "+
+				"    WHEN toUpper(e.details) CONTAINS 'WRITEQ' THEN 'WRITE' "+
+				"    WHEN toUpper(e.details) CONTAINS 'READQ' THEN 'READ' "+
+				"    WHEN toUpper(e.details) CONTAINS 'DELETEQ' THEN 'WRITE' "+
+				"    ELSE null "+
+				"  END AS operation "+
+				"WHERE queueName <> '' AND operation IS NOT NULL "+
+				// Match writers to readers on same queue
+				"WITH qType, queueName, "+
+				"  collect(CASE WHEN operation = 'WRITE' THEN pid END) AS writers, "+
+				"  collect(CASE WHEN operation = 'READ' THEN pid END) AS readers "+
+				"UNWIND writers AS writerPid "+
+				"UNWIND readers AS readerPid "+
+				"WITH qType, queueName, writerPid, readerPid "+
+				"WHERE writerPid <> readerPid AND writerPid IS NOT NULL AND readerPid IS NOT NULL "+
+				"MATCH (w:Program {programId: writerPid}) "+
+				"MATCH (r:Program {programId: readerPid}) "+
+				"MERGE (w)-[rel:DATA_FLOWS_TO]->(r) "+
+				"SET rel.channel = qType, rel.sharedResource = queueName "+
+				"RETURN count(rel) AS cnt",
+			nil)
+		if err != nil {
+			return int64(0), err
+		}
+		if result.Next(ctx) {
+			if val, ok := result.Record().Get("cnt"); ok {
+				if n, ok := val.(int64); ok {
+					return n, nil
+				}
+			}
+		}
+		return int64(0), nil
+	})
+	if err != nil {
+		return fmt.Errorf("detecting CICS queue flows: %w", err)
+	}
+
+	count := int(res.(int64))
+	if count > 0 {
+		w.logger.Info("detected CICS TS/TD queue data flows", zap.Int("flows", count))
+	}
+	return nil
+}
+
+// DetectMQFlows creates DATA_FLOWS_TO relationships for programs sharing MQ queues.
+// Matches ExternalInterface nodes of type MQ where one program puts (MQPUT/MQOPEN OUTPUT)
+// and another gets (MQGET/MQOPEN INPUT) from the same queue.
+func (w *BatchWriter) DetectMQFlows(ctx context.Context) error {
+	session := w.client.NewSession(ctx)
+	defer session.Close(ctx)
+
+	res, err := session.ExecuteWrite(ctx, func(tx neo4j.ManagedTransaction) (any, error) {
+		result, err := tx.Run(ctx,
+			"MATCH (e:ExternalInterface) "+
+				"WHERE e.type = 'MQ' "+
+				"AND e.details CONTAINS \"'\" "+
+				"WITH e, e.programId AS pid, "+
+				"  substring(e.details, "+
+				"    apoc.text.indexOf(e.details, \"'\") + 1, "+
+				"    apoc.text.indexOf(e.details, \"'\", apoc.text.indexOf(e.details, \"'\") + 1) "+
+				"    - apoc.text.indexOf(e.details, \"'\") - 1 "+
+				"  ) AS queueName, "+
+				"  CASE "+
+				"    WHEN toUpper(e.details) CONTAINS 'MQPUT' THEN 'WRITE' "+
+				"    WHEN toUpper(e.details) CONTAINS 'MQOPEN' AND toUpper(e.details) CONTAINS 'OUTPUT' THEN 'WRITE' "+
+				"    WHEN toUpper(e.details) CONTAINS 'MQGET' THEN 'READ' "+
+				"    WHEN toUpper(e.details) CONTAINS 'MQOPEN' AND toUpper(e.details) CONTAINS 'INPUT' THEN 'READ' "+
+				"    ELSE null "+
+				"  END AS operation "+
+				"WHERE queueName <> '' AND operation IS NOT NULL "+
+				"WITH queueName, "+
+				"  collect(CASE WHEN operation = 'WRITE' THEN pid END) AS writers, "+
+				"  collect(CASE WHEN operation = 'READ' THEN pid END) AS readers "+
+				"UNWIND writers AS writerPid "+
+				"UNWIND readers AS readerPid "+
+				"WITH queueName, writerPid, readerPid "+
+				"WHERE writerPid <> readerPid AND writerPid IS NOT NULL AND readerPid IS NOT NULL "+
+				"MATCH (w:Program {programId: writerPid}) "+
+				"MATCH (r:Program {programId: readerPid}) "+
+				"MERGE (w)-[rel:DATA_FLOWS_TO]->(r) "+
+				"SET rel.channel = 'MQ', rel.sharedResource = queueName "+
+				"RETURN count(rel) AS cnt",
+			nil)
+		if err != nil {
+			return int64(0), err
+		}
+		if result.Next(ctx) {
+			if val, ok := result.Record().Get("cnt"); ok {
+				if n, ok := val.(int64); ok {
+					return n, nil
+				}
+			}
+		}
+		return int64(0), nil
+	})
+	if err != nil {
+		return fmt.Errorf("detecting MQ flows: %w", err)
+	}
+
+	count := int(res.(int64))
+	if count > 0 {
+		w.logger.Info("detected MQ queue data flows", zap.Int("flows", count))
+	}
+	return nil
+}
+
+// DetectJCLSequenceFlows creates DATA_FLOWS_TO relationships for consecutive JCL steps
+// that share datasets via DD cards. When step N writes a file and step N+M reads it
+// (within the same job), a JCL_STEP flow is created between their executed programs.
+func (w *BatchWriter) DetectJCLSequenceFlows(ctx context.Context) error {
+	session := w.client.NewSession(ctx)
+	defer session.Close(ctx)
+
+	res, err := session.ExecuteWrite(ctx, func(tx neo4j.ManagedTransaction) (any, error) {
+		result, err := tx.Run(ctx,
+			"MATCH (j:JCLJob)-[:RUNS]->(s1:JCLStep)-[:HAS_DD]->(dd1:DDCard)-[:MAPS_TO_FILE]->(f:File)<-[:MAPS_TO_FILE]-(dd2:DDCard)<-[:HAS_DD]-(s2:JCLStep)<-[:RUNS]-(j) "+
+				"WHERE s1.order < s2.order "+
+				"AND dd1.disposition IN ['NEW', 'MOD', 'SHR'] "+
+				"AND dd2.disposition IN ['OLD', 'SHR'] "+
+				"MATCH (s1)-[:EXECUTES]->(p1:Program) "+
+				"MATCH (s2)-[:EXECUTES]->(p2:Program) "+
+				"WHERE p1 <> p2 "+
+				"MERGE (p1)-[r:DATA_FLOWS_TO]->(p2) "+
+				"SET r.channel = 'JCL_STEP', r.sharedResource = f.name "+
+				"RETURN count(r) AS cnt",
+			nil)
+		if err != nil {
+			return int64(0), err
+		}
+		if result.Next(ctx) {
+			if val, ok := result.Record().Get("cnt"); ok {
+				if n, ok := val.(int64); ok {
+					return n, nil
+				}
+			}
+		}
+		return int64(0), nil
+	})
+	if err != nil {
+		return fmt.Errorf("detecting JCL sequence flows: %w", err)
+	}
+
+	count := int(res.(int64))
+	if count > 0 {
+		w.logger.Info("detected JCL step sequence data flows", zap.Int("flows", count))
+	}
+	return nil
+}
+
+// QueryCICSPairsForPass4 returns CICS LINK/XCTL caller/callee pairs with COMMAREA context
+// for LLM field-level mapping.
+func (c *Client) QueryCICSPairsForPass4(ctx context.Context) ([]CallPairContext, error) {
+	session := c.NewSession(ctx)
+	defer session.Close(ctx)
+
+	// Find CICS LINK/XCTL pairs where both programs exist
+	result, err := session.Run(ctx,
+		"MATCH (e:ExternalInterface) "+
+			"WHERE e.type IN ['CICS_LINK', 'CICS_XCTL'] "+
+			"AND e.details CONTAINS \"'\" "+
+			"WITH e.programId AS callerId, "+
+			"  substring(e.details, "+
+			"    apoc.text.indexOf(e.details, \"'\") + 1, "+
+			"    apoc.text.indexOf(e.details, \"'\", apoc.text.indexOf(e.details, \"'\") + 1) "+
+			"    - apoc.text.indexOf(e.details, \"'\") - 1 "+
+			"  ) AS calleeId "+
+			"WHERE calleeId <> '' "+
+			"MATCH (caller:Program {programId: callerId}) "+
+			"MATCH (callee:Program {programId: calleeId}) "+
+			"RETURN DISTINCT callerId, calleeId",
+		nil)
+	if err != nil {
+		return nil, fmt.Errorf("querying CICS pairs: %w", err)
+	}
+
+	type pair struct{ caller, callee string }
+	var pairs []pair
+	for result.Next(ctx) {
+		rec := result.Record()
+		pairs = append(pairs, pair{
+			caller: getStr(rec, "callerId"),
+			callee: getStr(rec, "calleeId"),
+		})
+	}
+
+	var contexts []CallPairContext
+	for _, p := range pairs {
+		cpc := CallPairContext{CallerID: p.caller, CalleeID: p.callee}
+
+		// Get caller's WORKING-STORAGE data items (COMMAREA copy)
+		callerRes, err := session.Run(ctx,
+			"MATCH (d:DataItem {programId: $pid}) WHERE d.level IN [1, 77] "+
+				"RETURN d.name AS name, d.picture AS picture",
+			map[string]any{"pid": p.caller})
+		if err == nil {
+			for callerRes.Next(ctx) {
+				rec := callerRes.Record()
+				cpc.CallerFields = append(cpc.CallerFields, FieldContext{
+					Name:    getStr(rec, "name"),
+					Picture: getStr(rec, "picture"),
+				})
+			}
+		}
+
+		// Get callee's LINKAGE SECTION (DFHCOMMAREA layout)
+		calleeRes, err := session.Run(ctx,
+			"MATCH (d:DataItem {programId: $pid}) "+
+				"WHERE d.section = 'LINKAGE' OR d.level IN [1, 77] "+
+				"RETURN d.name AS name, d.picture AS picture",
+			map[string]any{"pid": p.callee})
+		if err == nil {
+			for calleeRes.Next(ctx) {
+				rec := calleeRes.Record()
+				cpc.CalleeParams = append(cpc.CalleeParams, FieldContext{
+					Name:    getStr(rec, "name"),
+					Picture: getStr(rec, "picture"),
+				})
+			}
+		}
+
+		if len(cpc.CalleeParams) > 0 {
+			contexts = append(contexts, cpc)
+		}
+	}
+
+	return contexts, nil
+}
+
+// QuerySharedFilePairsWithCopybooks returns shared-file writer/reader pairs that both include
+// a common copybook (the file record layout), for LLM field-level enrichment.
+func (c *Client) QuerySharedFilePairsWithCopybooks(ctx context.Context) ([]SharedFilePairContext, error) {
+	session := c.NewSession(ctx)
+	defer session.Close(ctx)
+
+	result, err := session.Run(ctx,
+		"MATCH (writer:Program)-[:WRITES]->(f:File)<-[:READS]-(reader:Program) "+
+			"WHERE writer <> reader "+
+			"MATCH (writer)-[:INCLUDES]->(cb:Copybook)<-[:INCLUDES]-(reader) "+
+			"RETURN DISTINCT writer.programId AS writerId, reader.programId AS readerId, "+
+			"  f.name AS fileName, cb.name AS copybookName",
+		nil)
+	if err != nil {
+		return nil, fmt.Errorf("querying shared file pairs with copybooks: %w", err)
+	}
+
+	var pairs []SharedFilePairContext
+	for result.Next(ctx) {
+		rec := result.Record()
+		pairs = append(pairs, SharedFilePairContext{
+			WriterID:     getStr(rec, "writerId"),
+			ReaderID:     getStr(rec, "readerId"),
+			FileName:     getStr(rec, "fileName"),
+			CopybookName: getStr(rec, "copybookName"),
+		})
+	}
+	return pairs, nil
+}
+
+// SharedFilePairContext holds context for a shared file pair with a common copybook.
+type SharedFilePairContext struct {
+	WriterID     string
+	ReaderID     string
+	FileName     string
+	CopybookName string
+}
+
 // CallPairContext holds context for a CALLS relationship to be analyzed for LINKAGE mapping.
 type CallPairContext struct {
 	CallerID      string

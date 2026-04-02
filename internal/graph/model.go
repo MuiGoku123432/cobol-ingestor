@@ -452,7 +452,7 @@ type DBTable struct {
 type CrossProgramFlow struct {
 	FromProgram string
 	ToProgram   string
-	Channel     string // FILE, DB2, LINKAGE, CICS_COMMAREA
+	Channel     string // FILE, DB2, LINKAGE, CICS_COMMAREA, CICS_TS, CICS_TD, MQ, JCL_STEP
 	Fields      []FieldPair
 	SharedResource string // file name, table name, etc.
 }

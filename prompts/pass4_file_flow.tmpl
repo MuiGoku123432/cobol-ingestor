@@ -1,0 +1,35 @@
+You are analyzing the shared file data flow between two COBOL programs that both use a common copybook to define the record layout.
+
+## Programs
+- **Writer:** {{.Writer}} (writes to file {{.FileName}})
+- **Reader:** {{.Reader}} (reads from file {{.FileName}})
+- **Common Copybook:** {{.Copybook}} (defines the shared record layout)
+
+## Task
+Determine which fields the writer populates when writing records and which fields the reader extracts when reading records from the shared file.
+
+Look for:
+1. MOVE statements before WRITE that populate record fields
+2. MOVE statements after READ that extract record fields
+3. Fields referenced in conditions (IF, EVALUATE) after READ
+4. Group-level MOVEs to/from the FD record area
+
+## Response Format
+
+Return a JSON object with field mappings showing which writer fields flow to which reader fields:
+
+```json
+{
+  "fieldMappings": [
+    {
+      "sourceField": "WS-CUST-NAME",
+      "targetField": "IN-CUST-NAME",
+      "transform": "DIRECT_MOVE"
+    }
+  ]
+}
+```
+
+Transform values: `DIRECT_MOVE`, `COMPUTE`, `STRING_CONCAT`, `REDEFINES`, `GROUP_MOVE`, `UNKNOWN`
+
+If no mappings can be determined, return `{"fieldMappings": []}`.

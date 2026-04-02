@@ -413,9 +413,21 @@ func (s *IngestService) runBWPipeline(ctx context.Context, dir, extensionsStr st
 
 	writer := n4j.NewBatchWriter(neo4jClient, cfg.Ingest.BatchSize, "default", logger)
 
-	// Query existing COBOL program IDs for prompt context
-	existingPrograms := queryProgramIDs(ctx, neo4jClient, logger)
-	bwPromptOverhead := computeBWPromptOverhead(existingPrograms)
+	// Query enriched COBOL graph context for BW prompts
+	bwGraphCtx, bwCtxErr := neo4jClient.QueryBWGraphContext(ctx)
+	if bwCtxErr != nil {
+		logger.Warn("failed to query BW graph context, falling back to flat IDs", zap.Error(bwCtxErr))
+		existingPrograms := queryProgramIDs(ctx, neo4jClient, logger)
+		bwGraphCtx = &n4j.BWGraphContext{RemainingPrograms: strings.Split(existingPrograms, ", ")}
+	}
+	interfaceProgs, domains, fileIOProgs, remaining := n4j.FormatBWGraphContext(bwGraphCtx, 8000)
+	bwPromptCtx := claude.BWPromptContext{
+		InterfacePrograms: interfaceProgs,
+		BusinessDomains:   domains,
+		FileIOPrograms:    fileIOProgs,
+		RemainingPrograms: remaining,
+	}
+	bwPromptOverhead := computeBWPromptOverheadTiered(interfaceProgs, domains, fileIOProgs, remaining)
 
 	// Build work items, skipping cached files
 	const bwPassNumber = 99
@@ -485,7 +497,7 @@ func (s *IngestService) runBWPipeline(ctx context.Context, dir, extensionsStr st
 			fileType := classifyBWExtension(wi.file.Path)
 
 			for _, chunk := range wi.chunks {
-				resp, analyzeErr := claudeClient.AnalyzeBW(ctx, wi.file.Path, fileType, chunk.Content, existingPrograms, cfg.BW.MaxTokens)
+				resp, analyzeErr := claudeClient.AnalyzeBW(ctx, wi.file.Path, fileType, chunk.Content, bwPromptCtx, cfg.BW.MaxTokens)
 				if analyzeErr != nil {
 					resultCh <- bwResult{file: wi.file, err: fmt.Errorf("analyzing %s chunk %d: %w", wi.file.Path, chunk.Index, analyzeErr)}
 					return
@@ -785,6 +797,15 @@ func capProgramIDs(ids []string, maxTokens int) string {
 // (system message + template + separator + prefill + margin + existingPrograms).
 func computeBWPromptOverhead(existingPrograms string) int {
 	return 2100 + chunker.EstimateTokens(existingPrograms)
+}
+
+// computeBWPromptOverheadTiered returns the estimated token overhead for BW prompts
+// using tiered context.
+func computeBWPromptOverheadTiered(interfaceProgs, domains, fileIOProgs, remaining string) int {
+	return 2600 + chunker.EstimateTokens(interfaceProgs) +
+		chunker.EstimateTokens(domains) +
+		chunker.EstimateTokens(fileIOProgs) +
+		chunker.EstimateTokens(remaining)
 }
 
 // classifyBWExtension returns a human-readable file type from a path's extension.

@@ -4,10 +4,31 @@ You are analyzing a Businessware enterprise artifact file. The file may contain 
 - **File name:** {{.FileName}}
 - **File type:** {{.FileType}}
 
-## Known COBOL Programs
-The following COBOL program IDs exist in the codebase. If the file references any of these programs (by name, ID, or clear description), include them in `cobolReferences`.
+## COBOL Integration Context
 
-{{.ExistingPrograms}}
+### Programs with External Interfaces (likely integration targets)
+{{.InterfacePrograms}}
+
+### Business Domains
+{{.BusinessDomains}}
+
+### Programs with File I/O
+{{.FileIOPrograms}}
+
+### All COBOL Program IDs
+{{.RemainingPrograms}}
+
+## Enterprise Integration Patterns
+Look for these common COBOL integration patterns:
+- **CTG/CICS Transaction Gateway**: Java using com.ibm.ctg.*, ECI*, CTGSession — these CALL CICS programs
+- **MQ Bridge**: Java MQ producers/consumers matching COBOL MQ programs on same queues
+- **Batch Wrappers**: Java scheduling triggering JCL jobs or batch COBOL programs
+- **File-Based Interfaces**: Java writing CSV/flat files that COBOL reads (check file names against File I/O list)
+- **Screen Scraping/BMS**: Java CICS adapters or terminal emulator wrappers
+- **REST/SOAP Wrappers**: Java services exposing COBOL transactions via HTTP
+- **IDMS/ADABAS Adapters**: Java database adapters wrapping mainframe DB calls
+
+For pattern-detected references, set referenceType to the pattern name (e.g., "ctg_call", "mq_bridge", "file_interface", "batch_trigger").
 
 ## JAR Archive Context
 
@@ -21,7 +42,7 @@ For `.class` files, the content is disassembled bytecode (either from `javap` or
 
 2. **Extract relationships** — Identify relationships between the entities you extracted. Relationship types are also free-form. Examples: `implements`, `calls`, `depends_on`, `maps_to`, `validates`, `triggers`, `contains`, `extends`, etc.
 
-3. **Identify COBOL references** — If any entity references a known COBOL program or copybook (from the list above), include it in `cobolReferences`. Reference types: `calls`, `replaces`, `wraps`, `maps_to`, `reads_from`, `writes_to`, etc.
+3. **Identify COBOL references** — If any entity references a known COBOL program or copybook (from any of the context sections above), include it in `cobolReferences`. Use the integration patterns section to identify implicit references. Reference types: `calls`, `replaces`, `wraps`, `maps_to`, `reads_from`, `writes_to`, `ctg_call`, `mq_bridge`, `file_interface`, `batch_trigger`, etc.
 {{if .IsDiagram}}
 ## Diagram-Specific Guidance
 
@@ -66,8 +87,8 @@ Return a single JSON object:
       "entityName": "JavaServiceClass",
       "targetName": "PROG001",
       "targetType": "Program",
-      "referenceType": "wraps",
-      "description": "Java service wraps calls to COBOL program PROG001"
+      "referenceType": "ctg_call",
+      "description": "Java service calls COBOL program PROG001 via CTG"
     }
   ]
 }
@@ -76,7 +97,7 @@ Return a single JSON object:
 **Important:**
 - Only extract entities that are genuinely meaningful — skip trivial imports, getters/setters, etc.
 - The `properties` field on entities is optional and free-form — include any properties that seem important
-- Be conservative with COBOL references — only include clear, confident matches
+- Use the integration patterns and tiered context to find COBOL references — do not limit to exact name matches
 - If the file is empty or contains no meaningful content, return empty arrays
 
 ---

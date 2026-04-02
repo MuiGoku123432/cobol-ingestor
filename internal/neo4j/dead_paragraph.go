@@ -116,6 +116,48 @@ func (w *BatchWriter) detectDeadForProgram(ctx context.Context, programID string
 	return count, nil
 }
 
+// UnmarkFalsePositives clears dead code flags on paragraphs confirmed as false positives by LLM verification.
+func (w *BatchWriter) UnmarkFalsePositives(ctx context.Context, programID string, paragraphNames []string) (int, error) {
+	if len(paragraphNames) == 0 {
+		return 0, nil
+	}
+
+	session := w.client.NewSession(ctx)
+	defer session.Close(ctx)
+
+	res, err := session.ExecuteWrite(ctx, func(tx neo4j.ManagedTransaction) (any, error) {
+		result, err := tx.Run(ctx,
+			"MATCH (p:Paragraph {programId: $pid}) "+
+				"WHERE p.name IN $names AND p.isReachable = false "+
+				"SET p.isReachable = true, "+
+				"    p.deadCodeReason = 'Cleared by LLM verification: reachable via non-PERFORMS path' "+
+				"RETURN count(p) AS cnt",
+			map[string]any{"pid": programID, "names": paragraphNames})
+		if err != nil {
+			return int64(0), err
+		}
+		if result.Next(ctx) {
+			if val, ok := result.Record().Get("cnt"); ok {
+				if n, ok := val.(int64); ok {
+					return n, nil
+				}
+			}
+		}
+		return int64(0), nil
+	})
+	if err != nil {
+		return 0, fmt.Errorf("unmarking false positives for %s: %w", programID, err)
+	}
+
+	count := int(res.(int64))
+	if count > 0 {
+		w.logger.Info("unmarked false positive dead paragraphs",
+			zap.String("programId", programID),
+			zap.Int("count", count))
+	}
+	return count, nil
+}
+
 // GetDeadParagraphs returns unreachable paragraphs for a program.
 func (c *Client) GetDeadParagraphs(ctx context.Context, programID string) ([]DeadParagraphInfo, error) {
 	session := c.NewSession(ctx)
