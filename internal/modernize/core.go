@@ -16,17 +16,19 @@ type InputMessage = chatInputMessage
 
 // ChatParams holds all parameters for a headless chat invocation.
 type ChatParams struct {
-	Provider      *ProviderState
-	MCPClient     *MCPClient
-	SessionStore  SessionStore
-	SessionID     string
-	Messages      []InputMessage
-	DiscoveryMode bool
-	TargetLang    string
-	Framework     string
-	Integrations  string
-	Emitter       EventEmitter
-	Logger        *zap.Logger
+	Provider         *ProviderState
+	MCPClient        *MCPClient
+	SessionStore     SessionStore
+	SessionID        string
+	Messages         []InputMessage
+	DiscoveryMode    bool
+	GenerateDiagram  bool
+	TargetLang       string
+	Framework        string
+	Integrations     string
+	Emitter          EventEmitter
+	Logger           *zap.Logger
+	DiagramOutputDir string
 }
 
 // RunChat executes the chat tool-use loop, emitting events via the Emitter.
@@ -46,9 +48,9 @@ func RunChat(ctx context.Context, p ChatParams) error {
 	var systemPrompt string
 	var err error
 	if p.DiscoveryMode {
-		systemPrompt, err = BuildDiscoveryPrompt()
+		systemPrompt, err = BuildDiscoveryPrompt(p.GenerateDiagram)
 	} else {
-		systemPrompt, err = BuildSystemPrompt(p.TargetLang, p.Framework, p.Integrations)
+		systemPrompt, err = BuildSystemPrompt(p.TargetLang, p.Framework, p.Integrations, p.GenerateDiagram)
 	}
 	if err != nil {
 		return fmt.Errorf("building system prompt: %w", err)
@@ -93,6 +95,19 @@ func RunChat(ctx context.Context, p ChatParams) error {
 		}
 
 		if resp.StopReason != "tool_use" {
+			// Post-response diagram extraction
+			if p.GenerateDiagram {
+				results := ExtractAndRenderMermaidBlocks(resp.TextContent(), p.DiagramOutputDir)
+				for _, dr := range results {
+					if dr.Error == "" {
+						p.Emitter.Emit("diagram_generated", map[string]string{
+							"filePath": dr.FilePath,
+							"svgData":  dr.SvgData,
+						})
+					}
+				}
+			}
+
 			// Persist session
 			if p.SessionStore != nil {
 				assistantText := resp.TextContent()
@@ -155,9 +170,6 @@ func RunChat(ctx context.Context, p ChatParams) error {
 					"id":     block.ID,
 					"result": truncate(result, 500),
 				})
-				if block.Name == "generate_mermaid_diagram" {
-					emitDiagramEvent(p.Emitter, "chat", result)
-				}
 			}
 		}
 
@@ -174,18 +186,20 @@ func RunChat(ctx context.Context, p ChatParams) error {
 
 // SwarmParams holds all parameters for a headless swarm invocation.
 type SwarmParams struct {
-	Provider      *ProviderState
-	MCPClient     *MCPClient
-	SessionStore  SessionStore
-	SessionID     string
-	Messages      []InputMessage
-	DiscoveryMode bool
-	MultiRound    bool
-	TargetLang    string
-	Framework     string
-	Integrations  string
-	Emitter       EventEmitter
-	Logger        *zap.Logger
+	Provider         *ProviderState
+	MCPClient        *MCPClient
+	SessionStore     SessionStore
+	SessionID        string
+	Messages         []InputMessage
+	DiscoveryMode    bool
+	MultiRound       bool
+	GenerateDiagram  bool
+	TargetLang       string
+	Framework        string
+	Integrations     string
+	Emitter          EventEmitter
+	Logger           *zap.Logger
+	DiagramOutputDir string
 }
 
 // RunSwarm executes the full swarm agent orchestration, emitting events via the Emitter.
@@ -225,9 +239,10 @@ func RunSwarm(ctx context.Context, p SwarmParams) error {
 	}
 
 	promptData := swarmPromptData{
-		TargetLanguage: targetLanguage,
-		Framework:      framework,
-		Integrations:   integrations,
+		TargetLanguage:  targetLanguage,
+		Framework:       framework,
+		Integrations:    integrations,
+		GenerateDiagram: p.GenerateDiagram,
 	}
 
 	maxRounds := 1
@@ -342,6 +357,19 @@ func RunSwarm(ctx context.Context, p SwarmParams) error {
 		return nil
 	}
 
+	// Post-response diagram extraction
+	if p.GenerateDiagram {
+		results := ExtractAndRenderMermaidBlocks(coordText, p.DiagramOutputDir)
+		for _, dr := range results {
+			if dr.Error == "" {
+				p.Emitter.Emit("diagram_generated", map[string]string{
+					"filePath": dr.FilePath,
+					"svgData":  dr.SvgData,
+				})
+			}
+		}
+	}
+
 	// Persist session
 	if p.SessionStore != nil {
 		allMessages := make([]chatInputMessage, len(p.Messages))
@@ -406,17 +434,3 @@ func (ps *ProviderState) ListModels() ([]ModelInfo, error) {
 	return []ModelInfo{{ID: model, Name: model}}, nil
 }
 
-// emitDiagramEvent parses a generate_mermaid_diagram tool result and emits
-// a diagram_generated event with the SVG data so the frontend can render inline.
-func emitDiagramEvent(emitter EventEmitter, prefix string, result string) {
-	var dr struct {
-		FilePath string `json:"filePath"`
-		SvgData  string `json:"svgData"`
-	}
-	if json.Unmarshal([]byte(result), &dr) == nil && dr.SvgData != "" {
-		emitter.Emit("diagram_generated", map[string]string{
-			"filePath": dr.FilePath,
-			"svgData":  dr.SvgData,
-		})
-	}
-}

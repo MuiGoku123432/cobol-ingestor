@@ -18,6 +18,14 @@ import (
 	"golang.org/x/time/rate"
 )
 
+// BWPromptContext holds pre-formatted tiered context for BW prompts.
+type BWPromptContext struct {
+	InterfacePrograms string
+	BusinessDomains   string
+	FileIOPrograms    string
+	RemainingPrograms string
+}
+
 // ErrResponseTruncated is returned when the LLM response was truncated
 // due to max_tokens limits even after retry with increased limits.
 var ErrResponseTruncated = errors.New("LLM response truncated by max_tokens limit")
@@ -43,6 +51,12 @@ type Client struct {
 	pass4Tmpl          *template.Template
 	pass5Tmpl          *template.Template
 	bwTmpl             *template.Template
+	commareaTmpl       *template.Template
+	fileFlowTmpl       *template.Template
+	deadVerifyTmpl     *template.Template
+	domainMergeTmpl    *template.Template
+	bwSynthesisTmpl    *template.Template
+	bwRepairTmpl       *template.Template
 	calibrator         *chunker.TokenCalibrator
 }
 
@@ -81,6 +95,36 @@ func NewClient(provider llm.Provider, cfg config.ClaudeConfig, logger *zap.Logge
 	bwTmpl, err := template.New("bw").Parse(prompts.BWIngest)
 	if err != nil {
 		return nil, fmt.Errorf("parsing bw template: %w", err)
+	}
+
+	commareaTmpl, err := template.New("commarea").Parse(prompts.Pass4Commarea)
+	if err != nil {
+		return nil, fmt.Errorf("parsing commarea template: %w", err)
+	}
+
+	fileFlowTmpl, err := template.New("fileflow").Parse(prompts.Pass4FileFlow)
+	if err != nil {
+		return nil, fmt.Errorf("parsing file flow template: %w", err)
+	}
+
+	deadVerifyTmpl, err := template.New("deadverify").Parse(prompts.Pass5DeadVerify)
+	if err != nil {
+		return nil, fmt.Errorf("parsing dead verify template: %w", err)
+	}
+
+	domainMergeTmpl, err := template.New("domainmerge").Parse(prompts.Pass5DomainMerge)
+	if err != nil {
+		return nil, fmt.Errorf("parsing domain merge template: %w", err)
+	}
+
+	bwSynthesisTmpl, err := template.New("bwsynthesis").Parse(prompts.BWPass2Synthesis)
+	if err != nil {
+		return nil, fmt.Errorf("parsing BW synthesis template: %w", err)
+	}
+
+	bwRepairTmpl, err := template.New("bwrepair").Parse(prompts.BWPass3Repair)
+	if err != nil {
+		return nil, fmt.Errorf("parsing BW repair template: %w", err)
 	}
 
 	// Rate limit: ~120 requests per minute to stay within API limits.
@@ -122,6 +166,12 @@ func NewClient(provider llm.Provider, cfg config.ClaudeConfig, logger *zap.Logge
 		pass4Tmpl:          p4Tmpl,
 		pass5Tmpl:          p5Tmpl,
 		bwTmpl:             bwTmpl,
+		commareaTmpl:       commareaTmpl,
+		fileFlowTmpl:       fileFlowTmpl,
+		deadVerifyTmpl:     deadVerifyTmpl,
+		domainMergeTmpl:    domainMergeTmpl,
+		bwSynthesisTmpl:    bwSynthesisTmpl,
+		bwRepairTmpl:       bwRepairTmpl,
 	}, nil
 }
 
@@ -341,13 +391,17 @@ func (c *Client) AnalyzeRepair(ctx context.Context, repairType, programID, graph
 }
 
 // AnalyzeBW sends a Businessware file to Claude Opus for entity/relationship extraction.
-func (c *Client) AnalyzeBW(ctx context.Context, fileName, fileType, content, existingPrograms string, maxTokens int) (string, error) {
+// Accepts tiered context: interfaceProgs, domains, fileIOProgs, remaining (from FormatBWGraphContext).
+func (c *Client) AnalyzeBW(ctx context.Context, fileName, fileType, content string, bwCtx BWPromptContext, maxTokens int) (string, error) {
 	var userMsg bytes.Buffer
 	if err := c.bwTmpl.Execute(&userMsg, map[string]any{
-		"FileName":         fileName,
-		"FileType":         fileType,
-		"ExistingPrograms": existingPrograms,
-		"IsDiagram":        isDiagramType(fileType),
+		"FileName":          fileName,
+		"FileType":          fileType,
+		"InterfacePrograms": bwCtx.InterfacePrograms,
+		"BusinessDomains":   bwCtx.BusinessDomains,
+		"FileIOPrograms":    bwCtx.FileIOPrograms,
+		"RemainingPrograms": bwCtx.RemainingPrograms,
+		"IsDiagram":         isDiagramType(fileType),
 	}); err != nil {
 		return "", fmt.Errorf("rendering bw template: %w", err)
 	}
@@ -370,6 +424,211 @@ func (c *Client) AnalyzeBW(ctx context.Context, fileName, fileType, content, exi
 		Messages: c.withJSONPrefill([]llm.Message{
 			{Role: llm.RoleSystem, Content: "You are an enterprise software analyst. You extract entities, relationships, and COBOL cross-references from Businessware artifacts (Java code, documentation, configuration files, architecture diagrams). Return structured JSON."},
 			{Role: llm.RoleUser, Content: userMsg.String() + "\n\n---\n\n" + content},
+		}),
+	})
+	if err != nil {
+		if resp != "" {
+			resp = c.prependPrefill(resp)
+		}
+		return resp, err
+	}
+	return c.prependPrefill(resp), nil
+}
+
+// AnalyzeCommareaFlow sends caller/callee COMMAREA context to Sonnet for field-level mapping.
+func (c *Client) AnalyzeCommareaFlow(ctx context.Context, caller, callee, fieldContext string) (string, error) {
+	var userMsg bytes.Buffer
+	if err := c.commareaTmpl.Execute(&userMsg, map[string]string{
+		"Caller": caller,
+		"Callee": callee,
+	}); err != nil {
+		return "", fmt.Errorf("rendering commarea template: %w", err)
+	}
+
+	maxTokens := c.pass4MaxTokens
+	if maxTokens <= 0 {
+		maxTokens = 4000
+	}
+
+	resp, err := c.completeWithRetry(ctx, llm.CompletionRequest{
+		Model:     c.sonnetModel,
+		MaxTokens: maxTokens,
+		Messages: c.withJSONPrefill([]llm.Message{
+			{Role: llm.RoleSystem, Content: "You are an expert COBOL analyst mapping CICS COMMAREA fields between programs. Return structured JSON."},
+			{Role: llm.RoleUser, Content: userMsg.String() + "\n\n" + fieldContext},
+		}),
+	})
+	if err != nil {
+		if resp != "" {
+			resp = c.prependPrefill(resp)
+		}
+		return resp, err
+	}
+	return c.prependPrefill(resp), nil
+}
+
+// AnalyzeFileFlow sends shared file writer/reader context to Sonnet for field-level mapping.
+func (c *Client) AnalyzeFileFlow(ctx context.Context, writer, reader, fileName, copybookName string) (string, error) {
+	var userMsg bytes.Buffer
+	if err := c.fileFlowTmpl.Execute(&userMsg, map[string]string{
+		"Writer":   writer,
+		"Reader":   reader,
+		"FileName": fileName,
+		"Copybook": copybookName,
+	}); err != nil {
+		return "", fmt.Errorf("rendering file flow template: %w", err)
+	}
+
+	maxTokens := c.pass4MaxTokens
+	if maxTokens <= 0 {
+		maxTokens = 4000
+	}
+
+	resp, err := c.completeWithRetry(ctx, llm.CompletionRequest{
+		Model:     c.sonnetModel,
+		MaxTokens: maxTokens,
+		Messages: c.withJSONPrefill([]llm.Message{
+			{Role: llm.RoleSystem, Content: "You are an expert COBOL analyst mapping shared file record fields between writer and reader programs. Return structured JSON."},
+			{Role: llm.RoleUser, Content: userMsg.String()},
+		}),
+	})
+	if err != nil {
+		if resp != "" {
+			resp = c.prependPrefill(resp)
+		}
+		return resp, err
+	}
+	return c.prependPrefill(resp), nil
+}
+
+// VerifyDeadParagraphs sends flagged dead paragraphs to Sonnet for false-positive filtering.
+func (c *Client) VerifyDeadParagraphs(ctx context.Context, programID, deadParagraphs, sourceCode string) (string, error) {
+	var userMsg bytes.Buffer
+	if err := c.deadVerifyTmpl.Execute(&userMsg, map[string]string{
+		"ProgramID":      programID,
+		"DeadParagraphs": deadParagraphs,
+	}); err != nil {
+		return "", fmt.Errorf("rendering dead verify template: %w", err)
+	}
+
+	maxTokens := c.pass4MaxTokens
+	if maxTokens <= 0 {
+		maxTokens = 4000
+	}
+
+	resp, err := c.completeWithRetry(ctx, llm.CompletionRequest{
+		Model:     c.sonnetModel,
+		MaxTokens: maxTokens,
+		Messages: c.withJSONPrefill([]llm.Message{
+			{Role: llm.RoleSystem, Content: "You are an expert COBOL analyst verifying dead code detection. Return structured JSON."},
+			{Role: llm.RoleUser, Content: userMsg.String() + "\n\n---\nSource code:\n" + sourceCode},
+		}),
+	})
+	if err != nil {
+		if resp != "" {
+			resp = c.prependPrefill(resp)
+		}
+		return resp, err
+	}
+	return c.prependPrefill(resp), nil
+}
+
+// AnalyzeDomainMerge sends ambiguous domain pairs to Sonnet for merge decisions.
+func (c *Client) AnalyzeDomainMerge(ctx context.Context, domainPairsContext string) (string, error) {
+	var userMsg bytes.Buffer
+	if err := c.domainMergeTmpl.Execute(&userMsg, map[string]string{
+		"DomainPairs": domainPairsContext,
+	}); err != nil {
+		return "", fmt.Errorf("rendering domain merge template: %w", err)
+	}
+
+	maxTokens := c.pass4MaxTokens
+	if maxTokens <= 0 {
+		maxTokens = 4000
+	}
+
+	resp, err := c.completeWithRetry(ctx, llm.CompletionRequest{
+		Model:     c.sonnetModel,
+		MaxTokens: maxTokens,
+		Messages: c.withJSONPrefill([]llm.Message{
+			{Role: llm.RoleSystem, Content: "You are an enterprise business analyst evaluating whether business domains should be merged. Return structured JSON."},
+			{Role: llm.RoleUser, Content: userMsg.String()},
+		}),
+	})
+	if err != nil {
+		if resp != "" {
+			resp = c.prependPrefill(resp)
+		}
+		return resp, err
+	}
+	return c.prependPrefill(resp), nil
+}
+
+// AnalyzeBWSynthesis sends a batch of BW entities to Sonnet for cross-file correlation.
+func (c *Client) AnalyzeBWSynthesis(ctx context.Context, entitiesContext, cobolContext string, maxTokens int) (string, error) {
+	var userMsg bytes.Buffer
+	if err := c.bwSynthesisTmpl.Execute(&userMsg, map[string]string{
+		"Entities":     entitiesContext,
+		"CobolContext": cobolContext,
+	}); err != nil {
+		return "", fmt.Errorf("rendering BW synthesis template: %w", err)
+	}
+
+	if maxTokens <= 0 {
+		maxTokens = 4000
+	}
+
+	resp, err := c.completeWithRetry(ctx, llm.CompletionRequest{
+		Model:     c.sonnetModel,
+		MaxTokens: maxTokens,
+		Messages: c.withJSONPrefill([]llm.Message{
+			{Role: llm.RoleSystem, Content: "You are an enterprise integration analyst identifying cross-file patterns and COBOL references in Businessware artifacts. Return structured JSON."},
+			{Role: llm.RoleUser, Content: userMsg.String()},
+		}),
+	})
+	if err != nil {
+		if resp != "" {
+			resp = c.prependPrefill(resp)
+		}
+		return resp, err
+	}
+	return c.prependPrefill(resp), nil
+}
+
+// AnalyzeBWRepair sends unlinked BW entities to the LLM for repair.
+// Uses Opus for unlinked services (richer reasoning), Sonnet for fuzzy match confirmation.
+func (c *Client) AnalyzeBWRepair(ctx context.Context, repairType, entitiesContext, candidatesContext string, maxTokens int) (string, error) {
+	var userMsg bytes.Buffer
+	tmplData := map[string]string{
+		"RepairType": repairType,
+	}
+	if repairType == "unlinked_services" {
+		tmplData["Entities"] = entitiesContext
+		tmplData["Candidates"] = candidatesContext
+	} else {
+		tmplData["Pairs"] = entitiesContext
+	}
+
+	if err := c.bwRepairTmpl.Execute(&userMsg, tmplData); err != nil {
+		return "", fmt.Errorf("rendering BW repair template: %w", err)
+	}
+
+	if maxTokens <= 0 {
+		maxTokens = 4000
+	}
+
+	// Use Opus for unlinked services (requires deeper reasoning), Sonnet for fuzzy
+	model := c.sonnetModel
+	if repairType == "unlinked_services" {
+		model = c.opusModel
+	}
+
+	resp, err := c.completeWithRetry(ctx, llm.CompletionRequest{
+		Model:     model,
+		MaxTokens: maxTokens,
+		Messages: c.withJSONPrefill([]llm.Message{
+			{Role: llm.RoleSystem, Content: "You are an enterprise integration analyst repairing missing COBOL references in Businessware entity data. Return structured JSON."},
+			{Role: llm.RoleUser, Content: userMsg.String()},
 		}),
 	})
 	if err != nil {

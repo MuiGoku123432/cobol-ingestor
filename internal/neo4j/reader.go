@@ -1355,6 +1355,11 @@ func (c *Client) queryStringList(ctx context.Context, session neo4j.SessionWithC
 	return vals, nil
 }
 
+// GetStr extracts a string value from a Neo4j record by key.
+func GetStr(rec *neo4j.Record, key string) string {
+	return getStr(rec, key)
+}
+
 func getStr(rec *neo4j.Record, key string) string {
 	val, ok := rec.Get(key)
 	if !ok || val == nil {

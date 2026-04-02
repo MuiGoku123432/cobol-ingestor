@@ -1,0 +1,39 @@
+You are verifying whether flagged "dead" paragraphs in a COBOL program are truly unreachable.
+
+## Program
+**Program ID:** {{.ProgramID}}
+
+## Flagged Paragraphs
+The following paragraphs were flagged as unreachable by graph-based PERFORMS analysis:
+
+{{.DeadParagraphs}}
+
+## Task
+For each flagged paragraph, determine if it is truly dead code or a false positive. Check for:
+
+1. **PERFORM THRU range inclusion** — Is this paragraph sequentially between two paragraphs in a PERFORM ... THRU range? If so, it is reachable even without a direct PERFORMS edge.
+2. **ALTER statement** — Is there an ALTER statement that redirects a GO TO to this paragraph?
+3. **External entry point** — Is this paragraph an entry point called by CICS (e.g., via DFHCOMMAREA handling), JCL PARM processing, or another external mechanism?
+4. **GO TO from non-PERFORMS graph** — Is there a GO TO statement in another paragraph (not in the PERFORMS graph) that targets this paragraph?
+5. **Conditional execution** — Is this paragraph part of a conditional path (EVALUATE, nested IF) that the static PERFORMS graph doesn't capture?
+
+## Response Format
+
+```json
+{
+  "verifications": [
+    {
+      "paragraphName": "PARA-NAME",
+      "verdict": "confirmed_dead",
+      "reason": "No PERFORM, GO TO, ALTER, or external references found"
+    },
+    {
+      "paragraphName": "PARA-OTHER",
+      "verdict": "false_positive",
+      "reason": "Included in PERFORM 1000-START THRU 1999-END range"
+    }
+  ]
+}
+```
+
+Verdict must be either `confirmed_dead` or `false_positive`.

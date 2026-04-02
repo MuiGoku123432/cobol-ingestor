@@ -25,13 +25,18 @@ type Config struct {
 
 // BWConfig holds settings for Businessware ingestion.
 type BWConfig struct {
-	Dir         string // BW_DIR — root directory of Businessware files
-	Extensions  string // BW_EXTENSIONS — comma-separated file extensions (default ".java,.md,.bw,.txt,.xml,.vsdx,.drawio,.svg,.puml,.plantuml,.jar,.war,.ear")
-	MaxWorkers  int    // BW_MAX_WORKERS — concurrent analysis workers (default 15)
-	MaxTokens   int    // BW_MAX_TOKENS — max output tokens per LLM call (default 16000)
-	TokenLimit  int    // BW_TOKEN_LIMIT — input chunking token limit (default 30000)
-	JavapPath   string // BW_JAVAP_PATH — path to javap binary (auto-detected if empty)
-	MaxJARDepth int    // BW_MAX_JAR_DEPTH — max recursion depth for nested JAR/WAR/EAR extraction (default 3)
+	Dir            string // BW_DIR — root directory of Businessware files
+	Extensions     string // BW_EXTENSIONS — comma-separated file extensions (default ".java,.md,.bw,.txt,.xml,.vsdx,.drawio,.svg,.puml,.plantuml,.jar,.war,.ear")
+	MaxWorkers     int    // BW_MAX_WORKERS — concurrent analysis workers (default 15)
+	MaxTokens      int    // BW_MAX_TOKENS — max output tokens per LLM call (default 16000)
+	TokenLimit     int    // BW_TOKEN_LIMIT — input chunking token limit (default 30000)
+	JavapPath      string // BW_JAVAP_PATH — path to javap binary (auto-detected if empty)
+	MaxJARDepth    int    // BW_MAX_JAR_DEPTH — max recursion depth for nested JAR/WAR/EAR extraction (default 3)
+	EnablePass2    bool   // BW_ENABLE_PASS2 — enable cross-file synthesis pass (default true)
+	EnablePass3    bool   // BW_ENABLE_PASS3 — enable validation & repair pass (default true)
+	Pass2BatchSize int    // BW_PASS2_BATCH_SIZE — entities per synthesis batch (default 30)
+	Pass2MaxTokens int    // BW_PASS2_MAX_TOKENS — max output tokens for pass 2 (default 4000)
+	Pass3MaxTokens int    // BW_PASS3_MAX_TOKENS — max output tokens for pass 3 (default 4000)
 }
 
 // ExternalDBConfig holds settings for external database gap analysis via MCP.
@@ -224,6 +229,11 @@ func Load() (*Config, error) {
 	viper.SetDefault("BW_MAX_JAR_DEPTH", 3)
 	viper.SetDefault("BW_MAX_TOKENS", 16000)
 	viper.SetDefault("BW_TOKEN_LIMIT", 30000)
+	viper.SetDefault("BW_ENABLE_PASS2", true)
+	viper.SetDefault("BW_ENABLE_PASS3", true)
+	viper.SetDefault("BW_PASS2_BATCH_SIZE", 30)
+	viper.SetDefault("BW_PASS2_MAX_TOKENS", 4000)
+	viper.SetDefault("BW_PASS3_MAX_TOKENS", 4000)
 
 	// Oracle SQLcl defaults
 	viper.SetDefault("ORACLE_HOST", "localhost")
@@ -325,13 +335,18 @@ func Load() (*Config, error) {
 			OracleSQLclPath: viper.GetString("ORACLE_SQLCL_PATH"),
 		},
 		BW: BWConfig{
-			Dir:         viper.GetString("BW_DIR"),
-			Extensions:  viper.GetString("BW_EXTENSIONS"),
-			MaxWorkers:  viper.GetInt("BW_MAX_WORKERS"),
-			MaxTokens:   viper.GetInt("BW_MAX_TOKENS"),
-			TokenLimit:  viper.GetInt("BW_TOKEN_LIMIT"),
-			JavapPath:   viper.GetString("BW_JAVAP_PATH"),
-			MaxJARDepth: viper.GetInt("BW_MAX_JAR_DEPTH"),
+			Dir:            viper.GetString("BW_DIR"),
+			Extensions:     viper.GetString("BW_EXTENSIONS"),
+			MaxWorkers:     viper.GetInt("BW_MAX_WORKERS"),
+			MaxTokens:      viper.GetInt("BW_MAX_TOKENS"),
+			TokenLimit:     viper.GetInt("BW_TOKEN_LIMIT"),
+			JavapPath:      viper.GetString("BW_JAVAP_PATH"),
+			MaxJARDepth:    viper.GetInt("BW_MAX_JAR_DEPTH"),
+			EnablePass2:    viper.GetBool("BW_ENABLE_PASS2"),
+			EnablePass3:    viper.GetBool("BW_ENABLE_PASS3"),
+			Pass2BatchSize: viper.GetInt("BW_PASS2_BATCH_SIZE"),
+			Pass2MaxTokens: viper.GetInt("BW_PASS2_MAX_TOKENS"),
+			Pass3MaxTokens: viper.GetInt("BW_PASS3_MAX_TOKENS"),
 		},
 		Modernize: ModernizeConfig{
 			Port:          viper.GetString("MODERNIZE_PORT"),

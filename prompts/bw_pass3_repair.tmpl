@@ -1,0 +1,55 @@
+You are performing validation repair on Businessware entities that may have missing COBOL references.
+
+## Repair Type: {{.RepairType}}
+
+{{if eq .RepairType "unlinked_services"}}
+## Unlinked Services
+The following BWEntity nodes of type Service/Endpoint/Controller/Adapter have zero BW_REFERENCES to COBOL programs. These entities likely wrap or interact with COBOL programs but the connection was not detected.
+
+{{.Entities}}
+
+## Candidate COBOL Programs
+These programs are the most likely integration targets based on domain and interface relevance:
+
+{{.Candidates}}
+
+## Task
+For each unlinked service, determine which COBOL program(s) it most likely wraps, calls, or interacts with. Consider:
+- Name similarity between service and program
+- Functional domain overlap
+- Integration pattern evidence (CTG, MQ, file I/O, batch)
+{{end}}
+
+{{if eq .RepairType "fuzzy_matches"}}
+## Fuzzy Name Matches
+The following BWEntity/COBOL program pairs were identified by fuzzy name matching but need semantic confirmation.
+
+{{.Pairs}}
+
+## Task
+For each pair, confirm or reject whether the BWEntity genuinely references the COBOL program. Consider:
+- Is the name similarity coincidental or meaningful?
+- Does the entity description suggest mainframe interaction?
+- Is the COBOL program in a relevant domain?
+{{end}}
+
+## Response Format
+
+```json
+{
+  "repairs": [
+    {
+      "entityMergeId": "path/to/File.java.ClassName",
+      "targetName": "PROG001",
+      "targetType": "Program",
+      "referenceType": "wraps",
+      "description": "Service name pattern matches COBOL program",
+      "confidence": 0.75,
+      "action": "add_reference"
+    }
+  ]
+}
+```
+
+For fuzzy matches, use `"action": "confirm"` or `"action": "reject"`.
+Return empty repairs array if no valid connections found.

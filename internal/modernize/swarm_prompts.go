@@ -6,11 +6,12 @@ import (
 )
 
 type swarmPromptData struct {
-	TargetLanguage string
-	Framework      string
-	Integrations   string
-	UserQuery      string
-	AgentResults   []agentResult
+	TargetLanguage  string
+	Framework       string
+	Integrations    string
+	GenerateDiagram bool
+	UserQuery       string
+	AgentResults    []agentResult
 	// Multi-round fields
 	Round         int
 	PriorRounds   []roundSummary
@@ -142,14 +143,23 @@ Synthesize the above findings into a single, comprehensive response that:
 {{end}}{{if .Integrations}}7. Considers integration with: {{.Integrations}} — map relevant COBOL operations to appropriate integration points with these services{{end}}
 
 Do not mention the individual agents or that this was a multi-agent analysis. Present the information as a unified analysis.
+{{if .GenerateDiagram}}
+## Diagram Output
 
-## Diagrams
+You MUST include a Mermaid diagram in your response using a fenced code block:
 
-When the user asks for a visual diagram, call graph, or flow visualization:
-1. First gather relevant data using graph tools (get_call_chain, get_paragraph_flow, get_data_flow, etc.)
-2. Then call generate_mermaid_diagram with valid Mermaid syntax to produce an SVG
-3. Use flowchart (graph TD/LR) for call chains and architecture, sequence diagrams for inter-program flows
-4. Keep diagrams focused and readable — avoid cramming 50+ nodes into one diagram`))
+` + "```" + `mermaid
+graph TD
+  A --> B
+` + "```" + `
+
+Guidelines:
+- Use flowchart (graph TD/LR) for call chains, architecture, and program relationships
+- Use sequence diagrams for inter-program communication flows
+- Use ER diagrams for data structure relationships
+- Keep diagrams focused — max ~30 nodes for readability
+- The diagram will be automatically rendered to SVG
+{{end}}`))
 
 var coordinatorDecisionSystemPrompt = template.Must(template.New("coordinator_decision_system").Parse(`You are a coordinator evaluating investigation findings. Use the submit_decision tool to report your assessment.
 

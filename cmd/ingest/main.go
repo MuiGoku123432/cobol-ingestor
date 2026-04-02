@@ -491,9 +491,22 @@ func runBW(cmd *cobra.Command, args []string) error {
 
 	writer := n4j.NewBatchWriter(neo4jClient, cfg.Ingest.BatchSize, "default", logger)
 
-	// Query existing COBOL program IDs for prompt context
-	existingPrograms := queryProgramIDs(ctx, neo4jClient, logger)
-	bwPromptOverhead := computeBWPromptOverhead(existingPrograms)
+	// Query enriched COBOL graph context for BW prompts
+	bwGraphCtx, bwCtxErr := neo4jClient.QueryBWGraphContext(ctx)
+	if bwCtxErr != nil {
+		logger.Warn("failed to query BW graph context, falling back to flat IDs", zap.Error(bwCtxErr))
+		// Fallback: use flat program IDs
+		existingPrograms := queryProgramIDs(ctx, neo4jClient, logger)
+		bwGraphCtx = &n4j.BWGraphContext{RemainingPrograms: strings.Split(existingPrograms, ", ")}
+	}
+	interfaceProgs, domains, fileIOProgs, remaining := n4j.FormatBWGraphContext(bwGraphCtx, 8000)
+	bwPromptCtx := claude.BWPromptContext{
+		InterfacePrograms: interfaceProgs,
+		BusinessDomains:   domains,
+		FileIOPrograms:    fileIOProgs,
+		RemainingPrograms: remaining,
+	}
+	bwPromptOverhead := computeBWPromptOverheadTiered(interfaceProgs, domains, fileIOProgs, remaining)
 
 	// Process files with worker pool
 	const bwPassNumber = 99
@@ -590,7 +603,7 @@ func runBW(cmd *cobra.Command, args []string) error {
 		go func(ci bwChunkItem) {
 			defer func() { <-sem }()
 
-			resp, analyzeErr := claudeClient.AnalyzeBW(ctx, ci.file.Path, ci.fileType, ci.chunk.Content, existingPrograms, cfg.BW.MaxTokens)
+			resp, analyzeErr := claudeClient.AnalyzeBW(ctx, ci.file.Path, ci.fileType, ci.chunk.Content, bwPromptCtx, cfg.BW.MaxTokens)
 			if analyzeErr != nil {
 				resultCh <- bwChunkResult{filePath: ci.file.Path, file: ci.file, index: ci.chunk.Index, total: ci.totalChunks, err: fmt.Errorf("analyzing %s chunk %d: %w", ci.file.Path, ci.chunk.Index, analyzeErr)}
 				return
@@ -708,16 +721,241 @@ func runBW(cmd *cobra.Command, args []string) error {
 	totalEntities := int(totalEntitiesCount.Load())
 	totalRefs := int(totalRefsCount.Load())
 
-	fmt.Printf("\nBusinessware Ingestion Complete\n")
+	fmt.Printf("\nBusinessware Pass 1 Complete\n")
 	fmt.Printf("  Files processed: %d\n", processed)
 	fmt.Printf("  Files skipped:   %d (cached)\n", skipped)
 	fmt.Printf("  Errors:          %d\n", errors)
 	fmt.Printf("  Entities:        %d extracted\n", totalEntities)
 	fmt.Printf("  COBOL refs:      %d cross-links\n", totalRefs)
+
+	// BW Pass 2: Cross-file synthesis
+	if cfg.BW.EnablePass2 {
+		pass2Refs, pass2Rels := runBWPass2(ctx, cfg, neo4jClient, claudeClient, writer, logger)
+		fmt.Printf("\nBW Pass 2 (Cross-file Synthesis):\n")
+		fmt.Printf("  New COBOL refs:      %d\n", pass2Refs)
+		fmt.Printf("  Cross-file rels:     %d\n", pass2Rels)
+	}
+
+	// BW Pass 3: Validation & repair
+	if cfg.BW.EnablePass3 {
+		pass3Repairs := runBWPass3(ctx, cfg, neo4jClient, claudeClient, writer, logger)
+		fmt.Printf("\nBW Pass 3 (Validation & Repair):\n")
+		fmt.Printf("  Repairs applied:     %d\n", pass3Repairs)
+	}
+
 	fmt.Printf("\nResults persisted to Neo4j. Query with:\n")
 	fmt.Printf("  MATCH (f:BWFile)-[:BW_CONTAINS]->(e:BWEntity) RETURN f.path, e.name, e.entityType LIMIT 20\n")
 
 	return nil
+}
+
+// runBWPass2 performs cross-file synthesis on BW entities using Sonnet.
+func runBWPass2(ctx context.Context, cfg *config.Config, neo4jClient *n4j.Client, claudeClient *claude.Client, writer *n4j.BatchWriter, logger *zap.Logger) (int, int) {
+	logger.Info("BW Pass 2: starting cross-file synthesis")
+
+	entities, err := neo4jClient.QueryBWEntitiesForSynthesis(ctx)
+	if err != nil {
+		logger.Warn("BW Pass 2: failed to query entities", zap.Error(err))
+		return 0, 0
+	}
+
+	if len(entities) == 0 {
+		logger.Info("BW Pass 2: no entities to synthesize")
+		return 0, 0
+	}
+
+	// Group entities into batches by directory prefix
+	batchSize := cfg.BW.Pass2BatchSize
+	if batchSize <= 0 {
+		batchSize = 30
+	}
+
+	// Get focused COBOL context
+	cobolCtx, _ := neo4jClient.QueryCandidateProgramsForBWRepair(ctx)
+
+	totalRefs := 0
+	totalRels := 0
+
+	for i := 0; i < len(entities); i += batchSize {
+		end := i + batchSize
+		if end > len(entities) {
+			end = len(entities)
+		}
+		batch := entities[i:end]
+
+		// Format entity summaries
+		var entitiesCtx string
+		for _, e := range batch {
+			entitiesCtx += fmt.Sprintf("- **%s** (%s) [%s]\n  %s\n  MergeID: %s\n\n",
+				e.Name, e.EntityType, e.SourceFile, e.Description, e.MergeID)
+		}
+
+		maxTokens := cfg.BW.Pass2MaxTokens
+		if maxTokens <= 0 {
+			maxTokens = 4000
+		}
+
+		jsonResp, err := claudeClient.AnalyzeBWSynthesis(ctx, entitiesCtx, cobolCtx, maxTokens)
+		if err != nil {
+			logger.Warn("BW Pass 2: synthesis batch failed", zap.Error(err))
+			continue
+		}
+
+		parsed, err := parser.ParseBWPass2Response(jsonResp)
+		if err != nil {
+			logger.Warn("BW Pass 2: parse failed", zap.Error(err))
+			continue
+		}
+
+		// Build write rows for new refs
+		var newRefRows []map[string]any
+		for _, ref := range parsed.NewCobolRefs {
+			newRefRows = append(newRefRows, map[string]any{
+				"mergeId":    ref.EntityMergeID,
+				"target":     ref.TargetName,
+				"targetType": ref.TargetType,
+				"refType":    ref.ReferenceType,
+				"desc":       ref.Description,
+				"confidence": ref.Confidence,
+			})
+		}
+
+		// Build write rows for cross-file relationships
+		var crossRelRows []map[string]any
+		for _, rel := range parsed.CrossFileRels {
+			crossRelRows = append(crossRelRows, map[string]any{
+				"fromMergeId":  rel.FromMergeID,
+				"toMergeId":    rel.ToMergeID,
+				"relationType": rel.RelationType,
+				"description":  rel.Description,
+			})
+		}
+
+		// Build cluster nodes
+		var clusterRows []map[string]any
+		for _, c := range parsed.Clusters {
+			clusterRows = append(clusterRows, map[string]any{
+				"name":        c.Name,
+				"description": c.Description,
+			})
+		}
+
+		if err := writer.WriteBWPass2Result(ctx, newRefRows, crossRelRows, clusterRows); err != nil {
+			logger.Warn("BW Pass 2: write failed", zap.Error(err))
+		}
+
+		totalRefs += len(newRefRows)
+		totalRels += len(crossRelRows)
+	}
+
+	logger.Info("BW Pass 2 complete",
+		zap.Int("newRefs", totalRefs),
+		zap.Int("crossRels", totalRels),
+	)
+
+	return totalRefs, totalRels
+}
+
+// runBWPass3 performs validation and repair on BW entities.
+func runBWPass3(ctx context.Context, cfg *config.Config, neo4jClient *n4j.Client, claudeClient *claude.Client, writer *n4j.BatchWriter, logger *zap.Logger) int {
+	logger.Info("BW Pass 3: starting validation & repair")
+
+	totalRepairs := 0
+
+	// Check 1: Unlinked services
+	unlinked, err := neo4jClient.QueryUnlinkedBWServices(ctx)
+	if err != nil {
+		logger.Warn("BW Pass 3: failed to query unlinked services", zap.Error(err))
+	} else if len(unlinked) > 0 {
+		logger.Info("BW Pass 3: found unlinked services", zap.Int("count", len(unlinked)))
+
+		var entitiesCtx string
+		for _, s := range unlinked {
+			entitiesCtx += fmt.Sprintf("- **%s** (%s) [%s]\n  %s\n  MergeID: %s\n\n",
+				s.Name, s.EntityType, s.SourceFile, s.Description, s.MergeID)
+		}
+
+		candidates, _ := neo4jClient.QueryCandidateProgramsForBWRepair(ctx)
+
+		maxTokens := cfg.BW.Pass3MaxTokens
+		if maxTokens <= 0 {
+			maxTokens = 4000
+		}
+
+		jsonResp, err := claudeClient.AnalyzeBWRepair(ctx, "unlinked_services", entitiesCtx, candidates, maxTokens)
+		if err != nil {
+			logger.Warn("BW Pass 3: unlinked services repair failed", zap.Error(err))
+		} else {
+			repairs, parseErr := parser.ParseBWPass3Response(jsonResp)
+			if parseErr != nil {
+				logger.Warn("BW Pass 3: unlinked services parse failed", zap.Error(parseErr))
+			} else if len(repairs) > 0 {
+				var repairRows []map[string]any
+				for _, r := range repairs {
+					repairRows = append(repairRows, map[string]any{
+						"mergeId":    r.EntityMergeID,
+						"target":     r.TargetName,
+						"targetType": r.TargetType,
+						"refType":    r.ReferenceType,
+						"desc":       r.Description,
+						"confidence": r.Confidence,
+					})
+				}
+				if err := writer.WriteBWRepairResult(ctx, repairRows); err != nil {
+					logger.Warn("BW Pass 3: unlinked services write failed", zap.Error(err))
+				}
+				totalRepairs += len(repairs)
+			}
+		}
+	}
+
+	// Check 2: Fuzzy name matches
+	fuzzyMatches, err := neo4jClient.QueryBWFuzzyMatches(ctx)
+	if err != nil {
+		logger.Warn("BW Pass 3: failed to query fuzzy matches", zap.Error(err))
+	} else if len(fuzzyMatches) > 0 {
+		logger.Info("BW Pass 3: found fuzzy match candidates", zap.Int("count", len(fuzzyMatches)))
+
+		var pairsCtx string
+		for _, m := range fuzzyMatches {
+			pairsCtx += fmt.Sprintf("- BWEntity: %s (mergeId: %s) ↔ Program: %s (reason: %s)\n",
+				m.EntityName, m.EntityMergeID, m.ProgramID, m.MatchReason)
+		}
+
+		maxTokens := cfg.BW.Pass3MaxTokens
+		if maxTokens <= 0 {
+			maxTokens = 4000
+		}
+
+		jsonResp, err := claudeClient.AnalyzeBWRepair(ctx, "fuzzy_matches", pairsCtx, "", maxTokens)
+		if err != nil {
+			logger.Warn("BW Pass 3: fuzzy match repair failed", zap.Error(err))
+		} else {
+			repairs, parseErr := parser.ParseBWPass3Response(jsonResp)
+			if parseErr != nil {
+				logger.Warn("BW Pass 3: fuzzy match parse failed", zap.Error(parseErr))
+			} else if len(repairs) > 0 {
+				var repairRows []map[string]any
+				for _, r := range repairs {
+					repairRows = append(repairRows, map[string]any{
+						"mergeId":    r.EntityMergeID,
+						"target":     r.TargetName,
+						"targetType": r.TargetType,
+						"refType":    r.ReferenceType,
+						"desc":       r.Description,
+						"confidence": r.Confidence,
+					})
+				}
+				if err := writer.WriteBWRepairResult(ctx, repairRows); err != nil {
+					logger.Warn("BW Pass 3: fuzzy match write failed", zap.Error(err))
+				}
+				totalRepairs += len(repairs)
+			}
+		}
+	}
+
+	logger.Info("BW Pass 3 complete", zap.Int("totalRepairs", totalRepairs))
+	return totalRepairs
 }
 
 // queryProgramIDs fetches all existing COBOL program IDs from Neo4j for BW prompt context.
@@ -760,6 +998,15 @@ func capProgramIDs(ids []string, maxTokens int) string {
 // (system message + template + separator + prefill + margin + existingPrograms).
 func computeBWPromptOverhead(existingPrograms string) int {
 	return 2100 + chunker.EstimateTokens(existingPrograms)
+}
+
+// computeBWPromptOverheadTiered returns the estimated token overhead for BW prompts
+// using tiered context (integration patterns section adds ~500 tokens over the flat version).
+func computeBWPromptOverheadTiered(interfaceProgs, domains, fileIOProgs, remaining string) int {
+	return 2600 + chunker.EstimateTokens(interfaceProgs) +
+		chunker.EstimateTokens(domains) +
+		chunker.EstimateTokens(fileIOProgs) +
+		chunker.EstimateTokens(remaining)
 }
 
 // classifyBWExtension returns a human-readable file type from a path's extension.

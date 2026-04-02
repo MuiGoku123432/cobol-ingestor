@@ -966,7 +966,27 @@ func (p *Pipeline) RunPass4(ctx context.Context) error {
 		p.Logger.Warn("pass 4: shared DB2 flow detection failed", zap.Error(err))
 	}
 
-	// Step 3: LLM-assisted LINKAGE parameter mapping
+	// Step 3: Graph-only CICS LINK/XCTL flows
+	if err := p.Writer.DetectCICSFlows(ctx); err != nil {
+		p.Logger.Warn("pass 4: CICS flow detection failed", zap.Error(err))
+	}
+
+	// Step 4: Graph-only CICS TS/TD queue flows
+	if err := p.Writer.DetectCICSQueueFlows(ctx); err != nil {
+		p.Logger.Warn("pass 4: CICS queue flow detection failed", zap.Error(err))
+	}
+
+	// Step 5: Graph-only MQ queue flows
+	if err := p.Writer.DetectMQFlows(ctx); err != nil {
+		p.Logger.Warn("pass 4: MQ flow detection failed", zap.Error(err))
+	}
+
+	// Step 6: Graph-only JCL step sequence flows
+	if err := p.Writer.DetectJCLSequenceFlows(ctx); err != nil {
+		p.Logger.Warn("pass 4: JCL sequence flow detection failed", zap.Error(err))
+	}
+
+	// Step 7: LLM-assisted LINKAGE parameter mapping
 	callPairs, err := p.Neo4jClient.QueryCallPairsForPass4(ctx)
 	if err != nil {
 		p.Logger.Warn("pass 4: failed to query call pairs", zap.Error(err))
@@ -1052,13 +1072,186 @@ func (p *Pipeline) RunPass4(ctx context.Context) error {
 		}
 	}
 
-	p.Logger.Info("pass 4 complete",
+	p.Logger.Info("pass 4 LINKAGE complete",
 		zap.Int("success", successCount),
 		zap.Int("errors", errorCount),
 		zap.Int("linkageFlows", len(pass4Result.Flows)),
 	)
 
+	// Step 8: LLM-assisted CICS COMMAREA field-level mapping
+	cicsPairs, cicsErr := p.Neo4jClient.QueryCICSPairsForPass4(ctx)
+	if cicsErr != nil {
+		p.Logger.Warn("pass 4: failed to query CICS pairs", zap.Error(cicsErr))
+	} else if len(cicsPairs) > 0 {
+		p.Logger.Info("pass 4: analyzing COMMAREA field mappings", zap.Int("cicsPairs", len(cicsPairs)))
+
+		commareaResult := &graph.Pass4Result{}
+		var commareaSuccess, commareaErrors int
+		var commareaMu sync.Mutex
+
+		commareaSem := make(chan struct{}, p.Config.Ingest.WorkersForPass(2))
+		var commareaWg sync.WaitGroup
+
+		for _, pair := range cicsPairs {
+			commareaWg.Add(1)
+			go func(pair n4j.CallPairContext) {
+				defer commareaWg.Done()
+				commareaSem <- struct{}{}
+				defer func() { <-commareaSem }()
+
+				if ctx.Err() != nil {
+					return
+				}
+
+				fieldContext := formatCommareaContext(pair)
+				jsonResp, err := p.Claude.AnalyzeCommareaFlow(ctx, pair.CallerID, pair.CalleeID, fieldContext)
+				if err != nil {
+					p.Logger.Warn("pass 4: COMMAREA analysis failed",
+						zap.String("caller", pair.CallerID),
+						zap.String("callee", pair.CalleeID),
+						zap.Error(err))
+					commareaMu.Lock()
+					commareaErrors++
+					commareaMu.Unlock()
+					return
+				}
+
+				fields, err := parser.ParsePass4Response(jsonResp)
+				if err != nil {
+					p.Logger.Warn("pass 4: COMMAREA parse failed",
+						zap.String("caller", pair.CallerID),
+						zap.String("callee", pair.CalleeID),
+						zap.Error(err))
+					commareaMu.Lock()
+					commareaErrors++
+					commareaMu.Unlock()
+					return
+				}
+
+				commareaMu.Lock()
+				if len(fields) > 0 {
+					commareaResult.Flows = append(commareaResult.Flows, graph.CrossProgramFlow{
+						FromProgram:    pair.CallerID,
+						ToProgram:      pair.CalleeID,
+						Channel:        "CICS_COMMAREA",
+						Fields:         fields,
+						SharedResource: "COMMAREA",
+					})
+				}
+				commareaSuccess++
+				commareaMu.Unlock()
+			}(pair)
+		}
+
+		commareaWg.Wait()
+
+		if len(commareaResult.Flows) > 0 {
+			if err := p.Writer.WritePass4Result(ctx, commareaResult); err != nil {
+				p.Logger.Warn("pass 4: COMMAREA result write failed", zap.Error(err))
+			}
+		}
+
+		p.Logger.Info("pass 4 COMMAREA complete",
+			zap.Int("success", commareaSuccess),
+			zap.Int("errors", commareaErrors),
+			zap.Int("commareaFlows", len(commareaResult.Flows)),
+		)
+	}
+
+	// Step 9: LLM-assisted shared file field-level enrichment
+	sharedFilePairs, sfErr := p.Neo4jClient.QuerySharedFilePairsWithCopybooks(ctx)
+	if sfErr != nil {
+		p.Logger.Warn("pass 4: failed to query shared file pairs", zap.Error(sfErr))
+	} else if len(sharedFilePairs) > 0 {
+		p.Logger.Info("pass 4: analyzing shared file field mappings", zap.Int("pairs", len(sharedFilePairs)))
+
+		fileFlowResult := &graph.Pass4Result{}
+		var fileFlowSuccess, fileFlowErrors int
+		var fileFlowMu sync.Mutex
+
+		fileFlowSem := make(chan struct{}, p.Config.Ingest.WorkersForPass(2))
+		var fileFlowWg sync.WaitGroup
+
+		for _, pair := range sharedFilePairs {
+			fileFlowWg.Add(1)
+			go func(pair n4j.SharedFilePairContext) {
+				defer fileFlowWg.Done()
+				fileFlowSem <- struct{}{}
+				defer func() { <-fileFlowSem }()
+
+				if ctx.Err() != nil {
+					return
+				}
+
+				jsonResp, err := p.Claude.AnalyzeFileFlow(ctx, pair.WriterID, pair.ReaderID, pair.FileName, pair.CopybookName)
+				if err != nil {
+					p.Logger.Warn("pass 4: file flow analysis failed",
+						zap.String("writer", pair.WriterID),
+						zap.String("reader", pair.ReaderID),
+						zap.Error(err))
+					fileFlowMu.Lock()
+					fileFlowErrors++
+					fileFlowMu.Unlock()
+					return
+				}
+
+				fields, err := parser.ParsePass4Response(jsonResp)
+				if err != nil {
+					p.Logger.Warn("pass 4: file flow parse failed",
+						zap.String("writer", pair.WriterID),
+						zap.String("reader", pair.ReaderID),
+						zap.Error(err))
+					fileFlowMu.Lock()
+					fileFlowErrors++
+					fileFlowMu.Unlock()
+					return
+				}
+
+				fileFlowMu.Lock()
+				if len(fields) > 0 {
+					fileFlowResult.Flows = append(fileFlowResult.Flows, graph.CrossProgramFlow{
+						FromProgram:    pair.WriterID,
+						ToProgram:      pair.ReaderID,
+						Channel:        "FILE",
+						Fields:         fields,
+						SharedResource: pair.FileName,
+					})
+				}
+				fileFlowSuccess++
+				fileFlowMu.Unlock()
+			}(pair)
+		}
+
+		fileFlowWg.Wait()
+
+		if len(fileFlowResult.Flows) > 0 {
+			if err := p.Writer.WritePass4Result(ctx, fileFlowResult); err != nil {
+				p.Logger.Warn("pass 4: file flow result write failed", zap.Error(err))
+			}
+		}
+
+		p.Logger.Info("pass 4 file flow enrichment complete",
+			zap.Int("success", fileFlowSuccess),
+			zap.Int("errors", fileFlowErrors),
+			zap.Int("fileFlows", len(fileFlowResult.Flows)),
+		)
+	}
+
+	p.Logger.Info("pass 4 complete")
 	return nil
+}
+
+// formatCommareaContext formats CICS pair context for the COMMAREA prompt.
+func formatCommareaContext(pair n4j.CallPairContext) string {
+	result := fmt.Sprintf("Caller WORKING-STORAGE fields (%s):\n", pair.CallerID)
+	for _, f := range pair.CallerFields {
+		result += fmt.Sprintf("  - %s (PIC: %s)\n", f.Name, f.Picture)
+	}
+	result += fmt.Sprintf("\nCallee LINKAGE SECTION / DFHCOMMAREA (%s):\n", pair.CalleeID)
+	for _, f := range pair.CalleeParams {
+		result += fmt.Sprintf("  - %s (PIC: %s)\n", f.Name, f.Picture)
+	}
+	return result
 }
 
 // formatFieldContext formats call pair context for the Pass 4 prompt.
@@ -1175,6 +1368,9 @@ func (p *Pipeline) RunPass5(ctx context.Context, scanResult *scanner.ScanResult)
 		p.Logger.Info("pass 5: cleared false dead code flags", zap.Int("fixed", fixed))
 	}
 
+	// Step 5d: LLM-verified dead code — filter false positives from dead paragraph detection
+	p.verifyDeadParagraphs(ctx, scanResult)
+
 	// Step 6: Re-run Pass 3 for programs missing riskScore (needs relationships from steps 2-5)
 	missingPass3, err := p.Neo4jClient.QueryProgramsMissingPass3(ctx)
 	if err != nil {
@@ -1192,6 +1388,9 @@ func (p *Pipeline) RunPass5(ctx context.Context, scanResult *scanner.ScanResult)
 	} else if merged > 0 {
 		p.Logger.Info("pass 5: merged duplicate domains", zap.Int("merged", merged))
 	}
+
+	// Step 7b: LLM-enhanced domain merge for ambiguous pairs (40-80% overlap)
+	p.mergeDomainCandidatesWithLLM(ctx)
 
 	// Step 8: Fix Gap — Unannotated paragraphs
 	unannotated, err := p.Neo4jClient.QueryUnannotatedParagraphs(ctx)
@@ -1783,4 +1982,176 @@ func (p *Pipeline) processPass3Batch(ctx context.Context, slices []n4j.ProgramSl
 	}
 
 	return nil
+}
+
+// verifyDeadParagraphs uses LLM to verify that flagged dead paragraphs are truly unreachable.
+func (p *Pipeline) verifyDeadParagraphs(ctx context.Context, scanResult *scanner.ScanResult) {
+	deadSummary, err := p.Neo4jClient.GetDeadCodeSummary(ctx)
+	if err != nil {
+		p.Logger.Warn("pass 5: failed to get dead code summary for verification", zap.Error(err))
+		return
+	}
+
+	if len(deadSummary) == 0 {
+		return
+	}
+
+	p.Logger.Info("pass 5: verifying dead paragraphs with LLM", zap.Int("programs", len(deadSummary)))
+
+	totalCleared := 0
+	sem := make(chan struct{}, p.Config.Ingest.WorkersForPass(5))
+	var wg sync.WaitGroup
+	var mu sync.Mutex
+
+	for _, ds := range deadSummary {
+		wg.Add(1)
+		go func(programID string) {
+			defer wg.Done()
+			sem <- struct{}{}
+			defer func() { <-sem }()
+
+			if ctx.Err() != nil {
+				return
+			}
+
+			// Get dead paragraphs for this program
+			deadParas, err := p.Neo4jClient.GetDeadParagraphs(ctx, programID)
+			if err != nil || len(deadParas) == 0 {
+				return
+			}
+
+			// Build paragraph list for prompt
+			var paraList string
+			for _, dp := range deadParas {
+				paraList += fmt.Sprintf("- %s", dp.Name)
+				if dp.Description != "" {
+					paraList += fmt.Sprintf(" (%s)", dp.Description)
+				}
+				paraList += "\n"
+			}
+
+			// Get source code
+			filePath, _ := p.Neo4jClient.GetProgramFilePath(ctx, programID)
+			var sourceCode string
+			if filePath != "" {
+				if data, readErr := os.ReadFile(filePath); readErr == nil {
+					sourceCode = string(data)
+					// Truncate to avoid exceeding token limits
+					if len(sourceCode) > 50000 {
+						sourceCode = sourceCode[:50000] + "\n... (truncated)"
+					}
+				}
+			}
+
+			if sourceCode == "" {
+				return // Can't verify without source code
+			}
+
+			jsonResp, err := p.Claude.VerifyDeadParagraphs(ctx, programID, paraList, sourceCode)
+			if err != nil {
+				p.Logger.Warn("pass 5: dead code verification failed",
+					zap.String("program", programID), zap.Error(err))
+				return
+			}
+
+			verdicts, err := parser.ParseDeadCodeVerification(jsonResp)
+			if err != nil {
+				p.Logger.Warn("pass 5: dead code verification parse failed",
+					zap.String("program", programID), zap.Error(err))
+				return
+			}
+
+			// Collect false positives
+			var falsePositives []string
+			for _, v := range verdicts {
+				if v.IsFalsePositive {
+					falsePositives = append(falsePositives, v.ParagraphName)
+				}
+			}
+
+			if len(falsePositives) > 0 {
+				cleared, err := p.Writer.UnmarkFalsePositives(ctx, programID, falsePositives)
+				if err != nil {
+					p.Logger.Warn("pass 5: unmark false positives failed",
+						zap.String("program", programID), zap.Error(err))
+					return
+				}
+				mu.Lock()
+				totalCleared += cleared
+				mu.Unlock()
+			}
+		}(ds.ProgramID)
+	}
+
+	wg.Wait()
+
+	if totalCleared > 0 {
+		p.Logger.Info("pass 5: LLM dead code verification cleared false positives",
+			zap.Int("cleared", totalCleared))
+	}
+}
+
+// mergeDomainCandidatesWithLLM uses LLM to evaluate ambiguous domain pairs (40-80% overlap).
+func (p *Pipeline) mergeDomainCandidatesWithLLM(ctx context.Context) {
+	candidates, err := p.Writer.QueryDomainMergeCandidates(ctx)
+	if err != nil {
+		p.Logger.Warn("pass 5: failed to query domain merge candidates", zap.Error(err))
+		return
+	}
+
+	if len(candidates) == 0 {
+		return
+	}
+
+	p.Logger.Info("pass 5: evaluating ambiguous domain pairs with LLM", zap.Int("pairs", len(candidates)))
+
+	// Build context for prompt
+	var pairsContext string
+	for _, c := range candidates {
+		pairsContext += fmt.Sprintf("- Domain 1: %q (%d programs)\n  Domain 2: %q (%d programs)\n  Shared programs: %d (%.0f%% overlap)\n  Shared: %s\n\n",
+			c.Name1, c.Size1, c.Name2, c.Size2, c.Shared,
+			float64(c.Shared)/float64(min(c.Size1, c.Size2))*100,
+			c.SharedPrograms)
+	}
+
+	jsonResp, err := p.Claude.AnalyzeDomainMerge(ctx, pairsContext)
+	if err != nil {
+		p.Logger.Warn("pass 5: domain merge LLM analysis failed", zap.Error(err))
+		return
+	}
+
+	decisions, err := parser.ParseDomainMergeDecisions(jsonResp)
+	if err != nil {
+		p.Logger.Warn("pass 5: domain merge parse failed", zap.Error(err))
+		return
+	}
+
+	merged := 0
+	for _, d := range decisions {
+		if !d.ShouldMerge {
+			continue
+		}
+		keepName := d.KeepDomain
+		mergeName := d.Domain1
+		if mergeName == keepName {
+			mergeName = d.Domain2
+		}
+
+		if err := p.Writer.MergeDomainPair(ctx, keepName, mergeName); err != nil {
+			p.Logger.Warn("pass 5: LLM-directed domain merge failed",
+				zap.String("keep", keepName),
+				zap.String("merge", mergeName),
+				zap.Error(err))
+			continue
+		}
+		merged++
+		p.Logger.Info("pass 5: LLM-directed domain merge",
+			zap.String("keep", keepName),
+			zap.String("merge", mergeName),
+			zap.String("reason", d.Reason))
+	}
+
+	if merged > 0 {
+		p.Logger.Info("pass 5: LLM domain merges complete", zap.Int("merged", merged))
+	}
 }
