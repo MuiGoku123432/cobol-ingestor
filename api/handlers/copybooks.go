@@ -26,7 +26,7 @@ type CopybookHandler struct {
 // @Router /api/v1/copybooks [get]
 func (h *CopybookHandler) List(c *gin.Context) {
 	page, pageSize := parsePagination(c)
-	filter := n4j.Filter{Search: c.Query("search")}
+	filter := n4j.Filter{Search: c.Query("search"), Codebase: c.Query("codebase")}
 
 	result, err := h.Reader.ListCopybooks(c.Request.Context(), filter, page, pageSize)
 	if err != nil {

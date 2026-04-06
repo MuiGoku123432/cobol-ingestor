@@ -12,9 +12,7 @@ Return JSON:
     {"child": "CHILD-ITEM-NAME", "childLevel": 5, "parent": "PARENT-GROUP-NAME", "parentLevel": 1}
   ]
 }
-{{end}}
-
-{{if eq .RepairType "MOVES_TO"}}
+{{else if eq .RepairType "MOVES_TO"}}
 Extract ALL data movement operations: MOVE, COMPUTE, ADD, SUBTRACT, MULTIPLY, DIVIDE, STRING, UNSTRING. Return source→target data flow pairs.
 
 Return JSON:
@@ -23,9 +21,7 @@ Return JSON:
     {"fromItem": "SOURCE-FIELD", "toItem": "TARGET-FIELD", "context": "paragraph or description of the operation"}
   ]
 }
-{{end}}
-
-{{if eq .RepairType "MISSING_CALLS"}}
+{{else if eq .RepairType "MISSING_CALLS"}}
 Extract ALL CALL statements (static and dynamic). For dynamic calls (CALL variable), examine surrounding MOVEs to determine likely targets. Include the paragraph where each CALL occurs.
 
 Return JSON:
@@ -34,9 +30,7 @@ Return JSON:
     {"target": "CALLED-PROGRAM-ID", "isDynamic": false, "fromParagraph": "PARAGRAPH-NAME", "resolvedFrom": ""}
   ]
 }
-{{end}}
-
-{{if eq .RepairType "ANNOTATIONS"}}
+{{else if eq .RepairType "ANNOTATIONS"}}
 These paragraphs lack descriptions. For each, provide a 1-2 sentence business-level description and a category (INIT, MAIN, VALIDATION, IO, ERROR, CLEANUP, UTILITY, CALCULATION, REPORTING, OTHER).
 
 Missing paragraphs: {{.MissingParagraphs}}
@@ -45,6 +39,29 @@ Return JSON:
 {
   "annotations": [
     {"paragraph": "PARAGRAPH-NAME", "description": "Business-level description", "category": "CATEGORY"}
+  ]
+}
+{{else}}
+This is a combined repair covering multiple gap types: {{.RepairType}}
+
+Extract ALL applicable sections below and return them in a single JSON object.
+
+DATA HIERARCHY (CHILD_OF): For every data item at level 02-49 in the DATA DIVISION, identify its parent group item (the nearest containing group at a lower level number).
+
+DATA FLOW (MOVES_TO): Extract ALL data movement operations: MOVE, COMPUTE, ADD, SUBTRACT, MULTIPLY, DIVIDE, STRING, UNSTRING.
+
+CALL STATEMENTS (MISSING_CALLS): Extract ALL CALL statements (static and dynamic). For dynamic calls (CALL variable), examine surrounding MOVEs to determine likely targets.
+
+Return a single JSON object with all applicable sections (omit any section whose array would be empty):
+{
+  "childOfRelationships": [
+    {"child": "CHILD-ITEM-NAME", "childLevel": 5, "parent": "PARENT-GROUP-NAME", "parentLevel": 1}
+  ],
+  "dataFlows": [
+    {"fromItem": "SOURCE-FIELD", "toItem": "TARGET-FIELD", "context": "paragraph or description of the operation"}
+  ],
+  "calls": [
+    {"target": "CALLED-PROGRAM-ID", "isDynamic": false, "fromParagraph": "PARAGRAPH-NAME", "resolvedFrom": ""}
   ]
 }
 {{end}}

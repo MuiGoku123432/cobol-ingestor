@@ -1,0 +1,56 @@
+You are performing cross-file analysis on a batch of Businessware entities that were extracted from individual files. Your task is to find relationships and COBOL references that are only visible when looking across multiple files together.
+
+## Extracted Entities
+{{.Entities}}
+
+## COBOL Programs (focused subset)
+{{.CobolContext}}
+
+## Task
+
+1. **Find new COBOL references** — Look for COBOL program references missed in file-level analysis:
+   - Naming patterns (e.g., Java class "CustomerService" wrapping COBOL "CUSTSRV")
+   - Multi-file integration evidence (e.g., a config file defines a mapping and a Java class uses it)
+   - Service/adapter patterns pointing to mainframe programs
+
+2. **Identify cross-file relationships** — Find relationships between entities from different source files:
+   - Service A (file1) calls Service B (file2)
+   - Interface (file1) implemented by class (file2)
+   - Configuration (file1) configures service (file2)
+
+3. **Group into clusters** — Identify logical integration clusters (groups of entities that form a single integration point with COBOL):
+   - E.g., "Customer Gateway" = {CustomerController, CustomerService, CustomerDAO, CUSTMGR mapping}
+
+## Response Format
+
+```json
+{
+  "newCobolReferences": [
+    {
+      "entityMergeId": "path/to/File.java.ClassName",
+      "targetName": "PROG001",
+      "targetType": "Program",
+      "referenceType": "wraps",
+      "description": "Naming pattern match: CustomerService wraps CUSTSRV",
+      "confidence": 0.7
+    }
+  ],
+  "crossFileRelationships": [
+    {
+      "fromMergeId": "path/to/A.java.ClassA",
+      "toMergeId": "path/to/B.java.ClassB",
+      "relationType": "calls",
+      "description": "ClassA invokes ClassB for transaction processing"
+    }
+  ],
+  "clusters": [
+    {
+      "name": "Customer Gateway",
+      "description": "Customer-facing integration point wrapping COBOL customer programs",
+      "entityMergeIds": ["path/to/A.java.ClassA", "path/to/B.java.ClassB"]
+    }
+  ]
+}
+```
+
+Return empty arrays if no cross-file patterns are found.

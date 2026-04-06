@@ -1,0 +1,34 @@
+You are evaluating whether pairs of business domains in a COBOL codebase should be merged.
+
+## Domain Pairs
+The following pairs have 40-80% program overlap (below the auto-merge threshold of 80%). Determine if they represent the same business concept and should be merged.
+
+{{.DomainPairs}}
+
+## Task
+For each pair, decide:
+- **merge** — The domains represent the same business concept (just named differently or split unnecessarily)
+- **keep_separate** — The domains represent genuinely different business areas that happen to share some programs
+
+Consider:
+1. Name similarity and synonyms (e.g., "Customer Management" vs "Client Services")
+2. The shared programs — do they suggest the domains cover the same functional area?
+3. Whether one domain is a subset of the other
+
+## Response Format
+
+```json
+{
+  "decisions": [
+    {
+      "domain1": "Customer Management",
+      "domain2": "Client Services",
+      "action": "merge",
+      "keepDomain": "Customer Management",
+      "reason": "Both cover customer-facing operations; Client Services is a synonym"
+    }
+  ]
+}
+```
+
+Action must be `merge` or `keep_separate`. When merging, specify which domain name to keep.

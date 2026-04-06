@@ -52,7 +52,7 @@ func (s *IngestService) SelectDirectory(title string) (string, error) {
 
 // StartIngestion starts the pipeline in a background goroutine.
 // pass=0 runs all passes; pass=1-5 runs a specific pass.
-func (s *IngestService) StartIngestion(dir string, pass int) error {
+func (s *IngestService) StartIngestion(dir string, pass int, contentDetect bool) error {
 	s.mu.Lock()
 	if s.running {
 		s.mu.Unlock()
@@ -81,7 +81,7 @@ func (s *IngestService) StartIngestion(dir string, pass int) error {
 
 		s.emit("start", map[string]any{"dir": dir, "pass": pass})
 
-		if err := s.runPipeline(ctx, dir, pass); err != nil {
+		if err := s.runPipeline(ctx, dir, pass, contentDetect); err != nil {
 			if ctx.Err() != nil {
 				s.emit("cancelled", nil)
 			} else {
@@ -120,14 +120,17 @@ func (s *IngestService) emit(event string, data any) {
 	runtime.EventsEmit(s.app.ctx, "ingest:"+event, data)
 }
 
-func (s *IngestService) runPipeline(ctx context.Context, dir string, passFlag int) error {
+func (s *IngestService) runPipeline(ctx context.Context, dir string, passFlag int, contentDetect bool) error {
 	cfg := s.app.cfg
 	cfg.Ingest.RootDir = dir
 	logger := s.newEventLogger()
 
 	// Scan filesystem
 	s.emit("progress", map[string]any{"phase": "scanning", "message": "Scanning files..."})
-	scanResult, err := scanner.Scan(ctx, dir, logger)
+	detect := contentDetect || cfg.Ingest.ContentDetect
+	scanResult, err := scanner.Scan(ctx, dir, logger, scanner.ScanOptions{
+		ContentDetect: detect,
+	})
 	if err != nil {
 		return fmt.Errorf("scanning: %w", err)
 	}
@@ -185,12 +188,20 @@ func (s *IngestService) runPipeline(ctx context.Context, dir string, passFlag in
 		}
 	}
 
+	// Classify .txt files if content detection is enabled
+	if detect && len(scanResult.Snippets) > 0 {
+		s.emit("progress", map[string]any{"phase": "classifying", "message": "Classifying .txt files..."})
+		if err := scanner.ClassifyPendingFiles(ctx, scanResult, provider, cfg.Claude.SonnetModel, logger, fileCache); err != nil {
+			logger.Warn("content classification had errors", zap.Error(err))
+		}
+	}
+
 	claudeClient, err := claude.NewClient(provider, cfg.Claude, logger)
 	if err != nil {
 		return fmt.Errorf("creating claude client: %w", err)
 	}
 
-	writer := n4j.NewBatchWriter(neo4jClient, cfg.Ingest.BatchSize, logger)
+	writer := n4j.NewBatchWriter(neo4jClient, cfg.Ingest.BatchSize, "default", logger)
 
 	pipe := &pipeline.Pipeline{
 		Config:      cfg,
@@ -345,10 +356,11 @@ func (s *IngestService) runBWPipeline(ctx context.Context, dir, extensionsStr st
 
 	// Scan BW files
 	s.emit("progress", map[string]any{"phase": "scanning", "message": "Scanning BusinessWare files..."})
-	scanResult, err := scanner.ScanBW(ctx, cfg.BW.Dir, extensions, logger)
+	bwScanResult, err := scanner.ScanBW(ctx, cfg.BW.Dir, extensions, logger, cfg.BW.MaxJARDepth, cfg.BW.MaxWorkers)
 	if err != nil {
 		return fmt.Errorf("scanning BW files: %w", err)
 	}
+	scanResult := bwScanResult.ScanResult
 	if len(scanResult.Files) == 0 {
 		return fmt.Errorf("no BusinessWare files found in %s", cfg.BW.Dir)
 	}
@@ -399,10 +411,23 @@ func (s *IngestService) runBWPipeline(ctx context.Context, dir, extensionsStr st
 		return fmt.Errorf("creating claude client: %w", err)
 	}
 
-	writer := n4j.NewBatchWriter(neo4jClient, cfg.Ingest.BatchSize, logger)
+	writer := n4j.NewBatchWriter(neo4jClient, cfg.Ingest.BatchSize, "default", logger)
 
-	// Query existing COBOL program IDs for prompt context
-	existingPrograms := queryProgramIDs(ctx, neo4jClient, logger)
+	// Query enriched COBOL graph context for BW prompts
+	bwGraphCtx, bwCtxErr := neo4jClient.QueryBWGraphContext(ctx)
+	if bwCtxErr != nil {
+		logger.Warn("failed to query BW graph context, falling back to flat IDs", zap.Error(bwCtxErr))
+		existingPrograms := queryProgramIDs(ctx, neo4jClient, logger)
+		bwGraphCtx = &n4j.BWGraphContext{RemainingPrograms: strings.Split(existingPrograms, ", ")}
+	}
+	interfaceProgs, domains, fileIOProgs, remaining := n4j.FormatBWGraphContext(bwGraphCtx, 8000)
+	bwPromptCtx := claude.BWPromptContext{
+		InterfacePrograms: interfaceProgs,
+		BusinessDomains:   domains,
+		FileIOPrograms:    fileIOProgs,
+		RemainingPrograms: remaining,
+	}
+	bwPromptOverhead := computeBWPromptOverheadTiered(interfaceProgs, domains, fileIOProgs, remaining)
 
 	// Build work items, skipping cached files
 	const bwPassNumber = 99
@@ -424,13 +449,19 @@ func (s *IngestService) runBWPipeline(ctx context.Context, dir, extensionsStr st
 			continue
 		}
 
-		content, readErr := os.ReadFile(f.Path)
+		var content []byte
+		var readErr error
+		if jarContent, ok := bwScanResult.JARContents[f.Path]; ok {
+			content = jarContent
+		} else {
+			content, readErr = os.ReadFile(f.Path)
+		}
 		if readErr != nil {
 			logger.Error("failed to read file", zap.String("file", f.Path), zap.Error(readErr))
 			continue
 		}
 
-		chunks, chunkErr := chunker.ChunkBWFile(f.Path, content, cfg.BW.TokenLimit)
+		chunks, chunkErr := chunker.ChunkBWFile(f.Path, content, cfg.BW.TokenLimit, bwPromptOverhead)
 		if chunkErr != nil {
 			logger.Error("failed to chunk file", zap.String("file", f.Path), zap.Error(chunkErr))
 			continue
@@ -466,7 +497,7 @@ func (s *IngestService) runBWPipeline(ctx context.Context, dir, extensionsStr st
 			fileType := classifyBWExtension(wi.file.Path)
 
 			for _, chunk := range wi.chunks {
-				resp, analyzeErr := claudeClient.AnalyzeBW(ctx, wi.file.Path, fileType, chunk.Content, existingPrograms, cfg.BW.MaxTokens)
+				resp, analyzeErr := claudeClient.AnalyzeBW(ctx, wi.file.Path, fileType, chunk.Content, bwPromptCtx, cfg.BW.MaxTokens)
 				if analyzeErr != nil {
 					resultCh <- bwResult{file: wi.file, err: fmt.Errorf("analyzing %s chunk %d: %w", wi.file.Path, chunk.Index, analyzeErr)}
 					return
@@ -555,10 +586,18 @@ func (s *IngestService) StartOracleAnalysis() error {
 	s.mu.Unlock()
 
 	if s.app.Neo4jService.client == nil {
-		s.mu.Lock()
-		s.running = false
-		s.mu.Unlock()
-		return fmt.Errorf("not connected to Neo4j")
+		if s.app.cfg.Neo4j.URI == "" {
+			s.mu.Lock()
+			s.running = false
+			s.mu.Unlock()
+			return fmt.Errorf("Neo4j not configured (set connection details in Settings)")
+		}
+		if err := s.app.Neo4jService.tryConnect(s.app.ctx); err != nil {
+			s.mu.Lock()
+			s.running = false
+			s.mu.Unlock()
+			return fmt.Errorf("Neo4j connection failed: %w", err)
+		}
 	}
 
 	ctx, cancel := context.WithCancel(s.app.ctx)
@@ -666,12 +705,11 @@ func (s *IngestService) runOracleAnalysis(ctx context.Context) error {
 
 	// Create in-process MCP client for COBOL graph
 	s.emit("progress", map[string]any{"phase": "init", "message": "Initializing COBOL graph MCP..."})
-	reader := s.app.Neo4jService.reader
 	var batchWriter *n4j.BatchWriter
 	if s.app.Neo4jService.client != nil {
-		batchWriter = n4j.NewBatchWriter(s.app.Neo4jService.client, 500, logger)
+		batchWriter = n4j.NewBatchWriter(s.app.Neo4jService.client, 500, "default", logger)
 	}
-	server := mcpkg.NewServer(reader, batchWriter)
+	server := mcpkg.NewServer(s.app.Neo4jService.client, batchWriter, nil)
 	graphClient, err := modernize.NewMCPClientInProcess(ctx, server)
 	if err != nil {
 		return fmt.Errorf("creating in-process graph MCP: %w", err)
@@ -706,7 +744,7 @@ func (s *IngestService) runOracleAnalysis(ctx context.Context) error {
 		logger.Warn("migrations failed (may already be applied)", zap.Error(err))
 	}
 
-	writer := n4j.NewBatchWriter(neo4jClient, cfg.Ingest.BatchSize, logger)
+	writer := n4j.NewBatchWriter(neo4jClient, cfg.Ingest.BatchSize, "default", logger)
 	if err := writer.WriteExternalDBResult(ctx, result); err != nil {
 		return fmt.Errorf("writing results to neo4j: %w", err)
 	}
@@ -720,6 +758,7 @@ func (s *IngestService) runOracleAnalysis(ctx context.Context) error {
 }
 
 // queryProgramIDs fetches all existing COBOL program IDs from Neo4j for BW prompt context.
+// The result is capped to avoid unbounded token growth in the prompt.
 func queryProgramIDs(ctx context.Context, client *n4j.Client, logger *zap.Logger) string {
 	ids, err := client.QueryAllProgramIDs(ctx)
 	if err != nil {
@@ -729,7 +768,44 @@ func queryProgramIDs(ctx context.Context, client *n4j.Client, logger *zap.Logger
 	if len(ids) == 0 {
 		return "(none found)"
 	}
-	return strings.Join(ids, ", ")
+	return capProgramIDs(ids, 4000)
+}
+
+// capProgramIDs joins IDs until the token estimate reaches maxTokens,
+// then appends a summary of remaining IDs to prevent unbounded prompt growth.
+func capProgramIDs(ids []string, maxTokens int) string {
+	var sb strings.Builder
+	tokens := 0
+	for i, id := range ids {
+		entry := id
+		if i > 0 {
+			entry = ", " + id
+		}
+		entryTokens := chunker.EstimateTokens(entry)
+		if tokens+entryTokens > maxTokens {
+			remaining := len(ids) - i
+			fmt.Fprintf(&sb, " ... and %d more programs", remaining)
+			break
+		}
+		sb.WriteString(entry)
+		tokens += entryTokens
+	}
+	return sb.String()
+}
+
+// computeBWPromptOverhead returns the estimated token overhead for BW prompts
+// (system message + template + separator + prefill + margin + existingPrograms).
+func computeBWPromptOverhead(existingPrograms string) int {
+	return 2100 + chunker.EstimateTokens(existingPrograms)
+}
+
+// computeBWPromptOverheadTiered returns the estimated token overhead for BW prompts
+// using tiered context.
+func computeBWPromptOverheadTiered(interfaceProgs, domains, fileIOProgs, remaining string) int {
+	return 2600 + chunker.EstimateTokens(interfaceProgs) +
+		chunker.EstimateTokens(domains) +
+		chunker.EstimateTokens(fileIOProgs) +
+		chunker.EstimateTokens(remaining)
 }
 
 // classifyBWExtension returns a human-readable file type from a path's extension.
@@ -738,6 +814,8 @@ func classifyBWExtension(path string) string {
 	switch ext {
 	case ".java":
 		return "Java"
+	case ".class":
+		return "Java Bytecode"
 	case ".md":
 		return "Markdown"
 	case ".xml":
@@ -746,6 +824,22 @@ func classifyBWExtension(path string) string {
 		return "Businessware"
 	case ".txt":
 		return "Text"
+	case ".properties":
+		return "Properties"
+	case ".json":
+		return "JSON"
+	case ".yml", ".yaml":
+		return "YAML"
+	case ".mf":
+		return "Manifest"
+	case ".vsdx":
+		return "Visio Diagram"
+	case ".drawio":
+		return "DrawIO Diagram"
+	case ".svg":
+		return "SVG Diagram"
+	case ".puml", ".plantuml":
+		return "PlantUML Diagram"
 	default:
 		return "Unknown"
 	}

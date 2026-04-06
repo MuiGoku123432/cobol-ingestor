@@ -1,27 +1,37 @@
 <script lang="ts">
   import Sidebar from './lib/components/layout/Sidebar.svelte';
   import StatusBar from './lib/components/layout/StatusBar.svelte';
+  import DashboardView from './lib/components/dashboard/DashboardView.svelte';
+  import BrowseView from './lib/components/browse/BrowseView.svelte';
+  import AnalysisView from './lib/components/analysis/AnalysisView.svelte';
   import IngestView from './lib/components/ingest/IngestView.svelte';
   import ChatView from './lib/components/chat/ChatView.svelte';
-  import SwarmView from './lib/components/chat/SwarmView.svelte';
-  import SettingsView from './lib/components/settings/SettingsView.svelte';
+  import StrategyView from './lib/components/strategy/StrategyView.svelte';
   import GraphView from './lib/components/graph/GraphView.svelte';
+  import SettingsView from './lib/components/settings/SettingsView.svelte';
+  import { usePersistedState } from './lib/stores/persisted.svelte';
 
-  let currentView = $state('ingest');
+  let saved = usePersistedState('app', { currentView: 'dashboard' });
 </script>
 
 <div class="app">
-  <Sidebar bind:currentView />
+  <Sidebar bind:currentView={saved.currentView} />
   <main class="content">
-    {#if currentView === 'ingest'}
+    {#if saved.currentView === 'dashboard'}
+      <DashboardView />
+    {:else if saved.currentView === 'browse'}
+      <BrowseView />
+    {:else if saved.currentView === 'analysis'}
+      <AnalysisView />
+    {:else if saved.currentView === 'ingest'}
       <IngestView />
-    {:else if currentView === 'chat'}
+    {:else if saved.currentView === 'chat'}
       <ChatView />
-    {:else if currentView === 'swarm'}
-      <SwarmView />
-    {:else if currentView === 'graph'}
+    {:else if saved.currentView === 'strategy'}
+      <StrategyView />
+    {:else if saved.currentView === 'graph'}
       <GraphView />
-    {:else if currentView === 'settings'}
+    {:else if saved.currentView === 'settings'}
       <SettingsView />
     {/if}
   </main>

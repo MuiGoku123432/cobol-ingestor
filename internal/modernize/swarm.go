@@ -6,19 +6,21 @@ import (
 	"fmt"
 	"net/http"
 	"sort"
+	"strings"
 	"sync"
 	"text/template"
 
 	"cobol-ingestor/internal/llm"
 
 	"github.com/gin-gonic/gin"
+	"go.uber.org/zap"
 )
 
 const (
-	maxSwarmToolIterations         = 10
-	maxCoordinatorToolIterations   = 5
-	maxContextCharsLatest          = 3000
-	maxContextCharsPrior           = 1500
+	maxSwarmToolIterations       = 25
+	maxCoordinatorToolIterations = 10
+	maxContextCharsLatest        = 3000
+	maxContextCharsPrior         = 1500
 )
 
 type agentRole struct {
@@ -81,6 +83,42 @@ func truncateForContext(s string, maxChars int) string {
 	return s[:maxChars] + "..."
 }
 
+// summarizeForCoordinator extracts key findings from agent output to reduce noise.
+// It pulls structured lines (bullets, headers, numbered items) and COBOL artifact names,
+// dropping verbose prose paragraphs. Falls back to truncation if extraction yields nothing.
+func summarizeForCoordinator(s string, maxChars int) string {
+	if len(s) <= maxChars {
+		return s
+	}
+
+	var keyLines []string
+	for _, line := range strings.Split(s, "\n") {
+		trimmed := strings.TrimSpace(line)
+		if trimmed == "" {
+			continue
+		}
+		// Keep structured lines: bullets, numbered items, headers, lines with COBOL artifacts
+		if strings.HasPrefix(trimmed, "-") ||
+			strings.HasPrefix(trimmed, "*") ||
+			strings.HasPrefix(trimmed, "#") ||
+			(len(trimmed) > 0 && trimmed[0] >= '1' && trimmed[0] <= '9' && strings.Contains(trimmed[:min(3, len(trimmed))], ".")) ||
+			strings.Contains(trimmed, "PROGRAM-ID") ||
+			strings.Contains(trimmed, "COPY ") ||
+			strings.Contains(trimmed, "CALL ") ||
+			strings.Contains(trimmed, "PERFORM ") ||
+			strings.ContainsAny(trimmed, "→←") {
+			keyLines = append(keyLines, trimmed)
+		}
+	}
+
+	if len(keyLines) == 0 {
+		return truncateForContext(s, maxChars)
+	}
+
+	result := strings.Join(keyLines, "\n")
+	return truncateForContext(result, maxChars)
+}
+
 // coordinatorDecision represents the coordinator's assessment between rounds.
 type coordinatorDecision struct {
 	Satisfied bool              `json:"satisfied"`
@@ -89,23 +127,12 @@ type coordinatorDecision struct {
 }
 
 // SwarmHandler creates a Gin handler for the agent swarm endpoint.
+// This is HTTP glue that delegates to RunSwarm.
 func SwarmHandler(ps *ProviderState, mcpClient *MCPClient, defaultModel string, defaultMaxTokens int, sessionStore SessionStore) gin.HandlerFunc {
-	tools := GetToolDefinitions()
-
 	return func(c *gin.Context) {
-		provider := ps.Get()
-		if provider == nil {
+		if ps.Get() == nil {
 			c.JSON(http.StatusUnauthorized, gin.H{"error": "not authenticated"})
 			return
-		}
-
-		model := ps.GetModel()
-		if model == "" {
-			model = defaultModel
-		}
-		maxTokens := ps.GetMaxTokens()
-		if maxTokens == 0 {
-			maxTokens = defaultMaxTokens
 		}
 
 		var req struct {
@@ -122,193 +149,27 @@ func SwarmHandler(ps *ProviderState, mcpClient *MCPClient, defaultModel string, 
 			return
 		}
 
-		// Extract the user's latest question
-		userQuery := ""
-		for i := len(req.Messages) - 1; i >= 0; i-- {
-			if req.Messages[i].Role == "user" {
-				userQuery = req.Messages[i].Content
-				break
-			}
-		}
-		if userQuery == "" {
-			c.JSON(http.StatusBadRequest, gin.H{"error": "no user message found"})
-			return
-		}
+		SetSSEHeaders(c.Writer)
 
-		// Set SSE headers
-		c.Writer.Header().Set("Content-Type", "text/event-stream")
-		c.Writer.Header().Set("Cache-Control", "no-cache")
-		c.Writer.Header().Set("Connection", "keep-alive")
-		c.Writer.Header().Set("X-Accel-Buffering", "no")
+		emitter := &SSEEmitter{W: c.Writer, Mu: &sync.Mutex{}}
 
-		ctx := c.Request.Context()
-		w := c.Writer
-		var mu sync.Mutex
-
-		targetLanguage := req.TargetLanguage
-		framework := req.Framework
-		integrations := req.Integrations
-		if req.DiscoveryMode {
-			targetLanguage = ""
-			framework = ""
-			integrations = ""
-		}
-
-		promptData := swarmPromptData{
-			TargetLanguage: targetLanguage,
-			Framework:      framework,
-			Integrations:   integrations,
-		}
-
-		maxRounds := 1
-		if req.MultiRound {
-			maxRounds = 3
-		}
-
-		cache := newToolCache()
-		var allRounds []roundSummary
-		var followUpQueries map[string]string
-
-		for round := 1; round <= maxRounds; round++ {
-			if ctx.Err() != nil {
-				return
-			}
-
-			// SSE: round_start (multi-round only)
-			if maxRounds > 1 {
-				mu.Lock()
-				SendSSEJSON(w, "round_start", map[string]any{
-					"round":     round,
-					"maxRounds": maxRounds,
-				})
-				mu.Unlock()
-			}
-
-			// Determine which agents to run
-			agentsToRun, agentFollowUps := selectAgents(agentRoles, followUpQueries, round)
-
-			// Run agents in parallel
-			results := make([]agentResult, len(agentsToRun))
-			var wg sync.WaitGroup
-
-			for i, role := range agentsToRun {
-				wg.Add(1)
-				go func(idx int, role agentRole) {
-					defer wg.Done()
-
-					// Build per-agent prompt data with round context
-					agentPromptData := promptData
-					agentPromptData.Round = round
-					if round > 1 {
-						// Truncate prior round summaries for context
-						agentPromptData.PriorRounds = truncateRoundSummaries(allRounds, maxContextCharsPrior)
-					}
-					if q, ok := agentFollowUps[role.ID]; ok {
-						agentPromptData.FollowUpQuery = q
-					}
-
-					// Use round-aware agent ID for SSE
-					sseID := role.ID
-					if maxRounds > 1 {
-						sseID = fmt.Sprintf("%s-round-%d", role.ID, round)
-					}
-					sseRole := agentRole{ID: sseID, Name: role.Name, Prompt: role.Prompt}
-
-					summary, err := runAgent(ctx, sseRole, role.Prompt, userQuery, agentPromptData, provider, mcpClient, cache, tools, model, maxTokens, w, &mu, round, maxRounds > 1)
-					if err != nil {
-						mu.Lock()
-						SendSSEJSON(w, "agent_complete", map[string]string{
-							"id":      sseID,
-							"summary": fmt.Sprintf("Error: %v", err),
-						})
-						mu.Unlock()
-						results[idx] = agentResult{Name: role.Name, Summary: fmt.Sprintf("Error: %v", err)}
-						return
-					}
-					results[idx] = agentResult{Name: role.Name, Summary: summary}
-				}(i, role)
-			}
-
-			wg.Wait()
-
-			if ctx.Err() != nil {
-				return
-			}
-
-			allRounds = append(allRounds, roundSummary{Round: round, Results: results})
-
-			// SSE: round_complete (multi-round only)
-			if maxRounds > 1 {
-				mu.Lock()
-				SendSSEJSON(w, "round_complete", map[string]any{"round": round})
-				mu.Unlock()
-			}
-
-			// If this is the last allowed round, skip decision
-			if round == maxRounds {
-				break
-			}
-
-			// Coordinator decision: do we need more info?
-			latestResults := allRounds[len(allRounds)-1].Results
-			decision, err := runCoordinatorDecision(ctx, latestResults, userQuery, promptData, provider, model, w, &mu, round)
-			if err != nil || decision.Satisfied {
-				break
-			}
-			followUpQueries = decision.FollowUps
-		}
-
-		if ctx.Err() != nil {
-			return
-		}
-
-		// Flatten all round results for final synthesis
-		finalResults := flattenRounds(allRounds, maxContextCharsLatest, maxContextCharsPrior)
-
-		// Final synthesis with tool access
-		mu.Lock()
-		SendSSEJSON(w, "synthesis_start", map[string]string{})
-		mu.Unlock()
-
-		promptData.UserQuery = userQuery
-		promptData.AgentResults = finalResults
-
-		coordText, err := runCoordinatorSynthesis(ctx, promptData, provider, mcpClient, cache, tools, model, maxTokens, w, &mu)
+		err := RunSwarm(c.Request.Context(), SwarmParams{
+			Provider:      ps,
+			MCPClient:     mcpClient,
+			SessionStore:  sessionStore,
+			SessionID:     req.SessionID,
+			Messages:      req.Messages,
+			DiscoveryMode: req.DiscoveryMode,
+			MultiRound:    req.MultiRound,
+			TargetLang:    req.TargetLanguage,
+			Framework:     req.Framework,
+			Integrations:  req.Integrations,
+			Emitter:       emitter,
+			Logger:        nil,
+		})
 		if err != nil {
-			mu.Lock()
-			SendSSEJSON(w, "error", map[string]string{"error": fmt.Sprintf("Coordinator error: %v", err)})
-			mu.Unlock()
-			return
+			emitter.Emit("error", map[string]string{"error": err.Error()})
 		}
-
-		// Persist session
-		if sessionStore != nil {
-			allMessages := make([]chatInputMessage, len(req.Messages))
-			copy(allMessages, req.Messages)
-			if coordText != "" {
-				allMessages = append(allMessages, chatInputMessage{Role: "assistant", Content: coordText})
-			}
-
-			if req.SessionID == "" {
-				title := userQuery
-				if len(title) > 50 {
-					title = title[:50]
-				}
-				session, err := sessionStore.Create(title)
-				if err == nil {
-					_ = sessionStore.Update(session.ID, allMessages, "")
-					mu.Lock()
-					SendSSEJSON(w, "session_created", map[string]string{"id": session.ID, "title": session.Title})
-					mu.Unlock()
-				}
-			} else {
-				_ = sessionStore.Update(req.SessionID, allMessages, "")
-			}
-		}
-
-		mu.Lock()
-		SendSSE(w, "done", "{}")
-		mu.Unlock()
 	}
 }
 
@@ -348,6 +209,7 @@ func truncateRoundSummaries(rounds []roundSummary, maxChars int) []roundSummary 
 
 // flattenRounds creates a flat list of agent results for the coordinator.
 // The latest round gets higher char limits; prior rounds get lower limits.
+// Uses summarizeForCoordinator to extract key findings rather than naive truncation.
 func flattenRounds(rounds []roundSummary, latestMax, priorMax int) []agentResult {
 	if len(rounds) == 0 {
 		return nil
@@ -358,7 +220,7 @@ func flattenRounds(rounds []roundSummary, latestMax, priorMax int) []agentResult
 		for i, ar := range rounds[0].Results {
 			results[i] = agentResult{
 				Name:    ar.Name,
-				Summary: truncateForContext(ar.Summary, latestMax),
+				Summary: summarizeForCoordinator(ar.Summary, latestMax),
 			}
 		}
 		return results
@@ -373,7 +235,7 @@ func flattenRounds(rounds []roundSummary, latestMax, priorMax int) []agentResult
 		for _, ar := range r.Results {
 			all = append(all, agentResult{
 				Name:    fmt.Sprintf("%s (Round %d)", ar.Name, r.Round),
-				Summary: truncateForContext(ar.Summary, maxChars),
+				Summary: summarizeForCoordinator(ar.Summary, maxChars),
 			})
 		}
 	}
@@ -382,7 +244,7 @@ func flattenRounds(rounds []roundSummary, latestMax, priorMax int) []agentResult
 
 func runAgent(
 	ctx context.Context,
-	sseRole agentRole, // role with potentially round-qualified ID for SSE
+	sseRole agentRole, // role with potentially round-qualified ID for events
 	promptTmpl *template.Template,
 	userQuery string,
 	promptData swarmPromptData,
@@ -392,8 +254,7 @@ func runAgent(
 	tools []llm.ToolDefinition,
 	model string,
 	maxTokens int,
-	w http.ResponseWriter,
-	mu *sync.Mutex,
+	emitter EventEmitter,
 	round int,
 	isMultiRound bool,
 ) (string, error) {
@@ -405,9 +266,7 @@ func runAgent(
 	if isMultiRound {
 		startEvent["round"] = round
 	}
-	mu.Lock()
-	SendSSEJSON(w, "agent_start", startEvent)
-	mu.Unlock()
+	emitter.Emit("agent_start", startEvent)
 
 	systemPrompt, err := buildSwarmPrompt(promptTmpl, promptData)
 	if err != nil {
@@ -445,21 +304,17 @@ func runAgent(
 
 		if text := resp.TextContent(); text != "" {
 			fullText += text
-			mu.Lock()
-			SendSSEJSON(w, "agent_progress", map[string]string{
+			emitter.Emit("agent_progress", map[string]string{
 				"id":      sseRole.ID,
 				"content": text,
 			})
-			mu.Unlock()
 		}
 
 		if resp.StopReason != "tool_use" {
-			mu.Lock()
-			SendSSEJSON(w, "agent_complete", map[string]string{
+			emitter.Emit("agent_complete", map[string]string{
 				"id":      sseRole.ID,
 				"summary": truncate(fullText, 500),
 			})
-			mu.Unlock()
 			return fullText, nil
 		}
 
@@ -473,13 +328,11 @@ func runAgent(
 
 		var toolResults []llm.ContentBlock
 		for _, block := range toolUseBlocks {
-			mu.Lock()
-			SendSSEJSON(w, "agent_tool_start", map[string]string{
+			emitter.Emit("agent_tool_start", map[string]string{
 				"id":       sseRole.ID,
 				"toolName": block.Name,
 				"toolId":   block.ID,
 			})
-			mu.Unlock()
 
 			var args map[string]any
 			if err := json.Unmarshal(block.Input, &args); err != nil {
@@ -489,37 +342,31 @@ func runAgent(
 			cacheKey := cache.Key(block.Name, args)
 			if cached, ok := cache.Get(cacheKey); ok {
 				toolResults = append(toolResults, llm.NewToolResultContent(block.ID, cached, false))
-				mu.Lock()
-				SendSSEJSON(w, "agent_tool_result", map[string]string{
+				emitter.Emit("agent_tool_result", map[string]string{
 					"id":     sseRole.ID,
 					"toolId": block.ID,
 					"result": truncate(cached, 300),
 					"cached": "true",
 				})
-				mu.Unlock()
 			} else {
 				result, callErr := mcpClient.CallTool(ctx, block.Name, args)
 				if callErr != nil {
 					toolResults = append(toolResults, llm.NewToolResultContent(block.ID, fmt.Sprintf("Error: %v", callErr), true))
-					mu.Lock()
-					SendSSEJSON(w, "agent_tool_result", map[string]string{
+					emitter.Emit("agent_tool_result", map[string]string{
 						"id":     sseRole.ID,
 						"toolId": block.ID,
 						"result": callErr.Error(),
 						"cached": "false",
 					})
-					mu.Unlock()
 				} else {
 					cache.Set(cacheKey, result)
 					toolResults = append(toolResults, llm.NewToolResultContent(block.ID, result, false))
-					mu.Lock()
-					SendSSEJSON(w, "agent_tool_result", map[string]string{
+					emitter.Emit("agent_tool_result", map[string]string{
 						"id":     sseRole.ID,
 						"toolId": block.ID,
 						"result": truncate(result, 300),
 						"cached": "false",
 					})
-					mu.Unlock()
 				}
 			}
 		}
@@ -531,16 +378,42 @@ func runAgent(
 	}
 
 	// Max iterations reached — return what we have
-	mu.Lock()
-	SendSSEJSON(w, "agent_complete", map[string]string{
+	emitter.Emit("agent_complete", map[string]string{
 		"id":      sseRole.ID,
 		"summary": truncate(fullText, 500),
 	})
-	mu.Unlock()
 	return fullText, nil
 }
 
+// coordinatorDecisionTool is the tool definition used to enforce structured coordinator decisions.
+var coordinatorDecisionTool = llm.ToolDefinition{
+	Name:        "submit_decision",
+	Description: "Submit your coordinator decision about whether the agent findings sufficiently answer the user's question.",
+	InputSchema: map[string]any{
+		"type": "object",
+		"properties": map[string]any{
+			"satisfied": map[string]any{
+				"type":        "boolean",
+				"description": "Whether the findings sufficiently answer the user's question",
+			},
+			"reasoning": map[string]any{
+				"type":        "string",
+				"description": "Brief explanation of your decision",
+			},
+			"follow_ups": map[string]any{
+				"type":        "object",
+				"description": "Map of agentId to follow-up question. Valid IDs: structure, dataflow, dependency, business",
+				"additionalProperties": map[string]any{"type": "string"},
+			},
+		},
+		"required": []any{"satisfied", "reasoning"},
+	},
+}
+
 // runCoordinatorDecision asks the coordinator if the current findings are sufficient.
+// Uses a submit_decision tool call to enforce structured JSON output, with text-based
+// JSON parsing as a fallback. Defaults to Satisfied: false on parse failure so that
+// a retry round is triggered rather than silently ending investigation.
 func runCoordinatorDecision(
 	ctx context.Context,
 	results []agentResult,
@@ -548,9 +421,9 @@ func runCoordinatorDecision(
 	promptData swarmPromptData,
 	provider llm.ChatProvider,
 	model string,
-	w http.ResponseWriter,
-	mu *sync.Mutex,
+	emitter EventEmitter,
 	round int,
+	logger *zap.Logger,
 ) (*coordinatorDecision, error) {
 	decisionPromptData := swarmPromptData{
 		TargetLanguage: promptData.TargetLanguage,
@@ -560,15 +433,20 @@ func runCoordinatorDecision(
 		AgentResults:   results,
 	}
 
-	systemPrompt, err := buildSwarmPrompt(coordinatorDecisionPrompt, decisionPromptData)
+	systemPrompt, err := buildSwarmPrompt(coordinatorDecisionSystemPrompt, decisionPromptData)
 	if err != nil {
-		return &coordinatorDecision{Satisfied: true}, err
+		return &coordinatorDecision{Satisfied: false, Reasoning: "failed to build system prompt"}, err
+	}
+
+	userContent, err := buildSwarmPrompt(coordinatorDecisionUserPrompt, decisionPromptData)
+	if err != nil {
+		return &coordinatorDecision{Satisfied: false, Reasoning: "failed to build user prompt"}, err
 	}
 
 	messages := []llm.ChatMessage{
 		{
 			Role:    llm.RoleUser,
-			Content: []llm.ContentBlock{llm.NewTextContent("Evaluate the findings and respond with JSON.")},
+			Content: []llm.ContentBlock{llm.NewTextContent(userContent)},
 		},
 	}
 
@@ -576,54 +454,93 @@ func runCoordinatorDecision(
 		Model:       model,
 		System:      systemPrompt,
 		Messages:    messages,
+		Tools:       []llm.ToolDefinition{coordinatorDecisionTool},
 		MaxTokens:   1024,
 		Temperature: 0.2,
 	}
 
 	resp, err := provider.CompleteChat(ctx, chatReq)
 	if err != nil {
-		return &coordinatorDecision{Satisfied: true}, err
+		return &coordinatorDecision{Satisfied: false, Reasoning: "LLM request failed"}, err
 	}
 
-	text := resp.TextContent()
 	var decision coordinatorDecision
-	if err := json.Unmarshal([]byte(text), &decision); err != nil {
-		// Try to extract JSON from markdown code blocks
-		decision = coordinatorDecision{Satisfied: true, Reasoning: "Could not parse decision response"}
-		if extracted := extractJSON(text); extracted != "" {
-			_ = json.Unmarshal([]byte(extracted), &decision)
+	parsed := false
+
+	// Primary path: extract decision from tool call
+	if resp.StopReason == "tool_use" {
+		if blocks := resp.ToolUseBlocks(); len(blocks) > 0 {
+			if err := json.Unmarshal(blocks[0].Input, &decision); err == nil {
+				parsed = true
+			} else if logger != nil {
+				logger.Warn("coordinator tool call JSON parse failed",
+					zap.String("raw_input", string(blocks[0].Input)),
+					zap.Error(err),
+				)
+			}
 		}
 	}
 
-	// Send coordinator_decision SSE event
-	mu.Lock()
-	SendSSEJSON(w, "coordinator_decision", map[string]any{
+	// Fallback: try text-based JSON parsing (existing logic)
+	if !parsed {
+		text := resp.TextContent()
+		if err := json.Unmarshal([]byte(text), &decision); err != nil {
+			decision = coordinatorDecision{Satisfied: false, Reasoning: "Could not parse decision response"}
+			if extracted := extractJSON(text); extracted != "" {
+				if jsonErr := json.Unmarshal([]byte(extracted), &decision); jsonErr != nil {
+					// Extraction found JSON but it didn't match our schema — keep default
+					decision = coordinatorDecision{Satisfied: false, Reasoning: "Could not parse decision response"}
+				}
+			}
+			if decision.Reasoning == "Could not parse decision response" && logger != nil {
+				logger.Warn("coordinator decision parse failed",
+					zap.String("raw_response", truncate(text, 500)),
+					zap.String("stop_reason", resp.StopReason),
+					zap.Error(err),
+				)
+			}
+		}
+	}
+
+	// Send coordinator_decision event
+	emitter.Emit("coordinator_decision", map[string]any{
 		"round":     round,
 		"satisfied": decision.Satisfied,
 		"reasoning": decision.Reasoning,
 		"followUps": decision.FollowUps,
 	})
-	mu.Unlock()
 
 	return &decision, nil
 }
 
 // extractJSON tries to extract a JSON object from text that may contain markdown code blocks.
+// It correctly handles braces inside JSON string values.
 func extractJSON(s string) string {
-	// Look for ```json ... ``` or ``` ... ```
-	start := -1
-	for i := 0; i < len(s)-2; i++ {
-		if s[i] == '{' {
-			start = i
-			break
-		}
-	}
+	start := strings.Index(s, "{")
 	if start == -1 {
 		return ""
 	}
 	depth := 0
+	inString := false
+	escaped := false
 	for i := start; i < len(s); i++ {
-		switch s[i] {
+		c := s[i]
+		if escaped {
+			escaped = false
+			continue
+		}
+		if c == '\\' && inString {
+			escaped = true
+			continue
+		}
+		if c == '"' {
+			inString = !inString
+			continue
+		}
+		if inString {
+			continue
+		}
+		switch c {
 		case '{':
 			depth++
 		case '}':
@@ -646,8 +563,7 @@ func runCoordinatorSynthesis(
 	tools []llm.ToolDefinition,
 	model string,
 	maxTokens int,
-	w http.ResponseWriter,
-	mu *sync.Mutex,
+	emitter EventEmitter,
 ) (string, error) {
 	coordSystemPrompt, err := buildSwarmPrompt(coordinatorPrompt, promptData)
 	if err != nil {
@@ -685,9 +601,7 @@ func runCoordinatorSynthesis(
 
 		if text := resp.TextContent(); text != "" {
 			fullText += text
-			mu.Lock()
-			SendSSEJSON(w, "text", map[string]string{"content": text})
-			mu.Unlock()
+			emitter.Emit("text", map[string]string{"content": text})
 		}
 
 		if resp.StopReason != "tool_use" {
@@ -704,12 +618,10 @@ func runCoordinatorSynthesis(
 
 		var toolResults []llm.ContentBlock
 		for _, block := range toolUseBlocks {
-			mu.Lock()
-			SendSSEJSON(w, "coordinator_tool_start", map[string]string{
+			emitter.Emit("coordinator_tool_start", map[string]string{
 				"toolName": block.Name,
 				"toolId":   block.ID,
 			})
-			mu.Unlock()
 
 			var args map[string]any
 			if err := json.Unmarshal(block.Input, &args); err != nil {
@@ -719,34 +631,28 @@ func runCoordinatorSynthesis(
 			cacheKey := cache.Key(block.Name, args)
 			if cached, ok := cache.Get(cacheKey); ok {
 				toolResults = append(toolResults, llm.NewToolResultContent(block.ID, cached, false))
-				mu.Lock()
-				SendSSEJSON(w, "coordinator_tool_result", map[string]string{
+				emitter.Emit("coordinator_tool_result", map[string]string{
 					"toolId": block.ID,
 					"result": truncate(cached, 300),
 					"cached": "true",
 				})
-				mu.Unlock()
 			} else {
 				result, callErr := mcpClient.CallTool(ctx, block.Name, args)
 				if callErr != nil {
 					toolResults = append(toolResults, llm.NewToolResultContent(block.ID, fmt.Sprintf("Error: %v", callErr), true))
-					mu.Lock()
-					SendSSEJSON(w, "coordinator_tool_result", map[string]string{
+					emitter.Emit("coordinator_tool_result", map[string]string{
 						"toolId": block.ID,
 						"result": callErr.Error(),
 						"cached": "false",
 					})
-					mu.Unlock()
 				} else {
 					cache.Set(cacheKey, result)
 					toolResults = append(toolResults, llm.NewToolResultContent(block.ID, result, false))
-					mu.Lock()
-					SendSSEJSON(w, "coordinator_tool_result", map[string]string{
+					emitter.Emit("coordinator_tool_result", map[string]string{
 						"toolId": block.ID,
 						"result": truncate(result, 300),
 						"cached": "false",
 					})
-					mu.Unlock()
 				}
 			}
 		}

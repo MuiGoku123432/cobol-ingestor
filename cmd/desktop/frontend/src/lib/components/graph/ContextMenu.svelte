@@ -54,8 +54,8 @@
   <div
     class="context-menu"
     style="left: {x}px; top: {y}px"
-    onclick={(e) => e.stopPropagation()}
-    oncontextmenu={(e) => { e.preventDefault(); e.stopPropagation(); }}
+    onclick={(e: MouseEvent) => e.stopPropagation()}
+    oncontextmenu={(e: MouseEvent) => { e.preventDefault(); e.stopPropagation(); }}
   >
     <div class="menu-header">{nodeId}</div>
     {#each items as item}

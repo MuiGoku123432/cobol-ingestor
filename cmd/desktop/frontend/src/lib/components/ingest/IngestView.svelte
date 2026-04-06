@@ -1,12 +1,17 @@
 <script lang="ts">
   // @ts-ignore - Wails runtime
   import { EventsOn } from 'wailsjs/runtime/runtime';
+  import { usePersistedState } from '../../stores/persisted.svelte';
 
-  let activeTab = $state<'cobol' | 'bw' | 'oracle'>('cobol');
-  let directory = $state('');
-  let selectedPass = $state(0);
-  let bwDirectory = $state('');
-  let bwExtensions = $state('');
+  let saved = usePersistedState('ingest', {
+    activeTab: 'cobol' as 'cobol' | 'bw' | 'oracle',
+    directory: '',
+    selectedPass: 0,
+    bwDirectory: '',
+    bwExtensions: '',
+    contentDetect: false,
+  });
+
   let running = $state(false);
   let logs = $state<string[]>([]);
   let status = $state('idle');
@@ -18,7 +23,7 @@
       try {
         // @ts-ignore - Wails bindings
         config = await window.go.main.ConfigService.GetConfig();
-        if (config?.bwExtensions) bwExtensions = config.bwExtensions;
+        if (config?.bwExtensions && !saved.bwExtensions) saved.bwExtensions = config.bwExtensions;
       } catch (e) {
         console.error('Failed to load config:', e);
       }
@@ -30,8 +35,8 @@
       // @ts-ignore - Wails bindings
       const dir = await window.go.main.IngestService.SelectDirectory(title);
       if (dir) {
-        if (target === 'cobol') directory = dir;
-        else bwDirectory = dir;
+        if (target === 'cobol') saved.directory = dir;
+        else saved.bwDirectory = dir;
       }
     } catch (e) {
       console.error('Directory picker failed:', e);
@@ -39,13 +44,13 @@
   }
 
   async function startIngestion() {
-    if (!directory) return;
+    if (!saved.directory) return;
     logs = [];
     status = 'running';
     running = true;
     try {
       // @ts-ignore - Wails bindings
-      await window.go.main.IngestService.StartIngestion(directory, selectedPass);
+      await window.go.main.IngestService.StartIngestion(saved.directory, saved.selectedPass, saved.contentDetect);
     } catch (e: any) {
       status = 'error';
       logs = [...logs, `Error: ${e.message || e}`];
@@ -54,13 +59,13 @@
   }
 
   async function startBWIngestion() {
-    if (!bwDirectory) return;
+    if (!saved.bwDirectory) return;
     logs = [];
     status = 'running';
     running = true;
     try {
       // @ts-ignore - Wails bindings
-      await window.go.main.IngestService.StartBWIngestion(bwDirectory, bwExtensions);
+      await window.go.main.IngestService.StartBWIngestion(saved.bwDirectory, saved.bwExtensions);
     } catch (e: any) {
       status = 'error';
       logs = [...logs, `Error: ${e.message || e}`];
@@ -132,35 +137,42 @@
   <h1>Ingest</h1>
 
   <div class="tabs">
-    <button class="tab" class:active={activeTab === 'cobol'} onclick={() => (activeTab = 'cobol')}>COBOL</button>
-    <button class="tab" class:active={activeTab === 'bw'} onclick={() => (activeTab = 'bw')}>BusinessWare</button>
-    <button class="tab" class:active={activeTab === 'oracle'} onclick={() => (activeTab = 'oracle')}>Oracle</button>
+    <button class="tab" class:active={saved.activeTab === 'cobol'} onclick={() => (saved.activeTab = 'cobol')}>COBOL</button>
+    <button class="tab" class:active={saved.activeTab === 'bw'} onclick={() => (saved.activeTab = 'bw')}>BusinessWare</button>
+    <button class="tab" class:active={saved.activeTab === 'oracle'} onclick={() => (saved.activeTab = 'oracle')}>Oracle</button>
   </div>
 
   <div class="controls">
-    {#if activeTab === 'cobol'}
+    {#if saved.activeTab === 'cobol'}
       <div class="field">
         <label>Source Directory</label>
         <div class="dir-picker">
-          <input type="text" bind:value={directory} placeholder="/path/to/cobol/sources" readonly />
+          <input type="text" bind:value={saved.directory} placeholder="/path/to/cobol/sources" readonly />
           <button onclick={() => pickDirectory('Select COBOL Source Directory', 'cobol')}>Browse</button>
         </div>
       </div>
 
       <div class="field">
         <label>Pass</label>
-        <select bind:value={selectedPass}>
+        <select bind:value={saved.selectedPass}>
           {#each passes as p}
             <option value={p.value}>{p.label}</option>
           {/each}
         </select>
       </div>
 
+      <div class="field">
+        <label>
+          <input type="checkbox" bind:checked={saved.contentDetect} />
+          Detect COBOL in .txt files
+        </label>
+      </div>
+
       <div class="actions">
         {#if running}
           <button class="btn-danger" onclick={cancelIngestion}>Cancel</button>
         {:else}
-          <button class="btn-primary" disabled={!directory} onclick={startIngestion}>
+          <button class="btn-primary" disabled={!saved.directory} onclick={startIngestion}>
             Start Ingestion
           </button>
         {/if}
@@ -168,25 +180,25 @@
           {status}
         </span>
       </div>
-    {:else if activeTab === 'bw'}
+    {:else if saved.activeTab === 'bw'}
       <div class="field">
         <label>Source Directory</label>
         <div class="dir-picker">
-          <input type="text" bind:value={bwDirectory} placeholder="/path/to/businessware/sources" readonly />
+          <input type="text" bind:value={saved.bwDirectory} placeholder="/path/to/businessware/sources" readonly />
           <button onclick={() => pickDirectory('Select BusinessWare Source Directory', 'bw')}>Browse</button>
         </div>
       </div>
 
       <div class="field">
         <label>File Extensions</label>
-        <input type="text" bind:value={bwExtensions} placeholder=".java,.md,.bw,.txt,.xml" />
+        <input type="text" bind:value={saved.bwExtensions} placeholder=".java,.md,.bw,.txt,.xml" />
       </div>
 
       <div class="actions">
         {#if running}
           <button class="btn-danger" onclick={cancelIngestion}>Cancel</button>
         {:else}
-          <button class="btn-primary" disabled={!bwDirectory} onclick={startBWIngestion}>
+          <button class="btn-primary" disabled={!saved.bwDirectory} onclick={startBWIngestion}>
             Start BW Ingestion
           </button>
         {/if}
@@ -194,7 +206,7 @@
           {status}
         </span>
       </div>
-    {:else if activeTab === 'oracle'}
+    {:else if saved.activeTab === 'oracle'}
       {#if config}
         <div class="oracle-summary">
           <p><strong>Connection:</strong> {config.oracleHost || 'localhost'}:{config.oraclePort || '1521'}/{config.oracleService || '(not set)'}</p>

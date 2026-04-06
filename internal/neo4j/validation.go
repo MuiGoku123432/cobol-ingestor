@@ -267,6 +267,110 @@ func (w *BatchWriter) MergeDuplicateDomains(ctx context.Context) (int, error) {
 	return merged, nil
 }
 
+// DomainMergeCandidate represents a pair of domains with partial overlap (40-80%).
+type DomainMergeCandidate struct {
+	Name1          string
+	Name2          string
+	Size1          int
+	Size2          int
+	Shared         int
+	SharedPrograms string // comma-separated list of shared program IDs
+}
+
+// QueryDomainMergeCandidates finds domain pairs with 40-80% overlap for LLM evaluation.
+func (w *BatchWriter) QueryDomainMergeCandidates(ctx context.Context) ([]DomainMergeCandidate, error) {
+	session := w.client.NewSession(ctx)
+	defer session.Close(ctx)
+
+	res, err := session.Run(ctx,
+		"MATCH (d1:BusinessDomain)<-[:BELONGS_TO]-(p:Program)-[:BELONGS_TO]->(d2:BusinessDomain) "+
+			"WHERE id(d1) < id(d2) "+
+			"WITH d1, d2, collect(p.programId) AS sharedPids, count(p) AS shared, "+
+			"size([(p1:Program)-[:BELONGS_TO]->(d1) | p1]) AS size1, "+
+			"size([(p2:Program)-[:BELONGS_TO]->(d2) | p2]) AS size2 "+
+			"WITH d1, d2, sharedPids, shared, size1, size2, "+
+			"  toFloat(shared) / toFloat(CASE WHEN size1 < size2 THEN size1 ELSE size2 END) AS overlapRatio "+
+			"WHERE overlapRatio >= 0.4 AND overlapRatio < 0.8 "+
+			"RETURN d1.name AS name1, d2.name AS name2, size1, size2, shared, "+
+			"  reduce(s = '', pid IN sharedPids[..10] | s + CASE WHEN s = '' THEN '' ELSE ', ' END + pid) AS sharedSample",
+		nil)
+	if err != nil {
+		return nil, fmt.Errorf("querying domain merge candidates: %w", err)
+	}
+
+	var candidates []DomainMergeCandidate
+	for res.Next(ctx) {
+		rec := res.Record()
+		s1Val, _ := rec.Get("size1")
+		s2Val, _ := rec.Get("size2")
+		sharedVal, _ := rec.Get("shared")
+		candidates = append(candidates, DomainMergeCandidate{
+			Name1:          getStr(rec, "name1"),
+			Name2:          getStr(rec, "name2"),
+			Size1:          int(s1Val.(int64)),
+			Size2:          int(s2Val.(int64)),
+			Shared:         int(sharedVal.(int64)),
+			SharedPrograms: getStr(rec, "sharedSample"),
+		})
+	}
+
+	return candidates, nil
+}
+
+// MergeDomainPair merges one domain into another (used by LLM-directed merge).
+func (w *BatchWriter) MergeDomainPair(ctx context.Context, keepName, mergeName string) error {
+	session := w.client.NewSession(ctx)
+	defer session.Close(ctx)
+
+	_, err := session.ExecuteWrite(ctx, func(tx neo4j.ManagedTransaction) (any, error) {
+		// Reassign programs not already in the kept domain
+		_, err := tx.Run(ctx,
+			"MATCH (p:Program)-[r:BELONGS_TO]->(d:BusinessDomain {name: $mergeName}) "+
+				"WHERE NOT (p)-[:BELONGS_TO]->(:BusinessDomain {name: $keepName}) "+
+				"WITH p, r "+
+				"MATCH (keep:BusinessDomain {name: $keepName}) "+
+				"MERGE (p)-[:BELONGS_TO {confidence: r.confidence}]->(keep) "+
+				"DELETE r",
+			map[string]any{"mergeName": mergeName, "keepName": keepName})
+		if err != nil {
+			return nil, err
+		}
+
+		// Delete remaining duplicate edges
+		_, err = tx.Run(ctx,
+			"MATCH (:Program)-[r:BELONGS_TO]->(d:BusinessDomain {name: $mergeName}) DELETE r",
+			map[string]any{"mergeName": mergeName})
+		if err != nil {
+			return nil, err
+		}
+
+		// Delete the merged domain node
+		_, err = tx.Run(ctx,
+			"MATCH (d:BusinessDomain {name: $mergeName}) DELETE d",
+			map[string]any{"mergeName": mergeName})
+		if err != nil {
+			return nil, err
+		}
+
+		// Update BridgeProgram references
+		_, err = tx.Run(ctx,
+			"MATCH (bp:Program) WHERE bp.bridgeDomains IS NOT NULL "+
+				"AND $mergeName IN bp.bridgeDomains "+
+				"SET bp.bridgeDomains = [d IN bp.bridgeDomains WHERE d <> $mergeName] + "+
+				"CASE WHEN $keepName IN bp.bridgeDomains THEN [] ELSE [$keepName] END",
+			map[string]any{"mergeName": mergeName, "keepName": keepName})
+		return nil, err
+	})
+	if err != nil {
+		return fmt.Errorf("merging domain %q into %q: %w", mergeName, keepName, err)
+	}
+
+	w.logger.Info("merged domain pair",
+		zap.String("keep", keepName),
+		zap.String("merge", mergeName))
+	return nil
+}
+
 // ClearExternalScores removes risk/modernization/domain data from external programs.
 func (w *BatchWriter) ClearExternalScores(ctx context.Context) (int, error) {
 	session := w.client.NewSession(ctx)
