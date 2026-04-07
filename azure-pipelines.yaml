@@ -166,6 +166,9 @@ stages:
           - script: go install github.com/wailsapp/wails/v2/cmd/wails@latest
             displayName: "Install Wails CLI"
 
+          - script: echo "##vso[task.prependpath]$(go env GOPATH)/bin"
+            displayName: "Add GOPATH/bin to PATH"
+
           - script: go mod download
             displayName: "Download modules"
 
@@ -209,6 +212,9 @@ stages:
           - script: go install github.com/wailsapp/wails/v2/cmd/wails@latest
             displayName: "Install Wails CLI"
 
+          - script: echo "##vso[task.prependpath]$(go env GOPATH)/bin"
+            displayName: "Add GOPATH/bin to PATH"
+
           - script: go mod download
             displayName: "Download modules"
 
@@ -246,6 +252,10 @@ stages:
 
           - script: go install github.com/wailsapp/wails/v2/cmd/wails@latest
             displayName: "Install Wails CLI"
+
+          - script: |
+              for /f "delims=" %%i in ('go env GOPATH') do echo ##vso[task.prependpath]%%i\bin
+            displayName: "Add GOPATH/bin to PATH"
 
           - script: go mod download
             displayName: "Download modules"
