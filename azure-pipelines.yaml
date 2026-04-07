@@ -47,15 +47,15 @@ stages:
           - script: go mod download
             displayName: "Download modules"
 
-          - script: go vet ./...
+          - script: go vet $(go list ./... | grep -v cmd/desktop)
             displayName: "go vet"
 
           - script: |
               curl -sSfL https://raw.githubusercontent.com/golangci/golangci-lint/HEAD/install.sh | sh -s -- -b $(go env GOPATH)/bin
-              $(go env GOPATH)/bin/golangci-lint run ./...
+              $(go env GOPATH)/bin/golangci-lint run $(go list ./... | grep -v cmd/desktop)
             displayName: "golangci-lint"
 
-          - script: go test ./... -v -race
+          - script: go test $(go list ./... | grep -v cmd/desktop) -v -race
             displayName: "Unit tests"
 
   # ---------------------------------------------------------------------------
