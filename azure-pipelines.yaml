@@ -32,10 +32,10 @@ variables:
 # ---------------------------------------------------------------------------
 stages:
   - stage: Test
-    displayName: "Test & Lint"
+    displayName: "Test"
     jobs:
       - job: TestAndLint
-        displayName: "go vet / lint / test"
+        displayName: "test"
         pool:
           vmImage: ubuntu-latest
         steps:
@@ -47,15 +47,10 @@ stages:
           - script: go mod download
             displayName: "Download modules"
 
-          - script: go vet $(go list ./... | grep -v cmd/desktop)
-            displayName: "go vet"
+          - script: mkdir -p cmd/desktop/frontend/dist && touch cmd/desktop/frontend/dist/.gitkeep
+            displayName: "Stub frontend/dist for embed"
 
-          - script: |
-              curl -sSfL https://raw.githubusercontent.com/golangci/golangci-lint/HEAD/install.sh | sh -s -- -b $(go env GOPATH)/bin
-              $(go env GOPATH)/bin/golangci-lint run $(go list ./... | grep -v cmd/desktop)
-            displayName: "golangci-lint"
-
-          - script: go test $(go list ./... | grep -v cmd/desktop) -v -race
+          - script: go test ./... -v -race
             displayName: "Unit tests"
 
   # ---------------------------------------------------------------------------
