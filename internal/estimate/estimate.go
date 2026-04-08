@@ -224,7 +224,12 @@ func (e *Estimator) classifyFiles() (cobol, jcl, copybook, pending []graph.FileI
 		case graph.FileTypeCopybook:
 			copybook = append(copybook, f)
 		case graph.FileTypePending:
+			// Pending files (from --content-detect) haven't been LLM-classified yet.
+			// For estimation purposes, treat them as COBOL — the common case when
+			// content-detect is used. They will be processed through all 5 passes
+			// after classification, same as regular .cbl files.
 			pending = append(pending, f)
+			cobol = append(cobol, f)
 		}
 	}
 	return

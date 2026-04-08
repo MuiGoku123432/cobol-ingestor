@@ -216,6 +216,34 @@ func TestPrintTableShowsBothPricingModels(t *testing.T) {
 	assert.Contains(t, out, "$0.04/premium request")
 }
 
+func TestPendingFilesCountedAsCobol(t *testing.T) {
+	// Pending files (--content-detect) must be included in Pass 1-5 estimates,
+	// not just the scanner classification bucket.
+	srCobolOnly := makeScanResult(10, 0, 0)
+	srWithPending := makeScanResult(10, 0, 0)
+	for i := 0; i < 5; i++ {
+		srWithPending.Files = append(srWithPending.Files, graph.FileInfo{
+			Path: "/fake/unknown.txt",
+			Type: graph.FileTypePending,
+			Size: 5000,
+		})
+	}
+
+	estCobol := New(testConfig(), srCobolOnly, nil, testLogger())
+	estPending := New(testConfig(), srWithPending, nil, testLogger())
+	rCobol := estCobol.Run()
+	rPending := estPending.Run()
+
+	// Adding pending files must increase Pass 1-5 request counts
+	assert.Greater(t, rPending.Total.Requests, rCobol.Total.Requests,
+		"pending files should add to Pass 1-5 request estimates")
+	// Copilot cost must be higher
+	assert.Greater(t, rPending.Total.CopilotCost, rCobol.Total.CopilotCost)
+	// COBOL count shown should include pending
+	assert.Equal(t, 15, rPending.Files.COBOL)
+	assert.Equal(t, 5, rPending.Files.Pending)
+}
+
 func TestScannerClassificationEstimate(t *testing.T) {
 	sr := makeScanResult(0, 0, 0)
 	// Add pending files
