@@ -16,6 +16,7 @@ import (
 	"cobol-ingestor/internal/chunker"
 	"cobol-ingestor/internal/claude"
 	"cobol-ingestor/internal/config"
+	"cobol-ingestor/internal/estimate"
 	"cobol-ingestor/internal/extdb"
 	"cobol-ingestor/internal/graph"
 	"cobol-ingestor/internal/llm"
@@ -47,6 +48,7 @@ var (
 	passFlag       int
 	codebaseFlag   string
 	contentDetect  bool
+	estimateFlag   bool
 )
 
 // bw flags
@@ -217,6 +219,7 @@ func init() {
 	ingestCmd.Flags().IntVar(&passFlag, "pass", 0, "Which pass to run: 0=all, 1=Pass 1, 2=Pass 2, 3=Pass 3")
 	ingestCmd.Flags().StringVar(&codebaseFlag, "codebase", "default", "Codebase identifier for multi-codebase support")
 	ingestCmd.Flags().BoolVar(&contentDetect, "content-detect", false, "Enable content-based detection of COBOL/copybook/JCL in .txt files")
+	ingestCmd.Flags().BoolVar(&estimateFlag, "estimate", false, "Estimate LLM token cost without making any API calls")
 	_ = ingestCmd.MarkFlagRequired("dir")
 	rootCmd.AddCommand(ingestCmd)
 
@@ -312,6 +315,14 @@ func runIngest(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("opening cache: %w", err)
 	}
 	defer fileCache.Close()
+
+	// --estimate: print cost breakdown and exit without touching Neo4j or LLM
+	if estimateFlag {
+		est := estimate.New(cfg, scanResult, fileCache, logger)
+		result := est.Run()
+		estimate.PrintTable(os.Stdout, result)
+		return nil
+	}
 
 	// Connect to Neo4j + run migrations
 	neo4jClient, err := n4j.NewClient(ctx, cfg.Neo4j, logger)
