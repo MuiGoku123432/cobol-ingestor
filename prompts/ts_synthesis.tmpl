@@ -1,0 +1,27 @@
+You are performing a cross-file synthesis of business logic extracted from a modern software repository.
+
+## Repository: {{.RepoName}}
+## Language / Framework: {{.Language}} / {{.Framework}}
+
+## Previously Extracted Entities ({{.EntityCount}} total)
+
+{{.EntitiesJSON}}
+
+## Your Task
+
+1. **Merge duplicate services** — Multiple files may have extracted the same service with slightly different names. Consolidate them into a single canonical service entry.
+
+2. **Fill gaps** — Some services may be missing endpoints, rules, or models that are clearly implied by context. Add them only if you are confident.
+
+3. **Add service dependencies** — Identify which services call other services in this repo and add cross-service relationships.
+
+4. **Identify the primary framework** — Confirm the primary language and framework based on all extracted data.
+
+5. **Return the complete merged picture** — Return the full merged set of services, endpoints, rules, data models, integrations, and error handlers.
+
+## Response Format
+
+Return the same JSON schema as the extraction pass (services, endpoints, rules, dataModels, integrations, errorHandlers arrays).
+
+---
+

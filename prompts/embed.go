@@ -49,3 +49,15 @@ var Pass1Example string
 
 //go:embed examples/pass2_example.txt
 var Pass2Example string
+
+//go:embed ts_extract.tmpl
+var TSExtract string
+
+//go:embed ts_synthesis.tmpl
+var TSSynthesis string
+
+//go:embed ts_gap_agents.tmpl
+var TSGapAgents string
+
+//go:embed ts_gap_coordinator.tmpl
+var TSGapCoordinator string

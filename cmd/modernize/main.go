@@ -120,6 +120,7 @@ func main() {
 	// API endpoints
 	r.POST("/api/chat", modernize.ChatHandler(ps, mcpClient, chatModel, chatMaxTokens, sessionStore))
 	r.POST("/api/swarm", modernize.SwarmHandler(ps, mcpClient, chatModel, chatMaxTokens, sessionStore))
+	r.POST("/api/gap-analysis", modernize.GapAnalysisHandler(ps, mcpClient, chatModel, chatMaxTokens, sessionStore, logger))
 
 	r.GET("/health", func(c *gin.Context) {
 		c.JSON(http.StatusOK, gin.H{

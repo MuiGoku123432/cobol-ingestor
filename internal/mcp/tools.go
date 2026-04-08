@@ -69,6 +69,8 @@ func registerAllTools(s *mcp.Server, reader n4j.Reader, writer *n4j.BatchWriter,
 	registerGetIDMSAreas(s, reader)
 	// External DB gap analysis tools
 	registerExternalDBTools(s, reader)
+	// Target stack gap analysis tools
+	registerTargetStackTools(s, reader)
 	// Codebase filtering tools
 	registerListCodebases(s, client)
 	registerGetCrossCodebaseCalls(s, client)

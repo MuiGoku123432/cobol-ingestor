@@ -19,11 +19,13 @@ import (
 	"cobol-ingestor/internal/extdb"
 	"cobol-ingestor/internal/graph"
 	"cobol-ingestor/internal/llm"
+	cobolmcp "cobol-ingestor/internal/mcp"
 	"cobol-ingestor/internal/modernize"
 	n4j "cobol-ingestor/internal/neo4j"
 	"cobol-ingestor/internal/parser"
 	"cobol-ingestor/internal/pipeline"
 	"cobol-ingestor/internal/scanner"
+	"cobol-ingestor/internal/targetstack"
 
 	"github.com/spf13/cobra"
 	"go.uber.org/zap"
@@ -84,6 +86,22 @@ var extDBCmd = &cobra.Command{
 	Use:   "external-db",
 	Short: "Connect to an external database via MCP and map to COBOL DB2 tables",
 	RunE:  runExternalDB,
+}
+
+// target-stack flags
+var (
+	tsRepos      []string
+	tsBranch     string
+	tsToken      string
+	tsProvider   string
+	tsPhase      string
+	tsShallow    bool
+)
+
+var tsCmd = &cobra.Command{
+	Use:   "target-stack",
+	Short: "Connect GitHub/Azure DevOps repos as the modern target stack and analyze business logic gaps",
+	RunE:  runTargetStack,
 }
 
 var authCmd = &cobra.Command{
@@ -229,6 +247,15 @@ func init() {
 	extDBCmd.Flags().StringVar(&oracleSQLclPath, "oracle-sqlcl-path", "", "Explicit path to SQLcl binary")
 
 	rootCmd.AddCommand(extDBCmd)
+
+	tsCmd.Flags().StringArrayVar(&tsRepos, "repo", nil, "Repository URL(s) — repeatable for multiple repos")
+	tsCmd.Flags().StringVar(&tsBranch, "branch", "main", "Branch to analyze")
+	tsCmd.Flags().StringVar(&tsToken, "token", "", "PAT for GitHub or Azure DevOps (also via TS_TOKEN env)")
+	tsCmd.Flags().StringVar(&tsProvider, "provider", "", "Git provider: github, azure_devops, generic (auto-detected if empty)")
+	tsCmd.Flags().StringVar(&tsPhase, "phase", "all", "Phase to run: scan, analyze, gap, requirements, all")
+	tsCmd.Flags().BoolVar(&tsShallow, "shallow", true, "Use shallow clone (depth=1)")
+	_ = tsCmd.MarkFlagRequired("repo")
+	rootCmd.AddCommand(tsCmd)
 }
 
 func runIngest(cmd *cobra.Command, args []string) error {
@@ -1283,4 +1310,258 @@ func main() {
 		fmt.Fprintln(os.Stderr, err)
 		os.Exit(1)
 	}
+}
+
+// runTargetStack runs the full target stack pipeline: clone → scan → analyze → gap → requirements.
+func runTargetStack(cmd *cobra.Command, args []string) error {
+	logger, _ := zap.NewProduction()
+	defer logger.Sync()
+
+	cfg, err := config.Load()
+	if err != nil {
+		return fmt.Errorf("loading config: %w", err)
+	}
+
+	ctx := cmd.Context()
+	if ctx == nil {
+		ctx = context.Background()
+	}
+
+	// Resolve PAT: flag > env > config
+	token := tsToken
+	if token == "" {
+		token = cfg.TargetStack.Token
+	}
+	// Resolve clone base dir
+	cloneDir := cfg.TargetStack.CloneDir
+	if cloneDir == "" {
+		cloneDir = filepath.Join(cfg.DataDir, "target-repos")
+	}
+
+	// Resolve LLM provider
+	if cfg.LLM.Provider == "copilot" && cfg.LLM.CopilotGitHubToken == "" {
+		if st, loadErr := auth.LoadToken(); loadErr == nil && st != nil {
+			cfg.LLM.CopilotGitHubToken = st.GitHubToken
+		}
+	}
+
+	provider, err := llm.NewProvider(cfg)
+	if err != nil {
+		return fmt.Errorf("creating LLM provider: %w", err)
+	}
+	defer provider.Close()
+
+	chatProvider, ok := provider.(llm.ChatProvider)
+	if !ok {
+		return fmt.Errorf("LLM provider %s does not support chat completions", cfg.LLM.Provider)
+	}
+
+	model := cfg.Claude.SonnetModel
+
+	// Connect to Neo4j
+	neo4jClient, err := n4j.NewClient(ctx, cfg.Neo4j, logger)
+	if err != nil {
+		return fmt.Errorf("connecting to neo4j: %w", err)
+	}
+	defer neo4jClient.Close(ctx)
+
+	if err := neo4jClient.VerifyConnectivity(ctx); err != nil {
+		return fmt.Errorf("neo4j connectivity: %w", err)
+	}
+
+	migrationsDir := filepath.Join("migrations", "neo4j")
+	if err := neo4jClient.RunMigrations(ctx, migrationsDir); err != nil {
+		return fmt.Errorf("running migrations: %w", err)
+	}
+
+	writer := n4j.NewBatchWriter(neo4jClient, cfg.Ingest.BatchSize, "default", logger)
+
+	// Open cache
+	fileCache, err := targetstack.NewCache(cfg.Ingest.CacheDB)
+	if err != nil {
+		return fmt.Errorf("opening cache: %w", err)
+	}
+	defer fileCache.Close()
+
+	// Create analyzer
+	analyzer, err := targetstack.NewAnalyzer(
+		chatProvider, model,
+		cfg.TargetStack.MaxTokens,
+		cfg.TargetStack.TokenLimit,
+		cfg.TargetStack.Pass2Batch,
+		cfg.TargetStack.Pass2MaxTokens,
+		logger,
+	)
+	if err != nil {
+		return fmt.Errorf("creating analyzer: %w", err)
+	}
+
+	// Parse extensions
+	var extensions []string
+	for _, ext := range strings.Split(cfg.TargetStack.Extensions, ",") {
+		ext = strings.TrimSpace(ext)
+		if ext != "" {
+			extensions = append(extensions, ext)
+		}
+	}
+
+	// Process each repo
+	for _, repoURL := range tsRepos {
+		providerName := tsProvider
+		if providerName == "" {
+			providerName = targetstack.DetectProvider(repoURL)
+		}
+
+		repoCfg := targetstack.RepoConfig{
+			URL:      repoURL,
+			Branch:   tsBranch,
+			Provider: providerName,
+			Token:    token,
+		}
+
+		logger.Info("processing repository", zap.String("url", repoURL), zap.String("phase", tsPhase))
+
+		// Phase 1: Clone/Pull
+		if tsPhase == "scan" || tsPhase == "analyze" || tsPhase == "all" {
+			cloneResult, cloneErr := targetstack.CloneOrPull(repoCfg, cloneDir, tsShallow, logger)
+			if cloneErr != nil {
+				return fmt.Errorf("cloning %s: %w", repoURL, cloneErr)
+			}
+
+			// Check if HEAD changed
+			prevSHA := targetstack.HeadSHAFromNeo4j(ctx, neo4jClient, repoURL)
+			if prevSHA == cloneResult.HeadSHA && tsPhase != "all" {
+				logger.Info("HEAD SHA unchanged, skipping analysis", zap.String("sha", cloneResult.HeadSHA))
+				continue
+			}
+
+			// Phase 2: Scan
+			scanResult, scanErr := targetstack.Scan(cloneResult.LocalPath, extensions, logger)
+			if scanErr != nil {
+				return fmt.Errorf("scanning %s: %w", repoURL, scanErr)
+			}
+			scanResult.RepoURL = repoURL
+			scanResult.HeadSHA = cloneResult.HeadSHA
+
+			logger.Info("scan complete",
+				zap.Int("files", len(scanResult.Files)),
+				zap.Any("by_lang", scanResult.ByLang),
+			)
+
+			if tsPhase == "scan" {
+				fmt.Printf("Scan complete: %d files discovered in %s\n", len(scanResult.Files), repoURL)
+				for lang, count := range scanResult.ByLang {
+					fmt.Printf("  %s: %d files\n", lang, count)
+				}
+				continue
+			}
+
+			// Phase 3: Extract + Synthesize
+			extractResults, analyzeErr := analyzer.AnalyzeFiles(ctx, scanResult.Files, repoURL, fileCache, cfg.TargetStack.MaxWorkers)
+			if analyzeErr != nil {
+				return fmt.Errorf("analyzing %s: %w", repoURL, analyzeErr)
+			}
+
+			repoName := targetstack.RepoName(repoURL)
+			lang := detectPrimaryLangFromScan(scanResult)
+
+			analysis, synthErr := analyzer.Synthesize(ctx, extractResults, repoName, lang, "")
+			if synthErr != nil {
+				return fmt.Errorf("synthesis %s: %w", repoURL, synthErr)
+			}
+
+			repo := targetstack.RepoFromCloneResult(cloneResult, scanResult, analysis, cloneDir)
+
+			// Phase 4: Write to Neo4j
+			if err := targetstack.WriteResult(ctx, writer, repo, analysis); err != nil {
+				return fmt.Errorf("writing %s to neo4j: %w", repoURL, err)
+			}
+
+			logger.Info("repo analysis complete",
+				zap.String("repo", repoURL),
+				zap.Int("services", len(analysis.Services)),
+				zap.Int("rules", len(analysis.Rules)),
+				zap.Int("endpoints", len(analysis.Endpoints)),
+			)
+		}
+	}
+
+	// Phase 5: Gap Analysis
+	if tsPhase == "gap" || tsPhase == "all" {
+		logger.Info("starting gap analysis swarm")
+
+		mcpServer := cobolmcp.NewServer(neo4jClient, nil, nil)
+		cobolMCPClient, mcpErr := modernize.NewMCPClientInProcess(ctx, mcpServer)
+		if mcpErr != nil {
+			return fmt.Errorf("creating COBOL MCP client: %w", mcpErr)
+		}
+
+		bridge := targetstack.NewGapBridge(cobolMCPClient, cobolMCPClient)
+
+		swarmResult, gapErr := targetstack.RunGapSwarm(ctx, bridge, chatProvider, model, cfg.TargetStack.MaxTokens, logger)
+		if gapErr != nil {
+			return fmt.Errorf("gap analysis: %w", gapErr)
+		}
+
+		if len(swarmResult.Gaps) > 0 {
+			if err := targetstack.WriteGaps(ctx, writer, swarmResult.Gaps); err != nil {
+				return fmt.Errorf("writing gaps: %w", err)
+			}
+		}
+
+		if len(swarmResult.Requirements) > 0 {
+			if err := targetstack.WriteRequirements(ctx, writer, swarmResult.Requirements); err != nil {
+				return fmt.Errorf("writing requirements: %w", err)
+			}
+		}
+
+		logger.Info("gap analysis complete",
+			zap.Int("gaps", len(swarmResult.Gaps)),
+			zap.Int("requirements", len(swarmResult.Requirements)),
+		)
+	}
+
+	// Phase 6: Requirements (standalone)
+	if tsPhase == "requirements" {
+		logger.Info("generating business requirements from existing gaps")
+
+		mcpServer := cobolmcp.NewServer(neo4jClient, nil, nil)
+		cobolMCPClient, mcpErr := modernize.NewMCPClientInProcess(ctx, mcpServer)
+		if mcpErr != nil {
+			return fmt.Errorf("creating MCP client: %w", mcpErr)
+		}
+
+		bridge := targetstack.NewGapBridge(cobolMCPClient, cobolMCPClient)
+
+		reqs, reqErr := targetstack.GenerateRequirements(ctx, bridge, chatProvider, model,
+			cfg.TargetStack.MaxTokens, cfg.TargetStack.GapMaxIter, logger)
+		if reqErr != nil {
+			return fmt.Errorf("generating requirements: %w", reqErr)
+		}
+
+		if len(reqs) > 0 {
+			if err := targetstack.WriteRequirements(ctx, writer, reqs); err != nil {
+				return fmt.Errorf("writing requirements: %w", err)
+			}
+		}
+
+		logger.Info("requirements generation complete", zap.Int("requirements", len(reqs)))
+	}
+
+	return nil
+}
+
+func detectPrimaryLangFromScan(scan *targetstack.ScanResult) string {
+	if scan == nil {
+		return ""
+	}
+	best := ""
+	bestCount := 0
+	for lang, count := range scan.ByLang {
+		if count > bestCount && lang != "XML" && lang != "YAML" && lang != "JSON" {
+			bestCount = count
+			best = lang
+		}
+	}
+	return best
 }

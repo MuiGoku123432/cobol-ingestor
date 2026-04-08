@@ -11,16 +11,31 @@ import (
 )
 
 type Config struct {
-	DataDir    string // COBOL_GRAPH_DATA_DIR — base directory for persistent data (default ~/.cobol-graph)
-	LLM        LLMConfig
-	Claude     ClaudeConfig
-	Neo4j      Neo4jConfig
-	Ingest     IngestConfig
-	API        APIConfig
-	MCP        MCPConfig
-	Modernize  ModernizeConfig
-	ExternalDB ExternalDBConfig
-	BW         BWConfig
+	DataDir     string // COBOL_GRAPH_DATA_DIR — base directory for persistent data (default ~/.cobol-graph)
+	LLM         LLMConfig
+	Claude      ClaudeConfig
+	Neo4j       Neo4jConfig
+	Ingest      IngestConfig
+	API         APIConfig
+	MCP         MCPConfig
+	Modernize   ModernizeConfig
+	ExternalDB  ExternalDBConfig
+	BW          BWConfig
+	TargetStack TargetStackConfig
+}
+
+// TargetStackConfig holds settings for target stack repo analysis and gap analysis.
+type TargetStackConfig struct {
+	CloneDir      string // TS_CLONE_DIR — where to clone repos (default: <DataDir>/target-repos)
+	MaxWorkers    int    // TS_MAX_WORKERS — concurrent file analysis workers (default 10)
+	MaxTokens     int    // TS_MAX_TOKENS — max output tokens per LLM call (default 16000)
+	TokenLimit    int    // TS_TOKEN_LIMIT — input chunking token limit (default 30000)
+	Extensions    string // TS_EXTENSIONS — comma-separated file extensions
+	GapMaxIter    int    // TS_GAP_MAX_ITER — gap analysis agent max iterations (default 30)
+	Token         string // TS_TOKEN — PAT for GitHub or Azure DevOps repo access
+	ShallowClone  bool   // TS_SHALLOW_CLONE — use depth=1 clone (default true)
+	Pass2Batch    int    // TS_PASS2_BATCH — entities per synthesis batch (default 25)
+	Pass2MaxTokens int   // TS_PASS2_MAX_TOKENS — max tokens for synthesis pass (default 8000)
 }
 
 // BWConfig holds settings for Businessware ingestion.
@@ -235,6 +250,18 @@ func Load() (*Config, error) {
 	viper.SetDefault("BW_PASS2_MAX_TOKENS", 4000)
 	viper.SetDefault("BW_PASS3_MAX_TOKENS", 4000)
 
+	// Target stack defaults
+	viper.SetDefault("TS_CLONE_DIR", "")
+	viper.SetDefault("TS_MAX_WORKERS", 10)
+	viper.SetDefault("TS_MAX_TOKENS", 16000)
+	viper.SetDefault("TS_TOKEN_LIMIT", 30000)
+	viper.SetDefault("TS_EXTENSIONS", ".java,.cs,.py,.ts,.js,.go,.kt,.scala,.rb,.xml,.yaml,.yml,.json,.graphql,.proto")
+	viper.SetDefault("TS_GAP_MAX_ITER", 30)
+	viper.SetDefault("TS_TOKEN", "")
+	viper.SetDefault("TS_SHALLOW_CLONE", true)
+	viper.SetDefault("TS_PASS2_BATCH", 25)
+	viper.SetDefault("TS_PASS2_MAX_TOKENS", 8000)
+
 	// Oracle SQLcl defaults
 	viper.SetDefault("ORACLE_HOST", "localhost")
 	viper.SetDefault("ORACLE_PORT", "1521")
@@ -355,6 +382,18 @@ func Load() (*Config, error) {
 			MCPServerURL:  viper.GetString("MCP_SERVER_URL"),
 			ChatModel:     viper.GetString("MODERNIZE_CHAT_MODEL"),
 			ChatMaxTokens: viper.GetInt("MODERNIZE_CHAT_MAX_TOKENS"),
+		},
+		TargetStack: TargetStackConfig{
+			CloneDir:       viper.GetString("TS_CLONE_DIR"),
+			MaxWorkers:     viper.GetInt("TS_MAX_WORKERS"),
+			MaxTokens:      viper.GetInt("TS_MAX_TOKENS"),
+			TokenLimit:     viper.GetInt("TS_TOKEN_LIMIT"),
+			Extensions:     viper.GetString("TS_EXTENSIONS"),
+			GapMaxIter:     viper.GetInt("TS_GAP_MAX_ITER"),
+			Token:          viper.GetString("TS_TOKEN"),
+			ShallowClone:   viper.GetBool("TS_SHALLOW_CLONE"),
+			Pass2Batch:     viper.GetInt("TS_PASS2_BATCH"),
+			Pass2MaxTokens: viper.GetInt("TS_PASS2_MAX_TOKENS"),
 		},
 	}
 

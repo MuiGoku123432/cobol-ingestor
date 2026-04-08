@@ -591,3 +591,131 @@ type BWResult struct {
 	Relationships   []BWRelationship
 	CobolReferences []BWCobolReference
 }
+
+// ---- Target Stack Types ----
+
+const (
+	// Target stack relationship types
+	RelTSContains      RelType = "TS_CONTAINS"       // TargetRepo → TargetService
+	RelTSExposes       RelType = "TS_EXPOSES"         // TargetService → TargetEndpoint
+	RelTSEnforces      RelType = "TS_ENFORCES"        // TargetService → TargetBusinessRule
+	RelTSModels        RelType = "TS_MODELS"          // TargetService → TargetDataModel
+	RelTSIntegrates    RelType = "TS_INTEGRATES"      // TargetService → TargetIntegration
+	RelTSHandlesError  RelType = "TS_HANDLES_ERROR"   // TargetService → TargetErrorHandler
+	RelTSMapsToCobol   RelType = "TS_MAPS_TO_COBOL"  // TargetService → Program (coverage)
+	RelTSRuleMapsTo    RelType = "TS_RULE_MAPS_TO"   // TargetBusinessRule → Paragraph (matched logic)
+	RelGapFrom         RelType = "GAP_FROM"           // BusinessGap → source node
+	RelGapTo           RelType = "GAP_TO"             // BusinessGap → target node
+	RelRequirementFor  RelType = "REQUIREMENT_FOR"    // BusinessRequirement → BusinessGap
+)
+
+// TargetRepo represents a connected Git repository (the modern "target stack").
+type TargetRepo struct {
+	ID         string // URL-normalized unique key
+	Name       string
+	URL        string
+	Provider   string // "github", "azure_devops", "generic"
+	Branch     string
+	LastCommit string // HEAD SHA at last analysis
+	LocalPath  string // where cloned on disk
+	Language   string // primary language detected
+	Framework  string // primary framework detected
+}
+
+// TargetService represents a logical service or module extracted from a target repo.
+type TargetService struct {
+	ID          string // repoID + "::" + name
+	Name        string
+	ServiceType string // REST_API, GRPC, MESSAGE_CONSUMER, BATCH_JOB, LIBRARY
+	Description string
+	RepoURL     string
+	BasePath    string // relative path within the repo
+	Language    string
+	Framework   string
+}
+
+// TargetEndpoint represents an API endpoint or message consumer entry point.
+type TargetEndpoint struct {
+	ID          string // serviceID + "::" + method + "::" + path
+	Method      string // GET, POST, PUT, DELETE, CONSUME, PRODUCE
+	Path        string
+	Description string
+	ServiceName string
+	Parameters  string // JSON-encoded summary
+}
+
+// TargetBusinessRule represents an extracted business rule or validation.
+type TargetBusinessRule struct {
+	ID          string // serviceID + "::" + name
+	Name        string
+	Description string
+	Category    string  // VALIDATION, CALCULATION, AUTHORIZATION, WORKFLOW, TRANSFORMATION
+	ServiceName string
+	SourceFile  string
+	Confidence  float64
+}
+
+// TargetDataModel represents a data entity or model class.
+type TargetDataModel struct {
+	ID          string // serviceID + "::" + name
+	Name        string
+	Description string
+	ServiceName string
+	SourceFile  string
+	Fields      string // JSON-encoded field definitions
+	TableName   string // database table if ORM-mapped
+}
+
+// TargetIntegration represents an external integration point in the target stack.
+type TargetIntegration struct {
+	ID              string
+	IntegrationType string // DATABASE, REST_CLIENT, MESSAGE_QUEUE, FILE_IO, CACHE, EXTERNAL_API
+	Target          string // connection string, URL, queue name
+	Description     string
+	ServiceName     string
+}
+
+// TargetErrorHandler represents an error handling pattern in the target stack.
+type TargetErrorHandler struct {
+	ID          string
+	Pattern     string // TRY_CATCH, ERROR_MIDDLEWARE, CIRCUIT_BREAKER, RETRY, FALLBACK
+	Description string
+	ServiceName string
+	SourceFile  string
+}
+
+// BusinessGap represents an identified gap between COBOL and the target stack.
+type BusinessGap struct {
+	ID           string
+	GapType      string  // COBOL_ONLY, TARGET_ONLY, PARTIAL_MATCH, SEMANTIC_MISMATCH
+	Category     string  // BUSINESS_RULE, DATA_MODEL, INTEGRATION, ERROR_HANDLING, BATCH_PROCESSING
+	Description  string
+	Severity     string  // CRITICAL, HIGH, MEDIUM, LOW
+	CobolSource  string  // Program/paragraph reference
+	TargetSource string  // Service/file reference
+	Confidence   float64
+}
+
+// BusinessRequirement represents a generated business requirement derived from gaps.
+type BusinessRequirement struct {
+	ID                 string
+	Title              string
+	Description        string
+	Priority           string // P0, P1, P2, P3
+	Category           string
+	AcceptanceCriteria string // JSON-encoded []string
+	EstimatedEffort    string
+	GapID              string
+}
+
+// TargetStackResult aggregates extraction results for one target repo.
+type TargetStackResult struct {
+	Repo         TargetRepo
+	Services     []TargetService
+	Endpoints    []TargetEndpoint
+	Rules        []TargetBusinessRule
+	DataModels   []TargetDataModel
+	Integrations []TargetIntegration
+	ErrorHandlers []TargetErrorHandler
+	Relationships []Relationship
+}
