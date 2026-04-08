@@ -19,25 +19,46 @@ import (
 
 // Heuristic multipliers — tunable based on observed pipeline statistics.
 const (
-	pass4CallPairRate     = 0.15 // fraction of COBOL programs with LINKAGE-based call pairs
-	pass5RepairRate       = 0.10 // fraction of programs needing relationship repair (Opus)
-	pass5DeadVerifyRate   = 0.05 // fraction of programs needing dead paragraph verification
-	pass5DomainMergeCalls = 2    // typical domain merge LLM calls (Sonnet)
+	// pass4CallPairRate covers LINKAGE, COMMAREA, and shared file flow pairs combined.
+	pass4CallPairRate = 0.25 // fraction of COBOL programs with inter-program data flow calls
 
-	outputTypicalFraction = 0.50 // typical output tokens as fraction of maxTokens budget
+	// pass5RepairRate reflects that 30-50% of programs in large enterprise codebases
+	// have gaps in CALLS, CHILD_OF, or MOVES_TO relationships after Passes 1-2.
+	pass5RepairRate = 0.35
+
+	// pass5AnnotationRepairRate reflects programs missing paragraph annotations.
+	pass5AnnotationRepairRate = 0.20
+
+	// pass5DeadVerifyRate: dead code detection flags ~15% of programs on average.
+	pass5DeadVerifyRate = 0.15
+
+	// pass5DomainMergeCalls: domain merge runs iteratively; 5 calls is a realistic estimate.
+	pass5DomainMergeCalls = 5
+
+	// outputTypicalFraction: Claude uses 70-80%+ of its output budget on dense COBOL analysis.
+	outputTypicalFraction = 0.75
+
+	// truncationRetryMultiplier accounts for completeWithRetry resending the full prompt.
+	// Pass 2/Opus (32k max) truncates often (~2.5x). Pass 1/Sonnet rarely (~1.1x).
+	// Blended conservative average across all passes.
+	truncationRetryMultiplier = 1.8
 
 	// Fixed prompt overhead in tokens per pass (system + template + examples).
-	pass1PromptOverhead    = 3018
-	pass2PromptOverhead    = 2878
+	pass1PromptOverhead = 3018
+	// pass2PromptOverhead includes template + example + Neo4j context preamble.
+	// The preamble lists all paragraphs, data items, conditions, callers, callees from Pass 1.
+	// For a program with ~80 paragraphs and ~200 data items it is ~3,000 tokens.
+	pass2PromptOverhead    = 5878 // 2878 template/example + 3000 Neo4j context preamble
 	pass3PromptOverhead    = 1441
 	pass4PromptOverhead    = 354
 	pass5RepairOverhead    = 2878 // repair uses pass2 template
 	pass5VerifyOverhead    = 483  // pass5_dead_verify.tmpl overhead
 
-	// Tokens per program in a Pass 3 batch (call graph slice estimate).
-	pass3TokensPerProgram = 200
+	// pass3TokensPerProgram: each program entry in a graph slice includes callers, callees,
+	// copybooks, paragraphs, file defs, SQL tables, CICS commands, external interfaces.
+	pass3TokensPerProgram = 600
 
-	// Pass 4 average input tokens per LINKAGE call pair (field context).
+	// Pass 4 average input tokens per call pair (field context for both programs).
 	pass4InputPerPair = 854
 
 	// Scanner classification batch size.
@@ -162,6 +183,7 @@ func (e *Estimator) Run() *Result {
 	r.Passes = append(r.Passes, e.estimatePass3(len(cobolFiles)))
 	r.Passes = append(r.Passes, e.estimatePass4(len(cobolFiles)))
 	r.Passes = append(r.Passes, e.estimatePass5Repair(len(cobolFiles)))
+	r.Passes = append(r.Passes, e.estimatePass5Annotations(len(cobolFiles)))
 	r.Passes = append(r.Passes, e.estimatePass5Verify(len(cobolFiles)))
 
 	// Step H: scanner classification for pending (content-detect) files
@@ -378,7 +400,7 @@ func (e *Estimator) estimatePass4(cobolCount int) PassEstimate {
 		OutputTypical: int(float64(maxOut*requests) * outputTypicalFraction),
 		OutputWorst:   maxOut * requests,
 		Deterministic: false,
-		Notes:         "Heuristic: ~15% of programs have LINKAGE call pairs",
+		Notes:         "Heuristic: ~25% of programs have LINKAGE/COMMAREA/file-flow call pairs",
 	}
 	computeCosts(&p)
 	return p
@@ -403,7 +425,32 @@ func (e *Estimator) estimatePass5Repair(cobolCount int) PassEstimate {
 		OutputTypical: int(float64(maxOut*requests) * outputTypicalFraction),
 		OutputWorst:   maxOut * requests,
 		Deterministic: false,
-		Notes:         "Heuristic: ~10% of programs need relationship repair",
+		Notes:         "Heuristic: ~35% of programs need relationship repair on large codebases",
+	}
+	computeCosts(&p)
+	return p
+}
+
+func (e *Estimator) estimatePass5Annotations(cobolCount int) PassEstimate {
+	if cobolCount == 0 {
+		return PassEstimate{Name: "Pass 5 (Annotations)", Model: "opus", Deterministic: false}
+	}
+	requests := int(math.Ceil(float64(cobolCount) * pass5AnnotationRepairRate))
+	if requests < 1 {
+		requests = 1
+	}
+	maxOut := e.Config.Claude.Pass2MaxTokens // annotation repair uses pass2 budget (Opus)
+	totalInput := requests * (pass5RepairOverhead + e.Config.Ingest.Pass2TokenLimit)
+
+	p := PassEstimate{
+		Name:          "Pass 5 (Annotations)",
+		Model:         "opus",
+		Requests:      requests,
+		InputTokens:   totalInput,
+		OutputTypical: int(float64(maxOut*requests) * outputTypicalFraction),
+		OutputWorst:   maxOut * requests,
+		Deterministic: false,
+		Notes:         "Heuristic: ~20% of programs missing paragraph annotations after Pass 2",
 	}
 	computeCosts(&p)
 	return p
@@ -429,7 +476,7 @@ func (e *Estimator) estimatePass5Verify(cobolCount int) PassEstimate {
 		OutputTypical: int(float64(maxOut*requests) * outputTypicalFraction),
 		OutputWorst:   maxOut * requests,
 		Deterministic: false,
-		Notes:         "Heuristic: ~5% dead verify + domain merge calls",
+		Notes:         "Heuristic: ~15% dead verify + domain merge calls",
 	}
 	computeCosts(&p)
 	return p
@@ -457,11 +504,15 @@ func (e *Estimator) estimateScanner(pendingCount int) ScannerEstimate {
 }
 
 // computeCosts fills in Anthropic and Copilot pricing on a PassEstimate.
+// Copilot cost includes the truncation retry multiplier since every retry
+// (compression + token-doubling) is a separately billed premium request.
 func computeCosts(p *PassEstimate) {
 	p.InputCost = anthropicInputCost(p.Model, p.InputTokens)
 	p.OutputCostLow = anthropicOutputCost(p.Model, p.OutputTypical)
 	p.OutputCostHigh = anthropicOutputCost(p.Model, p.OutputWorst)
-	p.CopilotCost = copilotRequestCost(p.Model, p.Requests)
+	// Apply retry multiplier: truncation retries resend the full prompt as new billed requests.
+	billableRequests := int(math.Ceil(float64(p.Requests) * truncationRetryMultiplier))
+	p.CopilotCost = copilotRequestCost(p.Model, billableRequests)
 }
 
 // estimateFileTokens reads the file to estimate tokens, falling back to file size on error.

@@ -2,6 +2,7 @@ package estimate
 
 import (
 	"bytes"
+	"math"
 	"strings"
 	"testing"
 
@@ -108,8 +109,8 @@ func TestPass4Heuristic(t *testing.T) {
 		}
 	}
 	require.NotNil(t, pass4)
-	// 100 * 0.15 = 15 requests
-	assert.Equal(t, 15, pass4.Requests)
+	// 100 * 0.25 = 25 requests
+	assert.Equal(t, 25, pass4.Requests)
 	assert.False(t, pass4.Deterministic)
 }
 
@@ -129,6 +130,41 @@ func TestCostMath(t *testing.T) {
 	// Copilot: 10 Sonnet requests = 10 * $0.04 * 1x = $0.40
 	cost = copilotRequestCost("sonnet", 10)
 	assert.InDelta(t, 0.40, cost, 0.001)
+}
+
+func TestRetryMultiplierApplied(t *testing.T) {
+	// Verify that Copilot cost uses the retry multiplier, not raw request count.
+	// For 10 Opus requests: billable = ceil(10 * 1.8) = 18; cost = 18 * $0.04 * 3 = $2.16
+	p := PassEstimate{
+		Name:     "test",
+		Model:    "opus",
+		Requests: 10,
+	}
+	computeCosts(&p)
+	billable := int(math.Ceil(float64(10) * truncationRetryMultiplier))
+	expected := copilotRequestCost("opus", billable)
+	assert.InDelta(t, expected, p.CopilotCost, 0.001)
+	// Must be more expensive than without retry multiplier
+	assert.Greater(t, p.CopilotCost, copilotRequestCost("opus", 10))
+}
+
+func TestPass5AnnotationsPresent(t *testing.T) {
+	sr := makeScanResult(100, 0, 0)
+	est := New(testConfig(), sr, nil, testLogger())
+	r := est.Run()
+
+	var found bool
+	for _, p := range r.Passes {
+		if p.Name == "Pass 5 (Annotations)" {
+			found = true
+			// 100 * 0.20 = 20 requests
+			assert.Equal(t, 20, p.Requests)
+			assert.Equal(t, "opus", p.Model)
+			assert.False(t, p.Deterministic)
+			break
+		}
+	}
+	assert.True(t, found, "Pass 5 (Annotations) should be present")
 }
 
 func TestTotalsAggregation(t *testing.T) {

@@ -79,10 +79,11 @@ func PrintTable(w io.Writer, r *Result) {
 	}
 	fmt.Fprintln(w)
 	fmt.Fprintln(w, "Anthropic API: Opus $15/$75 per MTok (in/out), Sonnet $3/$15 per MTok (in/out)")
-	fmt.Fprintf(w, "Copilot:       $%.2f/premium request (Opus x%.0f, Sonnet x%.0f)\n",
+	fmt.Fprintf(w, "Copilot:       $%.2f/premium request (Opus x%.0f, Sonnet x%.0f) — includes %.1fx retry multiplier for truncation resends\n",
 		DefaultCopilotPricing.BasePerRequest,
 		DefaultCopilotPricing.Multiplier["opus"],
 		DefaultCopilotPricing.Multiplier["sonnet"],
+		truncationRetryMultiplier,
 	)
 }
 
