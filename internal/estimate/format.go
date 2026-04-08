@@ -16,7 +16,7 @@ func PrintTable(w io.Writer, r *Result) {
 	fmt.Fprintf(w, "Files scanned: %d total (%d COBOL, %d copybooks, %d JCL",
 		r.Files.Total, r.Files.COBOL, r.Files.Copybook, r.Files.JCL)
 	if r.Files.Pending > 0 {
-		fmt.Fprintf(w, ", %d pending classification", r.Files.Pending)
+		fmt.Fprintf(w, ", %d pending classification (counted as COBOL)", r.Files.Pending)
 	}
 	fmt.Fprintln(w, ")")
 
