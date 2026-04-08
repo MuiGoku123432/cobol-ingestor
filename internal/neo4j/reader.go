@@ -78,6 +78,14 @@ type Reader interface {
 	GetCobolToExternalMappings(ctx context.Context, cobolTable string) ([]ExternalDBMappingInfo, error)
 	GetGapAnalysis(ctx context.Context) ([]GapInfo, error)
 	GetDataFlowPaths(ctx context.Context, tableName string) ([]DataFlowPathInfo, error)
+	// Target stack gap analysis
+	ListTargetRepos(ctx context.Context) ([]TargetRepoInfo, error)
+	ListTargetServices(ctx context.Context, repoURL string) ([]TargetServiceInfo, error)
+	GetTargetService(ctx context.Context, serviceID string) (*TargetServiceDetail, error)
+	ListBusinessGaps(ctx context.Context, gapType, severity, category string) ([]BusinessGapInfo, error)
+	ListBusinessRequirements(ctx context.Context, priority string) ([]BusinessRequirementInfo, error)
+	GetGapCoverageSummary(ctx context.Context) (*GapCoverageSummary, error)
+	GetTargetStackDashboard(ctx context.Context) (map[string]any, error)
 }
 
 // Ensure Client implements Reader.

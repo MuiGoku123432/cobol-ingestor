@@ -1,0 +1,113 @@
+You are analyzing a source file from a modern software application (the "target stack") that is part of a COBOL modernization effort.
+
+## File Information
+- **File path:** {{.FilePath}}
+- **Language:** {{.Language}}
+- **Category:** {{.Category}}
+
+## Your Task
+
+Extract all business logic and structural information from this file. Focus on what this code *does* from a business perspective, not just its syntax.
+
+### Extract the following:
+
+**Services / Components** — Top-level logical units (controllers, services, handlers, processors, consumers). For each:
+- Name and type (REST_API, GRPC, MESSAGE_CONSUMER, BATCH_JOB, LIBRARY)
+- Business description (what business purpose does this serve?)
+- Base path (URL prefix, topic name, etc.)
+
+**Endpoints / Entry Points** — Individual operations exposed to callers. For each:
+- HTTP method and path (or queue name, event type, etc.)
+- Description of what business action it performs
+- Key input parameters (name, type, required/optional)
+
+**Business Rules** — Validations, calculations, workflows, authorizations, and transformations. For each:
+- Name (use a descriptive name if none exists in code)
+- Description of the rule
+- Category: VALIDATION, CALCULATION, AUTHORIZATION, WORKFLOW, or TRANSFORMATION
+- Confidence (0.0-1.0) that this is a genuine business rule vs. infrastructure/plumbing
+
+**Data Models** — Entities, DTOs, domain objects. For each:
+- Name
+- Description
+- Fields (name, type, required/optional)
+- Database table name if ORM-mapped (from @Table, @Entity, [Table], etc.)
+
+**Integration Points** — External dependencies. For each:
+- Type: DATABASE, REST_CLIENT, MESSAGE_QUEUE, FILE_IO, CACHE, or EXTERNAL_API
+- Target (URL, queue name, table name, service name)
+- Description
+
+**Error Handling Patterns** — How errors are managed. For each:
+- Pattern: TRY_CATCH, ERROR_MIDDLEWARE, CIRCUIT_BREAKER, RETRY, or FALLBACK
+- Description of what errors are handled and how
+
+## Response Format
+
+Return a single JSON object:
+
+```json
+{
+  "services": [
+    {
+      "name": "OrderController",
+      "serviceType": "REST_API",
+      "description": "Handles order placement and order status queries",
+      "basePath": "/api/orders",
+      "language": "Java",
+      "framework": "Spring Boot"
+    }
+  ],
+  "endpoints": [
+    {
+      "method": "POST",
+      "path": "/api/orders",
+      "description": "Create a new order, validates inventory and customer credit",
+      "serviceName": "OrderController",
+      "parameters": "[{\"name\":\"customerId\",\"type\":\"string\",\"required\":true},{\"name\":\"items\",\"type\":\"array\",\"required\":true}]"
+    }
+  ],
+  "rules": [
+    {
+      "name": "CustomerCreditCheck",
+      "description": "Verifies customer credit limit is not exceeded before order placement",
+      "category": "VALIDATION",
+      "serviceName": "OrderController",
+      "confidence": 0.95
+    }
+  ],
+  "dataModels": [
+    {
+      "name": "Order",
+      "description": "Represents a customer order",
+      "serviceName": "OrderController",
+      "fields": "[{\"name\":\"orderId\",\"type\":\"UUID\",\"required\":true},{\"name\":\"customerId\",\"type\":\"string\",\"required\":true}]",
+      "tableName": "ORDERS"
+    }
+  ],
+  "integrations": [
+    {
+      "integrationType": "DATABASE",
+      "target": "orders_db",
+      "description": "Reads and writes order records",
+      "serviceName": "OrderController"
+    }
+  ],
+  "errorHandlers": [
+    {
+      "pattern": "TRY_CATCH",
+      "description": "Catches DatabaseException and returns HTTP 503 with retry-after header",
+      "serviceName": "OrderController"
+    }
+  ]
+}
+```
+
+**Important:**
+- Only extract elements with genuine business meaning — skip getters/setters, logging, trivial config
+- If a file has no business logic (e.g., pure config, auto-generated code), return empty arrays
+- Use the service name from the actual class/component name in the code
+- For business rules, prefer high confidence (>0.7) entries — skip infrastructure code
+
+---
+

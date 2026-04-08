@@ -161,6 +161,7 @@ let isStreaming = false;
 let migrationMode = true;
 let swarmEnabled = false;
 let multiRoundEnabled = false;
+let gapAnalysisEnabled = false;
 let messageCounter = 0;
 let activeSessionId = localStorage.getItem('activeSessionId') || null;
 let sessions = [];
@@ -188,9 +189,13 @@ function toggleMigrationMode() {
 function updatePlaceholder() {
   const sub = document.getElementById("chatPlaceholderSub");
   if (sub) {
-    sub.textContent = migrationMode
-      ? "I'll use the graph database to understand and translate them"
-      : "I'll use the graph database to explore and understand them";
+    if (gapAnalysisEnabled) {
+      sub.textContent = "I'll compare your COBOL mainframe logic against the target stack to find gaps";
+    } else if (migrationMode) {
+      sub.textContent = "I'll use the graph database to understand and translate them";
+    } else {
+      sub.textContent = "I'll use the graph database to explore and understand them";
+    }
   }
 }
 
@@ -203,6 +208,8 @@ function toggleSwarm() {
     toggle.classList.add("swarm-active");
     thumb.classList.add("swarm-thumb");
     document.getElementById("multiRoundContainer").classList.remove("hidden");
+    // Swarm and gap analysis are mutually exclusive
+    if (gapAnalysisEnabled) toggleGapAnalysis();
   } else {
     toggle.classList.remove("swarm-active");
     thumb.classList.remove("swarm-thumb");
@@ -224,6 +231,27 @@ function toggleMultiRound() {
     toggle.classList.remove("swarm-active");
     thumb.classList.remove("swarm-thumb");
   }
+}
+
+function toggleGapAnalysis() {
+  gapAnalysisEnabled = !gapAnalysisEnabled;
+  const toggle = document.getElementById("gapToggle");
+  const thumb = document.getElementById("gapToggleThumb");
+  toggle.setAttribute("aria-checked", gapAnalysisEnabled);
+  if (gapAnalysisEnabled) {
+    toggle.classList.add("bg-emerald-600");
+    toggle.classList.remove("bg-gray-700");
+    thumb.classList.add("translate-x-5", "bg-white");
+    thumb.classList.remove("bg-gray-400");
+    // Gap analysis and swarm are mutually exclusive
+    if (swarmEnabled) toggleSwarm();
+  } else {
+    toggle.classList.remove("bg-emerald-600");
+    toggle.classList.add("bg-gray-700");
+    thumb.classList.remove("translate-x-5", "bg-white");
+    thumb.classList.add("bg-gray-400");
+  }
+  updatePlaceholder();
 }
 
 // Framework options per language
@@ -550,11 +578,17 @@ async function sendMessage(e) {
   let assistantText = "";
 
   try {
-    const endpoint = swarmEnabled ? "/api/swarm" : "/api/chat";
-    const response = await fetch(endpoint, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
+    let endpoint, body;
+    if (gapAnalysisEnabled) {
+      endpoint = "/api/gap-analysis";
+      body = JSON.stringify({
+        messages: messages,
+        sessionId: activeSessionId || '',
+        multiRound: multiRoundEnabled,
+      });
+    } else {
+      endpoint = swarmEnabled ? "/api/swarm" : "/api/chat";
+      body = JSON.stringify({
         messages: messages,
         targetLanguage: migrationMode ? langSelect.value : "",
         framework: migrationMode ? fwSelect.value : "",
@@ -562,7 +596,12 @@ async function sendMessage(e) {
         discoveryMode: !migrationMode,
         sessionId: activeSessionId || '',
         multiRound: swarmEnabled && multiRoundEnabled,
-      }),
+      });
+    }
+    const response = await fetch(endpoint, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body,
     });
 
     if (!response.ok) {
@@ -598,6 +637,21 @@ async function sendMessage(e) {
         data = JSON.parse(dataStr);
       } catch {
         data = dataStr;
+      }
+
+      // Normalize gap analysis events: {agent: name} → {id: slugified-name, name: name}
+      // and content event → text event
+      if (event === "content" && data.text !== undefined) {
+        event = "text";
+        data = { content: data.text };
+      }
+      if ((event === "agent_start" || event === "agent_complete" || event === "agent_tool_start" || event === "agent_tool_result") && data.agent && !data.id) {
+        const agentId = data.agent.toLowerCase().replace(/\s+/g, "-");
+        data = { ...data, id: agentId, name: data.agent, toolName: data.tool, summary: data.status === "error" ? "Error" : "" };
+      }
+      if (event === "coordinator_start") {
+        addMessage("assistant", '<span class="text-emerald-400 text-sm animate-pulse">Gap analysis coordinator synthesizing findings...</span>');
+        return;
       }
 
       switch (event) {
@@ -651,7 +705,7 @@ async function sendMessage(e) {
           break;
 
         case "agent_complete":
-          updateAgentCard(`${messageCounter}-${data.id}`, "Complete", true, (data.summary || "").startsWith("Error:"));
+          updateAgentCard(`${messageCounter}-${data.id}`, "Complete", true, (data.summary || "").startsWith("Error:") || data.status === "error");
           break;
 
         case "round_start":
