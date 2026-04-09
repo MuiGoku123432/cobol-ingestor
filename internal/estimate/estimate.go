@@ -13,6 +13,8 @@ import (
 	"cobol-ingestor/internal/config"
 	"cobol-ingestor/internal/graph"
 	"cobol-ingestor/internal/scanner"
+	"cobol-ingestor/internal/targetstack"
+	"cobol-ingestor/internal/tokencount"
 
 	"go.uber.org/zap"
 )
@@ -66,6 +68,26 @@ const (
 	classifyMaxTokens      = 2048
 	classifyPromptOverhead = 500 // per-batch prompt framing
 	classifySnippetTokens  = 150 // tokens per file snippet
+
+	// BW prompt overhead constants (from template token measurements).
+	bwPass1PromptOverhead = 1626 // bw_ingest.tmpl ~1586 + 40 system
+	bwPass2PromptOverhead = 681  // bw_pass2_synthesis.tmpl ~641 + 40 system
+	bwPass3PromptOverhead = 594  // bw_pass3_repair.tmpl ~554 + 40 system
+
+	// BW heuristics.
+	bwEntityPerFileRate = 1.0 // ~1 entity per BW file (heuristic for Pass 2 batch count)
+
+	// TS prompt overhead constants (from template token measurements).
+	tsPass1PromptOverhead       = 1288 // ts_extract.tmpl ~1248 + 40 system
+	tsPass2PromptOverhead       = 404  // ts_synthesis.tmpl ~364 + 40 system
+	tsGapAgentPromptOverhead    = 599  // ts_gap_agents.tmpl ~559 + 40 system
+	tsCoordPromptOverhead       = 571  // ts_gap_coordinator.tmpl ~531 + 40 system
+
+	// TS gap analysis heuristics.
+	tsGapAgentCount      = 5  // fixed: 5 specialist gap agents
+	tsGapIterations      = 10 // median iterations per agent
+	tsCoordIterations    = 10 // median coordinator iterations
+	tsMaxFileSize        = 200 * 1024 // 200KB — files larger than this are skipped
 )
 
 // PassEstimate holds the estimate for a single pipeline pass.
@@ -128,21 +150,23 @@ type Totals struct {
 
 // Result is the full pre-execution estimate.
 type Result struct {
-	SourceDir string
-	Provider  string // "anthropic", "copilot", etc.
-	Files     FileCounts
-	Cache     CacheSkips
-	Passes    []PassEstimate
-	Scanner   ScannerEstimate
-	Total     Totals
+	SourceDir   string
+	Provider    string // "anthropic", "copilot", etc.
+	TokenMethod string // describes the token counting method used
+	Files       FileCounts
+	Cache       CacheSkips
+	Passes      []PassEstimate
+	Scanner     ScannerEstimate
+	Total       Totals
 }
 
 // Estimator runs the pre-execution cost estimation.
 type Estimator struct {
-	Config     *config.Config
-	ScanResult *scanner.ScanResult
-	Cache      *cache.Cache
-	Logger     *zap.Logger
+	Config       *config.Config
+	ScanResult   *scanner.ScanResult
+	Cache        *cache.Cache
+	Logger       *zap.Logger
+	TokenCounter tokencount.Counter // nil = use heuristic (chunker.EstimateTokens)
 }
 
 // New creates an Estimator.
@@ -153,8 +177,9 @@ func New(cfg *config.Config, sr *scanner.ScanResult, c *cache.Cache, logger *zap
 // Run computes the full estimate without making any LLM calls.
 func (e *Estimator) Run() *Result {
 	r := &Result{
-		SourceDir: e.Config.Ingest.RootDir,
-		Provider:  e.Config.LLM.Provider,
+		SourceDir:   e.Config.Ingest.RootDir,
+		Provider:    e.Config.LLM.Provider,
+		TokenMethod: tokencount.MethodLabel(e.TokenCounter),
 	}
 
 	// Step A: classify files by type
@@ -293,7 +318,7 @@ func (e *Estimator) estimatePass1COBOL(files []graph.FileInfo) PassEstimate {
 		}
 		for _, c := range chunks {
 			p.Requests++
-			p.InputTokens += chunker.EstimateTokens(c.Content) + pass1PromptOverhead
+			p.InputTokens += tokencount.CountOrHeuristic(e.TokenCounter, c.Content) + pass1PromptOverhead
 			p.OutputTypical += int(float64(maxOut) * outputTypicalFraction)
 			p.OutputWorst += maxOut
 		}
@@ -312,7 +337,7 @@ func (e *Estimator) estimatePass1JCL(files []graph.FileInfo) PassEstimate {
 	maxOut := e.Config.Claude.Pass1MaxTokens
 
 	for _, fi := range files {
-		tok := estimateFileTokens(fi) + pass1PromptOverhead
+		tok := e.estimateFileTokens(fi) + pass1PromptOverhead
 		p.Requests++
 		p.InputTokens += tok
 		p.OutputTypical += int(float64(maxOut) * outputTypicalFraction)
@@ -349,7 +374,7 @@ func (e *Estimator) estimatePass2(files []graph.FileInfo, cbIndex chunker.Copybo
 		}
 		for _, c := range chunks {
 			p.Requests++
-			p.InputTokens += chunker.EstimateTokens(c.Content) + pass2PromptOverhead
+			p.InputTokens += tokencount.CountOrHeuristic(e.TokenCounter, c.Content) + pass2PromptOverhead
 			p.OutputTypical += int(float64(maxOut) * outputTypicalFraction)
 			p.OutputWorst += maxOut
 		}
@@ -521,11 +546,370 @@ func computeCosts(p *PassEstimate) {
 }
 
 // estimateFileTokens reads the file to estimate tokens, falling back to file size on error.
-func estimateFileTokens(fi graph.FileInfo) int {
+func (e *Estimator) estimateFileTokens(fi graph.FileInfo) int {
 	data, err := os.ReadFile(fi.Path)
 	if err != nil {
 		return int(float64(fi.Size) / chunker.TokenEstimationRatio)
 	}
-	return chunker.EstimateTokens(string(data))
+	return tokencount.CountOrHeuristic(e.TokenCounter, string(data))
+}
+
+// ─── BW Estimate ─────────────────────────────────────────────────────────────
+
+// BWResult is the full pre-execution estimate for the Businessware pipeline.
+type BWResult struct {
+	SourceDir   string
+	Provider    string
+	TokenMethod string
+	FileCount   int
+	CacheSkips  int
+	Pass1       PassEstimate // Opus, per-chunk (deterministic)
+	Pass2       PassEstimate // Sonnet, per-entity-batch (heuristic)
+	Pass3Repair PassEstimate // Opus, 1 fixed request
+	Pass3Fuzzy  PassEstimate // Sonnet, 1 fixed request
+	Total       Totals
+}
+
+// BWEstimator holds inputs for the BW cost estimation.
+type BWEstimator struct {
+	Config       *config.Config
+	ScanResult   *scanner.ScanBWResult
+	Cache        *cache.Cache
+	Logger       *zap.Logger
+	TokenCounter tokencount.Counter // nil = use heuristic
+}
+
+// NewBW creates a BWEstimator.
+func NewBW(cfg *config.Config, sr *scanner.ScanBWResult, c *cache.Cache, logger *zap.Logger) *BWEstimator {
+	return &BWEstimator{Config: cfg, ScanResult: sr, Cache: c, Logger: logger}
+}
+
+// Run computes the BW cost estimate without making any LLM calls.
+func (e *BWEstimator) Run() *BWResult {
+	r := &BWResult{
+		SourceDir:   e.Config.BW.Dir,
+		Provider:    e.Config.LLM.Provider,
+		FileCount:   len(e.ScanResult.Files),
+		TokenMethod: tokencount.MethodLabel(e.TokenCounter),
+	}
+
+	cfg := e.Config.BW
+	tokenLimit := cfg.TokenLimit
+	if tokenLimit <= 0 {
+		tokenLimit = 30000
+	}
+	maxTokens := cfg.MaxTokens
+	if maxTokens <= 0 {
+		maxTokens = 16000
+	}
+	pass2MaxTokens := cfg.Pass2MaxTokens
+	if pass2MaxTokens <= 0 {
+		pass2MaxTokens = 4000
+	}
+	pass3MaxTokens := cfg.Pass3MaxTokens
+	if pass3MaxTokens <= 0 {
+		pass3MaxTokens = 4000
+	}
+	pass2BatchSize := cfg.Pass2BatchSize
+	if pass2BatchSize <= 0 {
+		pass2BatchSize = 30
+	}
+
+	// Cache check: BW uses pass 99 to avoid collision with COBOL pipeline.
+	var changedFiles []graph.FileInfo
+	if e.Cache != nil {
+		pathHashes := make(map[string]string, len(e.ScanResult.Files))
+		for _, f := range e.ScanResult.Files {
+			pathHashes[f.Path] = f.Hash
+		}
+		changed, err := e.Cache.BatchIsChangedForPass(pathHashes, 99)
+		if err != nil {
+			e.Logger.Warn("bw estimate: cache check failed, assuming all changed", zap.Error(err))
+			changedFiles = e.ScanResult.Files
+		} else {
+			changedSet := make(map[string]struct{}, len(changed))
+			for _, p := range changed {
+				changedSet[p] = struct{}{}
+			}
+			for _, f := range e.ScanResult.Files {
+				if _, ok := changedSet[f.Path]; ok {
+					changedFiles = append(changedFiles, f)
+				}
+			}
+		}
+	} else {
+		changedFiles = e.ScanResult.Files
+	}
+	r.CacheSkips = len(e.ScanResult.Files) - len(changedFiles)
+
+	// Pass 1: chunk each changed file, 1 Opus request per chunk.
+	pass1 := PassEstimate{Name: "Pass 1 (BW Analysis)", Model: "opus", Deterministic: true}
+	for _, fi := range changedFiles {
+		var content []byte
+		if c, ok := e.ScanResult.JARContents[fi.Path]; ok {
+			content = c
+		} else {
+			var err error
+			content, err = os.ReadFile(fi.Path)
+			if err != nil {
+				// Fall back to size estimate.
+				pass1.Requests++
+				tok := int(float64(fi.Size)/chunker.TokenEstimationRatio) + bwPass1PromptOverhead
+				pass1.InputTokens += tok
+				pass1.OutputTypical += int(float64(maxTokens) * outputTypicalFraction)
+				pass1.OutputWorst += maxTokens
+				continue
+			}
+		}
+		chunks, err := chunker.ChunkBWFile(fi.Path, content, tokenLimit, bwPass1PromptOverhead)
+		if err != nil {
+			e.Logger.Warn("bw estimate: chunk error", zap.String("file", fi.Path), zap.Error(err))
+			pass1.Requests++
+			tok := tokencount.CountOrHeuristic(e.TokenCounter, string(content)) + bwPass1PromptOverhead
+			pass1.InputTokens += tok
+			pass1.OutputTypical += int(float64(maxTokens) * outputTypicalFraction)
+			pass1.OutputWorst += maxTokens
+			continue
+		}
+		for _, ch := range chunks {
+			pass1.Requests++
+			pass1.InputTokens += tokencount.CountOrHeuristic(e.TokenCounter, ch.Content) + bwPass1PromptOverhead
+			pass1.OutputTypical += int(float64(maxTokens) * outputTypicalFraction)
+			pass1.OutputWorst += maxTokens
+		}
+	}
+	computeCosts(&pass1)
+	r.Pass1 = pass1
+
+	// Pass 2: synthesis — heuristic ~1 entity per file, batch by pass2BatchSize.
+	entityCount := int(math.Ceil(float64(len(changedFiles)) * bwEntityPerFileRate))
+	pass2Requests := int(math.Ceil(float64(entityCount) / float64(pass2BatchSize)))
+	if pass2Requests < 1 && len(changedFiles) > 0 {
+		pass2Requests = 1
+	}
+	pass2 := PassEstimate{
+		Name:          "Pass 2 (BW Synthesis)",
+		Model:         "sonnet",
+		Requests:      pass2Requests,
+		InputTokens:   pass2Requests * (bwPass2PromptOverhead + pass2BatchSize*200),
+		OutputTypical: pass2Requests * int(float64(pass2MaxTokens)*outputTypicalFraction),
+		OutputWorst:   pass2Requests * pass2MaxTokens,
+		Deterministic: false,
+		Notes:         "Heuristic: ~1 entity per file, batched for synthesis",
+	}
+	computeCosts(&pass2)
+	r.Pass2 = pass2
+
+	// Pass 3 repair: 1 Opus request (unlinked services).
+	pass3Repair := PassEstimate{
+		Name:          "Pass 3 (BW Repair/Unlinked)",
+		Model:         "opus",
+		Requests:      1,
+		InputTokens:   bwPass3PromptOverhead + 2000,
+		OutputTypical: int(float64(pass3MaxTokens) * outputTypicalFraction),
+		OutputWorst:   pass3MaxTokens,
+		Deterministic: false,
+		Notes:         "Fixed: 1 request for unlinked services repair",
+	}
+	computeCosts(&pass3Repair)
+	r.Pass3Repair = pass3Repair
+
+	// Pass 3 fuzzy: 1 Sonnet request (fuzzy match).
+	pass3Fuzzy := PassEstimate{
+		Name:          "Pass 3 (BW Repair/Fuzzy)",
+		Model:         "sonnet",
+		Requests:      1,
+		InputTokens:   bwPass3PromptOverhead + 2000,
+		OutputTypical: int(float64(pass3MaxTokens) * outputTypicalFraction),
+		OutputWorst:   pass3MaxTokens,
+		Deterministic: false,
+		Notes:         "Fixed: 1 request for fuzzy match repair",
+	}
+	computeCosts(&pass3Fuzzy)
+	r.Pass3Fuzzy = pass3Fuzzy
+
+	// Aggregate totals.
+	for _, p := range []PassEstimate{pass1, pass2, pass3Repair, pass3Fuzzy} {
+		r.Total.Requests += p.Requests
+		r.Total.InputTokens += p.InputTokens
+		r.Total.OutputTypical += p.OutputTypical
+		r.Total.OutputWorst += p.OutputWorst
+		r.Total.InputCost += p.InputCost
+		r.Total.OutputCostLow += p.OutputCostLow
+		r.Total.OutputCostHigh += p.OutputCostHigh
+		r.Total.CopilotCost += p.CopilotCost
+	}
+
+	return r
+}
+
+// ─── Target-Stack Estimate ───────────────────────────────────────────────────
+
+// TSResult is the full pre-execution estimate for the target-stack pipeline.
+type TSResult struct {
+	RepoURLs    []string
+	Provider    string
+	TokenMethod string
+	FileCount   int
+	CacheSkips  int
+	Pass1       PassEstimate // Sonnet, per-file (deterministic after scan)
+	Pass2       PassEstimate // Sonnet, 1 synthesis request
+	GapAgents   PassEstimate // Sonnet, 5 agents × ~10 iterations (heuristic)
+	Coordinator PassEstimate // Sonnet, ~10 iterations (heuristic)
+	Total       Totals
+}
+
+// TSEstimator holds inputs for the target-stack cost estimation.
+type TSEstimator struct {
+	Config       *config.Config
+	ScanResults  []*targetstack.ScanResult
+	Cache        *cache.Cache
+	Logger       *zap.Logger
+	TokenCounter tokencount.Counter // nil = use heuristic
+}
+
+// NewTS creates a TSEstimator.
+func NewTS(cfg *config.Config, scans []*targetstack.ScanResult, c *cache.Cache, logger *zap.Logger) *TSEstimator {
+	return &TSEstimator{Config: cfg, ScanResults: scans, Cache: c, Logger: logger}
+}
+
+// Run computes the TS cost estimate without making any LLM calls.
+func (e *TSEstimator) Run() *TSResult {
+	cfg := e.Config.TargetStack
+	maxTokens := cfg.MaxTokens
+	if maxTokens <= 0 {
+		maxTokens = 16000
+	}
+	pass2MaxTokens := cfg.Pass2MaxTokens
+	if pass2MaxTokens <= 0 {
+		pass2MaxTokens = 8000
+	}
+	tokenLimit := cfg.TokenLimit
+	if tokenLimit <= 0 {
+		tokenLimit = 30000
+	}
+
+	r := &TSResult{Provider: e.Config.LLM.Provider, TokenMethod: tokencount.MethodLabel(e.TokenCounter)}
+	for _, sr := range e.ScanResults {
+		r.RepoURLs = append(r.RepoURLs, sr.RepoURL)
+	}
+
+	// Collect all source files eligible for Pass 1 (exclude TEST/BUILD, >200KB).
+	var sourceFiles []targetstack.ScannedFile
+	for _, sr := range e.ScanResults {
+		for _, f := range sr.Files {
+			if f.Category == targetstack.FileCategoryTest || f.Category == targetstack.FileCategoryBuild {
+				continue
+			}
+			if f.Size > tsMaxFileSize {
+				continue
+			}
+			sourceFiles = append(sourceFiles, f)
+		}
+	}
+	r.FileCount = len(sourceFiles)
+
+	// Cache check: TS uses pass 100 (PassExtract).
+	var changedFiles []targetstack.ScannedFile
+	if e.Cache != nil {
+		pathHashes := make(map[string]string, len(sourceFiles))
+		for _, f := range sourceFiles {
+			pathHashes[f.Path] = f.Hash
+		}
+		changed, err := e.Cache.BatchIsChangedForPass(pathHashes, targetstack.PassExtract)
+		if err != nil {
+			e.Logger.Warn("ts estimate: cache check failed, assuming all changed", zap.Error(err))
+			changedFiles = sourceFiles
+		} else {
+			changedSet := make(map[string]struct{}, len(changed))
+			for _, p := range changed {
+				changedSet[p] = struct{}{}
+			}
+			for _, f := range sourceFiles {
+				if _, ok := changedSet[f.Path]; ok {
+					changedFiles = append(changedFiles, f)
+				}
+			}
+		}
+	} else {
+		changedFiles = sourceFiles
+	}
+	r.CacheSkips = len(sourceFiles) - len(changedFiles)
+
+	// Pass 1: 1 Sonnet request per changed file.
+	pass1 := PassEstimate{Name: "Pass 1 (TS Extract)", Model: "sonnet", Deterministic: true}
+	for _, f := range changedFiles {
+		content, err := os.ReadFile(f.Path)
+		var inputTok int
+		if err != nil {
+			inputTok = int(float64(f.Size)/float64(chunker.TokenEstimationRatio)) + tsPass1PromptOverhead
+		} else {
+			inputTok = tokencount.CountOrHeuristic(e.TokenCounter, string(content)) + tsPass1PromptOverhead
+		}
+		pass1.Requests++
+		pass1.InputTokens += inputTok
+		pass1.OutputTypical += int(float64(maxTokens) * outputTypicalFraction)
+		pass1.OutputWorst += maxTokens
+	}
+	computeCosts(&pass1)
+	r.Pass1 = pass1
+
+	// Pass 2: 1 synthesis request.
+	pass2 := PassEstimate{
+		Name:          "Pass 2 (TS Synthesis)",
+		Model:         "sonnet",
+		Requests:      1,
+		InputTokens:   tsPass2PromptOverhead + r.FileCount*50, // ~50 tokens per entity summary
+		OutputTypical: int(float64(pass2MaxTokens) * outputTypicalFraction),
+		OutputWorst:   pass2MaxTokens,
+		Deterministic: false,
+		Notes:         "Fixed: 1 synthesis request across all extracted entities",
+	}
+	computeCosts(&pass2)
+	r.Pass2 = pass2
+
+	// Gap agents: 5 agents × 10 iterations = 50 Sonnet requests.
+	gapRequests := tsGapAgentCount * tsGapIterations
+	gapAgents := PassEstimate{
+		Name:          "Gap Agents (TS)",
+		Model:         "sonnet",
+		Requests:      gapRequests,
+		InputTokens:   gapRequests * (tsGapAgentPromptOverhead + 3000),
+		OutputTypical: gapRequests * int(float64(maxTokens)*outputTypicalFraction),
+		OutputWorst:   gapRequests * maxTokens,
+		Deterministic: false,
+		Notes:         "Heuristic: 5 agents × ~10 iterations",
+	}
+	computeCosts(&gapAgents)
+	r.GapAgents = gapAgents
+
+	// Coordinator: ~10 iterations.
+	coordRequests := tsCoordIterations
+	coordinator := PassEstimate{
+		Name:          "Gap Coordinator (TS)",
+		Model:         "sonnet",
+		Requests:      coordRequests,
+		InputTokens:   coordRequests * (tsCoordPromptOverhead + 3000),
+		OutputTypical: coordRequests * int(float64(maxTokens)*outputTypicalFraction),
+		OutputWorst:   coordRequests * maxTokens,
+		Deterministic: false,
+		Notes:         "Heuristic: ~10 coordinator iterations",
+	}
+	computeCosts(&coordinator)
+	r.Coordinator = coordinator
+
+	// Aggregate totals.
+	for _, p := range []PassEstimate{pass1, pass2, gapAgents, coordinator} {
+		r.Total.Requests += p.Requests
+		r.Total.InputTokens += p.InputTokens
+		r.Total.OutputTypical += p.OutputTypical
+		r.Total.OutputWorst += p.OutputWorst
+		r.Total.InputCost += p.InputCost
+		r.Total.OutputCostLow += p.OutputCostLow
+		r.Total.OutputCostHigh += p.OutputCostHigh
+		r.Total.CopilotCost += p.CopilotCost
+	}
+
+	return r
 }
 
