@@ -23,6 +23,7 @@ func PrintTable(w io.Writer, r *Result) {
 	if r.Cache.Pass1 > 0 || r.Cache.Pass2 > 0 {
 		fmt.Fprintf(w, "Cache hits:    Pass 1: %d skipped, Pass 2: %d skipped\n", r.Cache.Pass1, r.Cache.Pass2)
 	}
+	fmt.Fprintf(w, "Token counting: %s\n", r.TokenMethod)
 	fmt.Fprintln(w)
 
 	tw := tabwriter.NewWriter(w, 0, 0, 2, ' ', 0)
@@ -92,6 +93,136 @@ func PrintJSON(w io.Writer, r *Result) error {
 	enc := json.NewEncoder(w)
 	enc.SetIndent("", "  ")
 	return enc.Encode(r)
+}
+
+// PrintBWTable writes a human-readable BW cost estimate table to w.
+func PrintBWTable(w io.Writer, r *BWResult) {
+	fmt.Fprintf(w, "\nCost Estimate — Businessware Pipeline\n")
+	fmt.Fprintf(w, "Source: %s\n", r.SourceDir)
+	fmt.Fprintf(w, "Provider: %s\n", r.Provider)
+	fmt.Fprintf(w, "%s\n\n", divider(60))
+
+	fmt.Fprintf(w, "Files scanned: %d total", r.FileCount)
+	if r.CacheSkips > 0 {
+		fmt.Fprintf(w, " (%d skipped via cache)", r.CacheSkips)
+	}
+	fmt.Fprintln(w)
+	fmt.Fprintf(w, "Token counting: %s\n", r.TokenMethod)
+	fmt.Fprintln(w)
+
+	tw := tabwriter.NewWriter(w, 0, 0, 2, ' ', 0)
+	fmt.Fprintln(tw, "Pass\tModel\tRequests\tInput Tokens\tAnthropic (typ)\tAnthropic (max)\tCopilot")
+	fmt.Fprintln(tw, "────────────────────────\t───────\t────────\t────────────\t───────────────\t───────────────\t───────")
+
+	passes := []PassEstimate{r.Pass1, r.Pass2, r.Pass3Repair, r.Pass3Fuzzy}
+	hasHeuristics := false
+	for _, p := range passes {
+		if p.Requests == 0 {
+			continue
+		}
+		label := p.Name
+		if !p.Deterministic {
+			label += " *"
+			hasHeuristics = true
+		}
+		fmt.Fprintf(tw, "%s\t%s\t%s\t%s\t%s\t%s\t%s\n",
+			label, p.Model,
+			formatInt(p.Requests),
+			formatInt(p.InputTokens),
+			formatCost(p.InputCost+p.OutputCostLow),
+			formatCost(p.InputCost+p.OutputCostHigh),
+			formatCost(p.CopilotCost),
+		)
+	}
+
+	fmt.Fprintln(tw, "────────────────────────\t───────\t────────\t────────────\t───────────────\t───────────────\t───────")
+	fmt.Fprintf(tw, "TOTAL\t\t%s\t%s\t%s\t%s\t%s\n",
+		formatInt(r.Total.Requests),
+		formatInt(r.Total.InputTokens),
+		formatCost(r.Total.InputCost+r.Total.OutputCostLow),
+		formatCost(r.Total.InputCost+r.Total.OutputCostHigh),
+		formatCost(r.Total.CopilotCost),
+	)
+	tw.Flush()
+
+	if hasHeuristics {
+		fmt.Fprintln(w, "\n* = heuristic estimate")
+	}
+	fmt.Fprintln(w)
+	fmt.Fprintln(w, "Anthropic API: Opus $15/$75 per MTok (in/out), Sonnet $3/$15 per MTok (in/out)")
+	fmt.Fprintf(w, "Copilot:       $%.2f/premium request (Opus x%.0f, Sonnet x%.0f) — includes %.1fx retry multiplier\n",
+		DefaultCopilotPricing.BasePerRequest,
+		DefaultCopilotPricing.Multiplier["opus"],
+		DefaultCopilotPricing.Multiplier["sonnet"],
+		truncationRetryMultiplier,
+	)
+}
+
+// PrintTSTable writes a human-readable target-stack cost estimate table to w.
+func PrintTSTable(w io.Writer, r *TSResult) {
+	fmt.Fprintf(w, "\nCost Estimate — Target-Stack Pipeline\n")
+	if len(r.RepoURLs) > 0 {
+		for _, u := range r.RepoURLs {
+			fmt.Fprintf(w, "Repo: %s\n", u)
+		}
+	}
+	fmt.Fprintf(w, "Provider: %s\n", r.Provider)
+	fmt.Fprintf(w, "%s\n\n", divider(60))
+
+	fmt.Fprintf(w, "Source files: %d total", r.FileCount)
+	if r.CacheSkips > 0 {
+		fmt.Fprintf(w, " (%d skipped via cache)", r.CacheSkips)
+	}
+	fmt.Fprintln(w)
+	fmt.Fprintf(w, "Token counting: %s\n", r.TokenMethod)
+	fmt.Fprintln(w)
+
+	tw := tabwriter.NewWriter(w, 0, 0, 2, ' ', 0)
+	fmt.Fprintln(tw, "Pass\tModel\tRequests\tInput Tokens\tAnthropic (typ)\tAnthropic (max)\tCopilot")
+	fmt.Fprintln(tw, "────────────────────────\t───────\t────────\t────────────\t───────────────\t───────────────\t───────")
+
+	passes := []PassEstimate{r.Pass1, r.Pass2, r.GapAgents, r.Coordinator}
+	hasHeuristics := false
+	for _, p := range passes {
+		if p.Requests == 0 {
+			continue
+		}
+		label := p.Name
+		if !p.Deterministic {
+			label += " *"
+			hasHeuristics = true
+		}
+		fmt.Fprintf(tw, "%s\t%s\t%s\t%s\t%s\t%s\t%s\n",
+			label, p.Model,
+			formatInt(p.Requests),
+			formatInt(p.InputTokens),
+			formatCost(p.InputCost+p.OutputCostLow),
+			formatCost(p.InputCost+p.OutputCostHigh),
+			formatCost(p.CopilotCost),
+		)
+	}
+
+	fmt.Fprintln(tw, "────────────────────────\t───────\t────────\t────────────\t───────────────\t───────────────\t───────")
+	fmt.Fprintf(tw, "TOTAL\t\t%s\t%s\t%s\t%s\t%s\n",
+		formatInt(r.Total.Requests),
+		formatInt(r.Total.InputTokens),
+		formatCost(r.Total.InputCost+r.Total.OutputCostLow),
+		formatCost(r.Total.InputCost+r.Total.OutputCostHigh),
+		formatCost(r.Total.CopilotCost),
+	)
+	tw.Flush()
+
+	if hasHeuristics {
+		fmt.Fprintln(w, "\n* = heuristic estimate (gap agent/coordinator iterations are median; actual varies)")
+	}
+	fmt.Fprintln(w)
+	fmt.Fprintln(w, "Anthropic API: Opus $15/$75 per MTok (in/out), Sonnet $3/$15 per MTok (in/out)")
+	fmt.Fprintf(w, "Copilot:       $%.2f/premium request (Opus x%.0f, Sonnet x%.0f) — includes %.1fx retry multiplier\n",
+		DefaultCopilotPricing.BasePerRequest,
+		DefaultCopilotPricing.Multiplier["opus"],
+		DefaultCopilotPricing.Multiplier["sonnet"],
+		truncationRetryMultiplier,
+	)
 }
 
 func formatInt(n int) string {

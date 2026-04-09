@@ -27,6 +27,7 @@ import (
 	"cobol-ingestor/internal/pipeline"
 	"cobol-ingestor/internal/scanner"
 	"cobol-ingestor/internal/targetstack"
+	"cobol-ingestor/internal/tokencount"
 
 	"github.com/spf13/cobra"
 	"go.uber.org/zap"
@@ -49,13 +50,16 @@ var (
 	codebaseFlag   string
 	contentDetect  bool
 	estimateFlag   bool
+	preciseFlag    bool
 )
 
 // bw flags
 var (
-	bwDir        string
-	bwExtensions string
-	bwMaxWorkers int
+	bwDir          string
+	bwExtensions   string
+	bwMaxWorkers   int
+	bwEstimateFlag bool
+	bwPreciseFlag  bool
 )
 
 var bwCmd = &cobra.Command{
@@ -92,12 +96,14 @@ var extDBCmd = &cobra.Command{
 
 // target-stack flags
 var (
-	tsRepos      []string
-	tsBranch     string
-	tsToken      string
-	tsProvider   string
-	tsPhase      string
-	tsShallow    bool
+	tsRepos        []string
+	tsBranch       string
+	tsToken        string
+	tsProvider     string
+	tsPhase        string
+	tsShallow      bool
+	tsEstimateFlag bool
+	tsPreciseFlag  bool
 )
 
 var tsCmd = &cobra.Command{
@@ -220,6 +226,7 @@ func init() {
 	ingestCmd.Flags().StringVar(&codebaseFlag, "codebase", "default", "Codebase identifier for multi-codebase support")
 	ingestCmd.Flags().BoolVar(&contentDetect, "content-detect", false, "Enable content-based detection of COBOL/copybook/JCL in .txt files")
 	ingestCmd.Flags().BoolVar(&estimateFlag, "estimate", false, "Estimate LLM token cost without making any API calls")
+	ingestCmd.Flags().BoolVar(&preciseFlag, "precise", false, "Use BPE tokenizer for more accurate token counts (slower, requires internet on first use)")
 	_ = ingestCmd.MarkFlagRequired("dir")
 	rootCmd.AddCommand(ingestCmd)
 
@@ -229,6 +236,8 @@ func init() {
 	bwCmd.Flags().StringVar(&bwDir, "dir", "", "Root directory of Businessware files")
 	bwCmd.Flags().StringVar(&bwExtensions, "extensions", "", "Comma-separated file extensions (default: .java,.md,.bw,.txt,.xml)")
 	bwCmd.Flags().IntVar(&bwMaxWorkers, "max-workers", 0, "Max concurrent analysis workers (default: 5)")
+	bwCmd.Flags().BoolVar(&bwEstimateFlag, "estimate", false, "Estimate LLM token cost without making any API calls")
+	bwCmd.Flags().BoolVar(&bwPreciseFlag, "precise", false, "Use BPE tokenizer for more accurate token counts (slower, requires internet on first use)")
 	_ = bwCmd.MarkFlagRequired("dir")
 	rootCmd.AddCommand(bwCmd)
 
@@ -257,6 +266,8 @@ func init() {
 	tsCmd.Flags().StringVar(&tsProvider, "provider", "", "Git provider: github, azure_devops, generic (auto-detected if empty)")
 	tsCmd.Flags().StringVar(&tsPhase, "phase", "all", "Phase to run: scan, analyze, gap, requirements, all")
 	tsCmd.Flags().BoolVar(&tsShallow, "shallow", true, "Use shallow clone (depth=1)")
+	tsCmd.Flags().BoolVar(&tsEstimateFlag, "estimate", false, "Estimate LLM token cost without making any API calls (clones repo but skips LLM/Neo4j)")
+	tsCmd.Flags().BoolVar(&tsPreciseFlag, "precise", false, "Use BPE tokenizer for more accurate token counts (slower, requires internet on first use)")
 	_ = tsCmd.MarkFlagRequired("repo")
 	rootCmd.AddCommand(tsCmd)
 }
@@ -319,9 +330,19 @@ func runIngest(cmd *cobra.Command, args []string) error {
 	// --estimate: print cost breakdown and exit without touching Neo4j or LLM
 	if estimateFlag {
 		est := estimate.New(cfg, scanResult, fileCache, logger)
+		if preciseFlag {
+			bpe, err := tokencount.NewBPECounter()
+			if err != nil {
+				return fmt.Errorf("--precise: failed to initialize BPE tokenizer: %w", err)
+			}
+			est.TokenCounter = bpe
+		}
 		result := est.Run()
 		estimate.PrintTable(os.Stdout, result)
 		return nil
+	}
+	if preciseFlag && !estimateFlag {
+		return fmt.Errorf("--precise requires --estimate")
 	}
 
 	// Connect to Neo4j + run migrations
@@ -464,6 +485,29 @@ func runBW(cmd *cobra.Command, args []string) error {
 	if len(scanResult.Files) == 0 {
 		fmt.Println("No Businessware files found.")
 		return nil
+	}
+
+	if bwEstimateFlag {
+		// Open cache early (read-only, nil on error is fine — estimator handles nil).
+		var fileCache *cache.Cache
+		if c, cacheErr := cache.New(cfg.Ingest.CacheDB); cacheErr == nil {
+			fileCache = c
+			defer fileCache.Close()
+		}
+		est := estimate.NewBW(cfg, bwScanResult, fileCache, logger)
+		if bwPreciseFlag {
+			bpe, err := tokencount.NewBPECounter()
+			if err != nil {
+				return fmt.Errorf("--precise: failed to initialize BPE tokenizer: %w", err)
+			}
+			est.TokenCounter = bpe
+		}
+		result := est.Run()
+		estimate.PrintBWTable(os.Stdout, result)
+		return nil
+	}
+	if bwPreciseFlag && !bwEstimateFlag {
+		return fmt.Errorf("--precise requires --estimate")
 	}
 
 	// Connect to Neo4j + run migrations
@@ -1347,6 +1391,60 @@ func runTargetStack(cmd *cobra.Command, args []string) error {
 	cloneDir := cfg.TargetStack.CloneDir
 	if cloneDir == "" {
 		cloneDir = filepath.Join(cfg.DataDir, "target-repos")
+	}
+
+	if tsEstimateFlag {
+		// Parse extensions for scanning.
+		var estExts []string
+		for _, ext := range strings.Split(cfg.TargetStack.Extensions, ",") {
+			ext = strings.TrimSpace(ext)
+			if ext != "" {
+				estExts = append(estExts, ext)
+			}
+		}
+		// Open cache (nil on error is fine — estimator treats nil as "all changed").
+		var estCache *cache.Cache
+		if c, cacheErr := cache.New(cfg.Ingest.CacheDB); cacheErr == nil {
+			estCache = c
+			defer estCache.Close()
+		}
+		var scanResults []*targetstack.ScanResult
+		for _, repoURL := range tsRepos {
+			providerName := tsProvider
+			if providerName == "" {
+				providerName = targetstack.DetectProvider(repoURL)
+			}
+			repoCfg := targetstack.RepoConfig{
+				URL:      repoURL,
+				Branch:   tsBranch,
+				Provider: providerName,
+				Token:    token,
+			}
+			cloneResult, cloneErr := targetstack.CloneOrPull(repoCfg, cloneDir, tsShallow, logger)
+			if cloneErr != nil {
+				return fmt.Errorf("cloning %s for estimate: %w", repoURL, cloneErr)
+			}
+			scanResult, scanErr := targetstack.Scan(cloneResult.LocalPath, estExts, logger)
+			if scanErr != nil {
+				return fmt.Errorf("scanning %s for estimate: %w", repoURL, scanErr)
+			}
+			scanResult.RepoURL = repoURL
+			scanResults = append(scanResults, scanResult)
+		}
+		est := estimate.NewTS(cfg, scanResults, estCache, logger)
+		if tsPreciseFlag {
+			bpe, err := tokencount.NewBPECounter()
+			if err != nil {
+				return fmt.Errorf("--precise: failed to initialize BPE tokenizer: %w", err)
+			}
+			est.TokenCounter = bpe
+		}
+		result := est.Run()
+		estimate.PrintTSTable(os.Stdout, result)
+		return nil
+	}
+	if tsPreciseFlag && !tsEstimateFlag {
+		return fmt.Errorf("--precise requires --estimate")
 	}
 
 	// Resolve LLM provider
