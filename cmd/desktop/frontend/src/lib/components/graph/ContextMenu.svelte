@@ -22,12 +22,10 @@
   } = $props();
 
   const items: MenuItem[] = [
-    { label: 'Expand Neighbors', action: 'expand' },
+    { label: 'Focus on Node', action: 'focus' },
     { label: 'Show Details', action: 'details' },
     { label: 'Center on Node', action: 'center' },
     { label: '', action: '', separator: true },
-    { label: 'Pin Node', action: 'pin' },
-    { label: 'Unpin Node', action: 'unpin' },
     { label: 'Hide Node', action: 'hide' },
   ];
 

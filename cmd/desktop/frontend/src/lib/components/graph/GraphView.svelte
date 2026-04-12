@@ -1,37 +1,43 @@
 <script lang="ts">
-  import NVL from '@neo4j-nvl/base';
+  import Graph from 'graphology';
+  import Sigma from 'sigma';
+  import FA2Layout from 'graphology-layout-forceatlas2/worker';
   import ContextMenu from './ContextMenu.svelte';
   import CypherPanel from './CypherPanel.svelte';
   import { usePersistedState } from '../../stores/persisted.svelte';
+  import { onMount, onDestroy } from 'svelte';
 
   let saved = usePersistedState('graph', {
     selectedDomain: '',
     cypherVisible: false,
-    showMinimap: false,
   });
 
   let container: HTMLDivElement;
-  let minimapContainer: HTMLDivElement;
-  let nvl: NVL | null = null;
 
+  // Non-reactive: Sigma and Graphology must NOT be wrapped in $state —
+  // Svelte 5 proxies would break Graphology's internal mutation tracking.
+  let graph: Graph | null = null;
+  let renderer: Sigma | null = null;
+  let fa2: FA2Layout | null = null;
+  let layoutTimer: ReturnType<typeof setTimeout> | null = null;
+
+  // Focus mode: plain let so the reducer closure reads the current value at render time.
+  let focusedNodeId: string | null = null;
+  let nodeLabelMap: Record<string, string> = {};
+
+  // Reactive UI state
   let domains: { name: string; description: string }[] = $state([]);
   let loading = $state(false);
   let error = $state('');
-
-  let selectedNode: any = $state(null);
   let selectedNodeId: string | null = $state(null);
+  let selectedNodeCaption = $state('');
   let nodeDetail: any = $state(null);
   let detailLoading = $state(false);
-
-  // Context menu state
   let ctxMenuVisible = $state(false);
   let ctxMenuX = $state(0);
   let ctxMenuY = $state(0);
   let ctxMenuNodeId = $state('');
   let ctxMenuNodeLabel = $state('');
-
-  // Navigation breadcrumb trail
-  let navHistory: { id: string; label: string; caption: string }[] = $state([]);
 
   const colorMap: Record<string, string> = {
     Program: '#238636',
@@ -50,195 +56,166 @@
     }
   }
 
-  function renderGraph(data: { nodes: any[]; relationships: any[] }) {
-    if (nvl) {
-      nvl.destroy();
-      nvl = null;
+  function buildGraph(data: { nodes: any[]; relationships: any[] }): Graph {
+    const g = new Graph({ multi: true, type: 'directed' });
+    nodeLabelMap = {};
+
+    // Seed initial positions by node type — each label gets its own region
+    // with random jitter. This mimics how Bloom groups nodes before force
+    // simulation, giving FA2 a head start toward organic clusters.
+    const typeOffsets: Record<string, { cx: number; cy: number }> = {
+      Program:        { cx:    0, cy:    0 },   // center — the hub type
+      Copybook:       { cx: -400, cy: -200 },
+      Paragraph:      { cx:  400, cy: -200 },
+      BusinessDomain: { cx:    0, cy: -450 },
+      JCLJob:         { cx:    0, cy:  450 },
+    };
+    const spread = 200; // jitter radius within each group
+
+    (data.nodes || []).forEach((node: any) => {
+      if (g.hasNode(node.id)) return;
+      const off = typeOffsets[node.label] ?? { cx: 0, cy: 0 };
+      g.addNode(node.id, {
+        label: node.caption,
+        x: off.cx + (Math.random() - 0.5) * spread * 2,
+        y: off.cy + (Math.random() - 0.5) * spread * 2,
+        size: Math.max(node.size / 5, 3),
+        color: node.color,
+        nodeLabel: node.label,
+      });
+      nodeLabelMap[node.id] = node.label;
+    });
+
+    for (const rel of data.relationships || []) {
+      if (!g.hasNode(rel.from) || !g.hasNode(rel.to)) continue;
+      try {
+        g.addDirectedEdge(rel.from, rel.to, {
+          label: rel.caption,
+          size: 1,
+          color: '#484f58',
+        });
+      } catch {
+        // graphology throws on parallel edges for non-multi graphs; safe to ignore.
+      }
     }
+
+    return g;
+  }
+
+  function startLayout(g: Graph) {
+    if (fa2) { fa2.kill(); fa2 = null; }
+    if (layoutTimer) { clearTimeout(layoutTimer); layoutTimer = null; }
+
+    // Settings tuned to mimic Neo4j Bloom's force-directed layout:
+    // - linLogMode: logarithmic attraction creates well-separated organic clusters
+    //   (this is the single biggest factor for Bloom-like hub-and-spoke patterns)
+    // - outboundAttractionDistribution: hub nodes sit at the center of their cluster
+    //   instead of being pulled toward the periphery
+    // - moderate gravity + no strongGravityMode: lets clusters breathe apart
+    fa2 = new FA2Layout(g, {
+      settings: {
+        linLogMode: true,
+        outboundAttractionDistribution: true,
+        gravity: 0.5,
+        scalingRatio: 2,
+        strongGravityMode: false,
+        barnesHutOptimize: true,
+        barnesHutTheta: 0.5,
+        slowDown: 2,
+      },
+    });
+    fa2.start();
+
+    // LinLog mode needs a bit longer to converge than standard FA2.
+    layoutTimer = setTimeout(() => {
+      if (fa2?.isRunning()) fa2.stop();
+      renderer?.getCamera().animatedReset({ duration: 500 });
+    }, 5000);
+  }
+
+  // nodeReducer and edgeReducer: called by Sigma on every render frame.
+  // They close over `focusedNodeId` and `graph` (plain lets) — reading current values.
+  function nodeReducer(node: string, data: any) {
+    if (!focusedNodeId || !graph) return data;
+    if (node === focusedNodeId) {
+      return { ...data, highlighted: true, zIndex: 2 };
+    }
+    if (graph.areNeighbors(focusedNodeId, node)) {
+      return { ...data, zIndex: 1 };
+    }
+    // Dim everything that is not the focused node or its neighbors.
+    return { ...data, color: '#21262d', label: undefined, zIndex: 0 };
+  }
+
+  function edgeReducer(edge: string, data: any) {
+    if (!focusedNodeId || !graph) return { ...data, label: undefined };
+    const src = graph.source(edge);
+    const tgt = graph.target(edge);
+    if (src === focusedNodeId || tgt === focusedNodeId) {
+      return { ...data, size: 2, color: '#58a6ff' };
+    }
+    return { ...data, hidden: true };
+  }
+
+  function initRenderer(g: Graph) {
+    if (renderer) { renderer.kill(); renderer = null; }
     if (!container) return;
 
-    // Track labels
-    for (const n of data.nodes || []) {
-      nodeLabelMap[n.id] = n.label;
-    }
+    renderer = new Sigma(g, container, {
+      defaultNodeColor: '#8b949e',
+      defaultEdgeColor: '#484f58',
 
-    const nvlNodes = (data.nodes || []).map((n: any) => ({
-      id: n.id,
-      size: n.size,
-      color: n.color,
-      captions: [{ value: n.caption }],
-    }));
+      // Labels: only show when nodes are large enough on screen, and cap the
+      // density so zoomed-out views stay readable instead of a label soup.
+      labelColor: { color: '#e1e4e8' },
+      labelRenderedSizeThreshold: 8,
+      labelDensity: 1,          // roughly 1 label per grid cell
+      labelGridCellSize: 120,   // px — larger cells = fewer labels
 
-    const nvlRels = (data.relationships || []).map((r: any) => ({
-      id: r.id,
-      from: r.from,
-      to: r.to,
-      captions: [{ value: r.caption }],
-    }));
+      // Edge labels appear when zoomed in (renderEdgeLabels + threshold);
+      // the edgeReducer still hides unrelated edges in focus mode.
+      renderEdgeLabels: true,
+      edgeLabelColor: { color: '#6e7681' },
+      edgeLabelSize: 10,
+      edgeLabelRenderedSizeThreshold: 12,
 
-    const nvlOptions: any = {
-      layout: 'force-directed',
-      mouseCallbacks: {
-        onNodeClick: (_node: any, _nodes: any[], hit: any) => {
-          if (hit) handleNodeClick(hit);
-        },
-        onNodeDoubleClick: (_node: any, _nodes: any[], hit: any) => {
-          if (hit) handleNodeDoubleClick(hit);
-        },
-        onCanvasClick: () => {
-          clearSelection();
-          ctxMenuVisible = false;
-        },
-        onNodeRightClick: (_node: any, _nodes: any[], hit: any, evt: any) => {
-          if (hit) handleNodeRightClick(hit, evt);
-        },
-      },
-    };
+      // Zoom bounds: prevent losing context when fully zoomed out and
+      // keep meaningful detail when fully zoomed in.
+      minCameraRatio: 0.02,     // max zoom-in  (~50×)
+      maxCameraRatio: 8,        // max zoom-out (~0.125×)
 
-    if (saved.showMinimap && minimapContainer) {
-      nvlOptions.minimapContainer = minimapContainer;
-    }
+      // Sigma's built-in mouse-wheel zoom + click-drag pan are on by default.
+      // zoomDuration controls the animated scroll-wheel zoom smoothness.
+      zoomDuration: 200,
 
-    nvl = new NVL(container, nvlNodes, nvlRels, nvlOptions);
+      nodeReducer,
+      edgeReducer,
+    });
+
+    renderer.on('clickNode', ({ node }: { node: string }) => handleNodeClick(node));
+    renderer.on('clickStage', () => clearFocus());
+    renderer.on('rightClickNode', ({ node, event }: { node: string; event: any }) => {
+      const native = event?.original ?? event;
+      if (native?.preventDefault) native.preventDefault();
+      ctxMenuX = native?.clientX ?? 0;
+      ctxMenuY = native?.clientY ?? 0;
+      ctxMenuNodeId = node;
+      ctxMenuNodeLabel = nodeLabelMap[node] || 'Program';
+      ctxMenuVisible = true;
+    });
   }
 
-  function clearSelection() {
-    if (selectedNodeId && nvl) {
-      nvl.updateElementsInGraph([{ id: selectedNodeId, activated: false }], []);
-    }
-    selectedNode = null;
-    selectedNodeId = null;
-    nodeDetail = null;
-  }
-
-  async function handleNodeClick(node: any) {
-    // Clear previous selection highlight
-    if (selectedNodeId && nvl) {
-      nvl.updateElementsInGraph([{ id: selectedNodeId, activated: false }], []);
-    }
-
-    selectedNode = node;
-    selectedNodeId = node.id;
-
-    // Highlight selected node
-    if (nvl) {
-      nvl.updateElementsInGraph([{
-        id: node.id,
-        activated: true,
-      }], []);
-    }
-
-    detailLoading = true;
-    nodeDetail = null;
-
-    try {
-      const label = findNodeLabel(node.id);
-      nodeDetail = await (window as any).go.main.Neo4jService.GetNodeDetail(node.id, label);
-    } catch {
-      nodeDetail = { error: 'Failed to load details' };
-    } finally {
-      detailLoading = false;
-    }
-  }
-
-  async function handleNodeDoubleClick(node: any) {
-    try {
-      const label = findNodeLabel(node.id);
-      const caption = node.captions?.[0]?.value || node.id;
-
-      // Add to breadcrumb trail
-      if (!navHistory.find((h) => h.id === node.id)) {
-        navHistory = [...navHistory, { id: node.id, label, caption }];
-      }
-
-      const data = await (window as any).go.main.Neo4jService.GetNodeNeighbors(node.id, label);
-
-      // Track new node labels
-      for (const n of data.nodes || []) {
-        nodeLabelMap[n.id] = n.label;
-      }
-
-      const newNodes = (data.nodes || []).map((n: any) => ({
-        id: n.id,
-        size: n.size,
-        color: n.color,
-        captions: [{ value: n.caption }],
-      }));
-
-      const newRels = (data.relationships || []).map((r: any) => ({
-        id: r.id,
-        from: r.from,
-        to: r.to,
-        captions: [{ value: r.caption }],
-      }));
-
-      if (nvl) {
-        nvl.addAndUpdateElementsInGraph(newNodes, newRels);
-      }
-    } catch (e) {
-      console.error('expand failed', e);
-    }
-  }
-
-  function handleNodeRightClick(node: any, evt: any) {
-    const event = evt?.originalEvent || evt;
-    if (event?.preventDefault) event.preventDefault();
-    ctxMenuX = event?.clientX || 0;
-    ctxMenuY = event?.clientY || 0;
-    ctxMenuNodeId = node.id;
-    ctxMenuNodeLabel = findNodeLabel(node.id);
-    ctxMenuVisible = true;
-  }
-
-  function handleContextAction(action: string, nodeId: string, nodeLabel: string) {
-    if (!nvl) return;
-
-    switch (action) {
-      case 'expand':
-        handleNodeDoubleClick({ id: nodeId, captions: [{ value: nodeId }] });
-        break;
-      case 'details':
-        handleNodeClick({ id: nodeId });
-        break;
-      case 'center':
-        nvl.fit([nodeId]);
-        break;
-      case 'pin':
-        nvl.pinNode(nodeId);
-        break;
-      case 'unpin':
-        nvl.unPinNode(nodeId);
-        break;
-      case 'hide':
-        nvl.removeNodesWithIds([nodeId]);
-        if (selectedNodeId === nodeId) {
-          clearSelection();
-        }
-        break;
-    }
-  }
-
-  function navigateToBreadcrumb(id: string) {
-    if (nvl) nvl.fit([id]);
-  }
-
-  // Track node labels from loaded data
-  let nodeLabelMap: Record<string, string> = {};
-
-  function findNodeLabel(id: string): string {
-    return nodeLabelMap[id] || 'Program';
-  }
-
-  async function loadAndTrackGraph(domain: string) {
+  async function loadFullGraph(domain: string) {
     loading = true;
     error = '';
-    clearSelection();
-    navHistory = [];
+    clearFocus();
 
     try {
-      const data = await (window as any).go.main.Neo4jService.GetCallGraph(domain);
-      nodeLabelMap = {};
-      renderGraph(data);
+      const data = await (window as any).go.main.Neo4jService.GetFullGraph(domain);
+      const g = buildGraph(data);
+      graph = g;
+      initRenderer(g);
+      startLayout(g);
     } catch (e: any) {
       error = e?.message || String(e);
     } finally {
@@ -246,99 +223,118 @@
     }
   }
 
-  // Zoom controls
-  function zoomIn() {
-    if (nvl) nvl.setZoom(nvl.getScale() * 1.25);
+  async function handleNodeClick(nodeId: string) {
+    focusedNodeId = nodeId;
+    renderer?.refresh();
+
+    selectedNodeId = nodeId;
+    selectedNodeCaption = graph?.getNodeAttribute(nodeId, 'label') ?? nodeId;
+
+    detailLoading = true;
+    nodeDetail = null;
+
+    try {
+      const label = nodeLabelMap[nodeId] || 'Program';
+      nodeDetail = await (window as any).go.main.Neo4jService.GetNodeDetail(nodeId, label);
+    } catch {
+      nodeDetail = { error: 'Failed to load details' };
+    } finally {
+      detailLoading = false;
+    }
   }
 
-  function zoomOut() {
-    if (nvl) nvl.setZoom(nvl.getScale() / 1.25);
+  function clearFocus() {
+    focusedNodeId = null;
+    renderer?.refresh();
+    selectedNodeId = null;
+    selectedNodeCaption = '';
+    nodeDetail = null;
+    ctxMenuVisible = false;
   }
 
-  function fitGraph() {
-    if (nvl) nvl.fit();
-  }
-
-  function resetZoom() {
-    if (nvl) nvl.resetZoom();
-  }
-
-  function resetGraph() {
-    loadAndTrackGraph(saved.selectedDomain);
-  }
-
-  function toggleMinimap() {
-    saved.showMinimap = !saved.showMinimap;
-    // Need to re-render to apply minimap container
-    if (nvl) {
-      resetGraph();
+  function handleContextAction(action: string, nodeId: string, _nodeLabel: string) {
+    switch (action) {
+      case 'focus':
+        handleNodeClick(nodeId);
+        break;
+      case 'details':
+        handleNodeClick(nodeId);
+        break;
+      case 'center': {
+        if (graph?.hasNode(nodeId)) {
+          const x = graph.getNodeAttribute(nodeId, 'x') as number;
+          const y = graph.getNodeAttribute(nodeId, 'y') as number;
+          renderer?.getCamera().animate({ x, y, ratio: 0.3 }, { duration: 400 });
+        }
+        break;
+      }
+      case 'hide':
+        if (graph?.hasNode(nodeId)) {
+          graph.dropNode(nodeId);
+          renderer?.refresh();
+          if (selectedNodeId === nodeId) clearFocus();
+        }
+        break;
     }
   }
 
   function handleCypherGraph(data: { nodes: any[]; relationships: any[] }) {
-    nodeLabelMap = {};
-    renderGraph(data);
+    const g = buildGraph(data);
+    graph = g;
+    focusedNodeId = null;
+    if (renderer) {
+      renderer.setGraph(g);
+      renderer.refresh();
+    } else {
+      initRenderer(g);
+    }
+    startLayout(g);
   }
 
-  // Keyboard shortcuts
+  function zoomIn()  { renderer?.getCamera().animatedZoom({ duration: 200 }); }
+  function zoomOut() { renderer?.getCamera().animatedUnzoom({ duration: 200 }); }
+  function fitGraph() { renderer?.getCamera().animatedReset({ duration: 300 }); }
+  function resetGraph() { loadFullGraph(saved.selectedDomain); }
+
   function handleKeydown(e: KeyboardEvent) {
     const target = e.target as HTMLElement;
-    const inInput = target.tagName === 'INPUT' || target.tagName === 'TEXTAREA' || target.tagName === 'SELECT';
+    const inInput = ['INPUT', 'TEXTAREA', 'SELECT'].includes(target.tagName);
 
-    // Ctrl/Cmd+Q — toggle Cypher panel (always)
     if ((e.ctrlKey || e.metaKey) && e.key === 'q') {
       e.preventDefault();
       saved.cypherVisible = !saved.cypherVisible;
       return;
     }
-
-    // Skip other shortcuts when in input
     if (inInput) return;
 
     switch (e.key) {
-      case 'f':
-      case 'F':
-        e.preventDefault();
-        fitGraph();
-        break;
-      case '+':
-      case '=':
-        e.preventDefault();
-        zoomIn();
-        break;
-      case '-':
-        e.preventDefault();
-        zoomOut();
-        break;
+      case 'f': case 'F': e.preventDefault(); fitGraph(); break;
+      case '+': case '=': e.preventDefault(); zoomIn(); break;
+      case '-': e.preventDefault(); zoomOut(); break;
       case 'Escape':
-        if (ctxMenuVisible) {
-          ctxMenuVisible = false;
-        } else if (saved.cypherVisible) {
-          saved.cypherVisible = false;
-        } else if (selectedNode) {
-          clearSelection();
-        }
+        if (ctxMenuVisible) ctxMenuVisible = false;
+        else if (saved.cypherVisible) saved.cypherVisible = false;
+        else if (focusedNodeId) clearFocus();
         break;
-      case 'Delete':
-      case 'Backspace':
-        if (selectedNodeId && nvl) {
-          nvl.removeNodesWithIds([selectedNodeId]);
-          clearSelection();
+      case 'Delete': case 'Backspace':
+        if (focusedNodeId && graph?.hasNode(focusedNodeId)) {
+          graph.dropNode(focusedNodeId);
+          renderer?.refresh();
+          clearFocus();
         }
         break;
     }
   }
 
-  $effect(() => {
+  onMount(() => {
     loadDomains();
-    loadAndTrackGraph(saved.selectedDomain);
+    loadFullGraph(saved.selectedDomain);
+  });
 
-    return () => {
-      if (nvl) {
-        nvl.destroy();
-        nvl = null;
-      }
-    };
+  onDestroy(() => {
+    if (layoutTimer) clearTimeout(layoutTimer);
+    fa2?.kill();
+    renderer?.kill();
   });
 </script>
 
@@ -351,36 +347,32 @@
       <select
         id="domain-filter"
         bind:value={saved.selectedDomain}
-        onchange={() => loadAndTrackGraph(saved.selectedDomain)}
+        onchange={() => loadFullGraph(saved.selectedDomain)}
       >
-        <option value="">All Programs</option>
+        <option value="">All</option>
         {#each domains as d}
           <option value={d.name}>{d.name}</option>
         {/each}
       </select>
     </div>
 
-    {#if navHistory.length > 0}
-      <div class="breadcrumbs">
-        {#each navHistory as crumb, i}
-          {#if i > 0}<span class="breadcrumb-sep">&rsaquo;</span>{/if}
-          <button class="breadcrumb" onclick={() => navigateToBreadcrumb(crumb.id)} title={crumb.label}>
-            {crumb.caption}
-          </button>
-        {/each}
+    {#if selectedNodeId}
+      <div class="focus-badge">
+        <span>Focused: {selectedNodeCaption || selectedNodeId}</span>
+        <button class="clear-focus" onclick={clearFocus} title="Clear focus (Esc)">&times;</button>
       </div>
     {/if}
 
     <div class="toolbar-right">
       <button onclick={() => { saved.cypherVisible = !saved.cypherVisible; }} title="Cypher query (Ctrl+Q)" class:active={saved.cypherVisible}>Cypher</button>
-      <button onclick={toggleMinimap} title="Toggle minimap" class:active={saved.showMinimap}>Map</button>
       <button onclick={fitGraph} title="Fit to view (F)">Fit</button>
-      <button onclick={resetGraph} title="Reset graph">Reset</button>
+      <button onclick={resetGraph} title="Reload full graph">Reset</button>
     </div>
   </div>
 
   <div class="graph-content">
     <div class="graph-body">
+      <!-- svelte-ignore a11y_no_static_element_interactions -->
       <div class="canvas-area" oncontextmenu={(e) => e.preventDefault()}>
         {#if loading}
           <div class="overlay">Loading graph...</div>
@@ -388,20 +380,14 @@
         {#if error}
           <div class="overlay error">{error}</div>
         {/if}
-        <div class="nvl-container" bind:this={container}></div>
 
-        <!-- Zoom controls -->
+        <div class="sigma-container" bind:this={container}></div>
+
         <div class="zoom-controls">
           <button onclick={zoomIn} title="Zoom in (+)">+</button>
-          <button onclick={zoomOut} title="Zoom out (-)">-</button>
+          <button onclick={zoomOut} title="Zoom out (-)">−</button>
           <button onclick={fitGraph} title="Fit to view (F)">&#8596;</button>
-          <button onclick={resetZoom} title="Reset zoom">&#8634;</button>
         </div>
-
-        <!-- Minimap -->
-        {#if saved.showMinimap}
-          <div class="minimap" bind:this={minimapContainer}></div>
-        {/if}
 
         <div class="legend">
           {#each Object.entries(colorMap) as [label, color]}
@@ -413,11 +399,11 @@
         </div>
       </div>
 
-      {#if selectedNode}
+      {#if selectedNodeId}
         <aside class="detail-panel">
           <div class="detail-header">
-            <h3>{selectedNode.id || 'Node Detail'}</h3>
-            <button class="close-btn" onclick={() => clearSelection()}>&times;</button>
+            <h3>{selectedNodeCaption || selectedNodeId}</h3>
+            <button class="close-btn" onclick={clearFocus}>&times;</button>
           </div>
           <div class="detail-body">
             {#if detailLoading}
@@ -431,7 +417,7 @@
                     <dt>{key}</dt>
                     <dd>
                       {#if Array.isArray(value)}
-                        {value.length} items
+                        {(value as any[]).length} items
                       {:else if typeof value === 'object' && value !== null}
                         <pre>{JSON.stringify(value, null, 2)}</pre>
                       {:else}
@@ -465,7 +451,6 @@
     display: flex;
     flex-direction: column;
     height: 100%;
-    gap: 0;
   }
 
   .toolbar {
@@ -476,6 +461,7 @@
     background: #0d1117;
     border-bottom: 1px solid #21262d;
     flex-shrink: 0;
+    gap: 12px;
   }
 
   .toolbar-left {
@@ -513,9 +499,7 @@
     cursor: pointer;
   }
 
-  .toolbar button:hover {
-    background: #30363d;
-  }
+  .toolbar button:hover { background: #30363d; }
 
   .toolbar button.active {
     background: #58a6ff;
@@ -523,38 +507,40 @@
     border-color: #58a6ff;
   }
 
-  /* Breadcrumbs */
-  .breadcrumbs {
+  .focus-badge {
     display: flex;
     align-items: center;
-    gap: 4px;
+    gap: 6px;
+    background: #161b22;
+    border: 1px solid #30363d;
+    border-radius: 4px;
+    padding: 3px 8px;
+    font-size: 12px;
+    color: #58a6ff;
     flex: 1;
     min-width: 0;
-    padding: 0 12px;
-    overflow-x: auto;
+    overflow: hidden;
   }
 
-  .breadcrumb {
-    background: none;
-    border: none;
-    color: #58a6ff;
-    font-size: 12px;
-    cursor: pointer;
-    padding: 2px 4px;
-    border-radius: 3px;
+  .focus-badge span {
+    overflow: hidden;
+    text-overflow: ellipsis;
     white-space: nowrap;
   }
 
-  .breadcrumb:hover {
-    background: #21262d;
+  .clear-focus {
+    background: none;
+    border: none;
+    color: #8b949e;
+    cursor: pointer;
+    font-size: 16px;
+    line-height: 1;
+    padding: 0;
+    flex-shrink: 0;
   }
 
-  .breadcrumb-sep {
-    color: #484f58;
-    font-size: 14px;
-  }
+  .clear-focus:hover { color: #e1e4e8; }
 
-  /* Layout */
   .graph-content {
     display: flex;
     flex-direction: column;
@@ -566,7 +552,6 @@
     display: flex;
     flex: 1;
     min-height: 0;
-    position: relative;
   }
 
   .canvas-area {
@@ -575,7 +560,7 @@
     min-width: 0;
   }
 
-  .nvl-container {
+  .sigma-container {
     width: 100%;
     height: 100%;
     background: #0d1117;
@@ -589,13 +574,11 @@
     color: #8b949e;
     font-size: 14px;
     z-index: 10;
+    pointer-events: none;
   }
 
-  .overlay.error {
-    color: #f85149;
-  }
+  .overlay.error { color: #f85149; }
 
-  /* Zoom controls */
   .zoom-controls {
     position: absolute;
     bottom: 50px;
@@ -620,30 +603,15 @@
     justify-content: center;
   }
 
-  .zoom-controls button:hover {
-    background: #30363d;
-  }
-
-  /* Minimap */
-  .minimap {
-    position: absolute;
-    bottom: 50px;
-    right: 56px;
-    width: 150px;
-    height: 100px;
-    background: rgba(13, 17, 23, 0.85);
-    border: 1px solid #30363d;
-    border-radius: 4px;
-    z-index: 10;
-    overflow: hidden;
-  }
+  .zoom-controls button:hover { background: #30363d; }
 
   .legend {
     position: absolute;
     bottom: 12px;
     left: 12px;
     display: flex;
-    gap: 12px;
+    flex-wrap: wrap;
+    gap: 10px;
     background: rgba(13, 17, 23, 0.85);
     padding: 6px 12px;
     border-radius: 6px;
@@ -700,20 +668,17 @@
     font-size: 18px;
     cursor: pointer;
     padding: 0 4px;
+    flex-shrink: 0;
   }
 
-  .close-btn:hover {
-    color: #e1e4e8;
-  }
+  .close-btn:hover { color: #e1e4e8; }
 
   .detail-body {
     padding: 12px;
     font-size: 13px;
   }
 
-  .muted {
-    color: #8b949e;
-  }
+  .muted { color: #8b949e; }
 
   dl {
     display: grid;
@@ -743,7 +708,8 @@
     margin: 0;
   }
 
-  :global(.nvl-container canvas) {
-    background: #0d1117 !important;
+  /* Sigma injects a canvas — ensure it fills the container */
+  :global(.sigma-container canvas) {
+    display: block;
   }
 </style>

@@ -9,9 +9,11 @@
     "preview": "vite preview"
   },
   "dependencies": {
-    "@neo4j-nvl/base": "^1.1.0",
+    "graphology": "^0.25.4",
+    "graphology-layout-forceatlas2": "^0.10.1",
     "highlight.js": "^11.11.1",
-    "marked": "^17.0.5"
+    "marked": "^17.0.5",
+    "sigma": "^3.0.0"
   },
   "devDependencies": {
     "@sveltejs/vite-plugin-svelte": "^5.0.0",
