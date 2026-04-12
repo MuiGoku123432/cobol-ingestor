@@ -103,6 +103,8 @@ type LLMConfig struct {
 	OpenAIBaseURL         string        // OPENAI_BASE_URL (for Azure or proxies)
 	OpenAIOrgID           string        // OPENAI_ORG_ID
 	OpenAIModel           string        // OPENAI_MODEL (default "gpt-4o")
+	OpenAIAzure           bool          // OPENAI_AZURE — enable Azure OpenAI mode (api-key header, deployments path, api-version)
+	OpenAIAPIVersion      string        // OPENAI_API_VERSION (default "2025-04-01-preview")
 	Timeout               time.Duration // Overall HTTP client timeout (LLM_TIMEOUT)
 	ResponseHeaderTimeout time.Duration // Time to wait for first response byte (LLM_RESPONSE_HEADER_TIMEOUT)
 }
@@ -182,6 +184,8 @@ func Load() (*Config, error) {
 	viper.SetDefault("LLM_TIMEOUT", "600s")
 	viper.SetDefault("LLM_RESPONSE_HEADER_TIMEOUT", "300s")
 	viper.SetDefault("OPENAI_MODEL", "gpt-4o")
+	viper.SetDefault("OPENAI_AZURE", false)
+	viper.SetDefault("OPENAI_API_VERSION", "2025-04-01-preview")
 
 	// Claude model defaults (used by both providers)
 	viper.SetDefault("CLAUDE_OPUS_MODEL", "claude-opus-4-6")
@@ -298,6 +302,8 @@ func Load() (*Config, error) {
 			OpenAIBaseURL:         viper.GetString("OPENAI_BASE_URL"),
 			OpenAIOrgID:           viper.GetString("OPENAI_ORG_ID"),
 			OpenAIModel:          viper.GetString("OPENAI_MODEL"),
+			OpenAIAzure:           viper.GetBool("OPENAI_AZURE"),
+			OpenAIAPIVersion:      viper.GetString("OPENAI_API_VERSION"),
 			Timeout:               llmTimeout,
 			ResponseHeaderTimeout: llmResponseHeaderTimeout,
 		},

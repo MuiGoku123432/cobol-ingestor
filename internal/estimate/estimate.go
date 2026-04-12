@@ -92,20 +92,24 @@ const (
 
 // PassEstimate holds the estimate for a single pipeline pass.
 type PassEstimate struct {
-	Name           string
-	Model          string // "sonnet" or "opus"
-	Requests       int
-	InputTokens    int
-	OutputTypical  int     // typical output tokens (50% of max * requests)
-	OutputWorst    int     // worst-case output tokens (100% of max * requests)
+	Name          string
+	Model         string // "sonnet" or "opus"
+	Requests      int
+	InputTokens   int
+	OutputTypical int // typical output tokens (50% of max * requests)
+	OutputWorst   int // worst-case output tokens (100% of max * requests)
 	// Anthropic API pricing
 	InputCost      float64
 	OutputCostLow  float64
 	OutputCostHigh float64
 	// Copilot premium request pricing
-	CopilotCost    float64
-	Deterministic  bool   // false = heuristic estimate
-	Notes          string
+	CopilotCost float64
+	// Azure APIM pricing (GPT-5.4 for opus, GPT-5-mini for sonnet)
+	APIMCostMin float64 // PTU-based cost (duration × hourly rate); min when PTU available
+	APIMCostMax float64 // PAYG per-token cost; max when no PTU available
+	APIMMinutes float64 // estimated processing minutes on allocated PTUs
+	Deterministic bool   // false = heuristic estimate
+	Notes         string
 }
 
 // ScannerEstimate holds the classification estimate for pending files.
@@ -119,6 +123,9 @@ type ScannerEstimate struct {
 	OutputCostLow  float64
 	OutputCostHigh float64
 	CopilotCost    float64
+	APIMCostMin    float64
+	APIMCostMax    float64
+	APIMMinutes    float64
 }
 
 // FileCounts summarises file breakdown from the scan result.
@@ -146,6 +153,9 @@ type Totals struct {
 	OutputCostLow  float64
 	OutputCostHigh float64
 	CopilotCost    float64
+	APIMCostMin    float64
+	APIMCostMax    float64
+	APIMMinutes    float64
 }
 
 // Result is the full pre-execution estimate.
@@ -224,6 +234,9 @@ func (e *Estimator) Run() *Result {
 		r.Total.OutputCostLow += p.OutputCostLow
 		r.Total.OutputCostHigh += p.OutputCostHigh
 		r.Total.CopilotCost += p.CopilotCost
+		r.Total.APIMCostMin += p.APIMCostMin
+		r.Total.APIMCostMax += p.APIMCostMax
+		r.Total.APIMMinutes += p.APIMMinutes
 	}
 	if r.Scanner.Requests > 0 {
 		r.Total.Requests += r.Scanner.Requests
@@ -234,6 +247,9 @@ func (e *Estimator) Run() *Result {
 		r.Total.OutputCostLow += r.Scanner.OutputCostLow
 		r.Total.OutputCostHigh += r.Scanner.OutputCostHigh
 		r.Total.CopilotCost += r.Scanner.CopilotCost
+		r.Total.APIMCostMin += r.Scanner.APIMCostMin
+		r.Total.APIMCostMax += r.Scanner.APIMCostMax
+		r.Total.APIMMinutes += r.Scanner.APIMMinutes
 	}
 
 	return r
@@ -520,20 +536,26 @@ func (e *Estimator) estimateScanner(pendingCount int) ScannerEstimate {
 	inputPerReq := classifySnippetTokens*classifyBatchSize + classifyPromptOverhead
 	totalInput := requests * inputPerReq
 
+	typicalOut := requests * int(float64(classifyMaxTokens)*outputTypicalFraction)
+	worstOut := requests * classifyMaxTokens * 3
+	ptu := DefaultAPIMConfig.PTU["sonnet"]
 	return ScannerEstimate{
 		PendingFiles:   pendingCount,
 		Requests:       requests,
 		InputTokens:    totalInput,
-		OutputTypical:  requests * int(float64(classifyMaxTokens)*outputTypicalFraction),
-		OutputWorst:    requests * classifyMaxTokens * 3, // worst: 3 classification attempts
+		OutputTypical:  typicalOut,
+		OutputWorst:    worstOut,
 		InputCost:      anthropicInputCost("sonnet", totalInput),
-		OutputCostLow:  anthropicOutputCost("sonnet", requests*int(float64(classifyMaxTokens)*outputTypicalFraction)),
-		OutputCostHigh: anthropicOutputCost("sonnet", requests*classifyMaxTokens*3),
+		OutputCostLow:  anthropicOutputCost("sonnet", typicalOut),
+		OutputCostHigh: anthropicOutputCost("sonnet", worstOut),
 		CopilotCost:    copilotRequestCost("sonnet", requests),
+		APIMCostMin:    apimPTUCost("sonnet", totalInput, typicalOut, ptu, DefaultAPIMConfig.HourlyRate),
+		APIMCostMax:    apimPaygCost("sonnet", totalInput, worstOut),
+		APIMMinutes:    apimPTUMinutes("sonnet", totalInput, typicalOut, ptu),
 	}
 }
 
-// computeCosts fills in Anthropic and Copilot pricing on a PassEstimate.
+// computeCosts fills in Anthropic, Copilot, and Azure APIM pricing on a PassEstimate.
 // Copilot cost includes the truncation retry multiplier since every retry
 // (compression + token-doubling) is a separately billed premium request.
 func computeCosts(p *PassEstimate) {
@@ -543,6 +565,12 @@ func computeCosts(p *PassEstimate) {
 	// Apply retry multiplier: truncation retries resend the full prompt as new billed requests.
 	billableRequests := int(math.Ceil(float64(p.Requests) * truncationRetryMultiplier))
 	p.CopilotCost = copilotRequestCost(p.Model, billableRequests)
+	// Azure APIM: min = PTU-based (duration × hourly rate); max = PAYG (no PTU available).
+	// Min uses typical output; max uses worst-case output.
+	ptu := DefaultAPIMConfig.PTU[p.Model]
+	p.APIMMinutes = apimPTUMinutes(p.Model, p.InputTokens, p.OutputTypical, ptu)
+	p.APIMCostMin = apimPTUCost(p.Model, p.InputTokens, p.OutputTypical, ptu, DefaultAPIMConfig.HourlyRate)
+	p.APIMCostMax = apimPaygCost(p.Model, p.InputTokens, p.OutputWorst)
 }
 
 // estimateFileTokens reads the file to estimate tokens, falling back to file size on error.
@@ -738,6 +766,9 @@ func (e *BWEstimator) Run() *BWResult {
 		r.Total.OutputCostLow += p.OutputCostLow
 		r.Total.OutputCostHigh += p.OutputCostHigh
 		r.Total.CopilotCost += p.CopilotCost
+		r.Total.APIMCostMin += p.APIMCostMin
+		r.Total.APIMCostMax += p.APIMCostMax
+		r.Total.APIMMinutes += p.APIMMinutes
 	}
 
 	return r
@@ -908,6 +939,9 @@ func (e *TSEstimator) Run() *TSResult {
 		r.Total.OutputCostLow += p.OutputCostLow
 		r.Total.OutputCostHigh += p.OutputCostHigh
 		r.Total.CopilotCost += p.CopilotCost
+		r.Total.APIMCostMin += p.APIMCostMin
+		r.Total.APIMCostMax += p.APIMCostMax
+		r.Total.APIMMinutes += p.APIMMinutes
 	}
 
 	return r

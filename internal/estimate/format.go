@@ -28,9 +28,8 @@ func PrintTable(w io.Writer, r *Result) {
 
 	tw := tabwriter.NewWriter(w, 0, 0, 2, ' ', 0)
 
-	// Always show both Anthropic and Copilot columns
-	fmt.Fprintln(tw, "Pass\tModel\tRequests\tInput Tokens\tAnthropic (typ)\tAnthropic (max)\tCopilot")
-	fmt.Fprintln(tw, "────────────────────────\t───────\t────────\t────────────\t───────────────\t───────────────\t───────")
+	fmt.Fprintln(tw, "Pass\tModel\tRequests\tInput Tokens\tAnthropic (typ)\tAnthropic (max)\tCopilot\tAPIM (min)\tAPIM (max)")
+	fmt.Fprintln(tw, "────────────────────────\t───────\t────────\t────────────\t───────────────\t───────────────\t───────\t──────────\t──────────")
 
 	hasHeuristics := false
 	for _, p := range r.Passes {
@@ -42,7 +41,7 @@ func PrintTable(w io.Writer, r *Result) {
 			label += " *"
 			hasHeuristics = true
 		}
-		fmt.Fprintf(tw, "%s\t%s\t%s\t%s\t%s\t%s\t%s\n",
+		fmt.Fprintf(tw, "%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n",
 			label,
 			p.Model,
 			formatInt(p.Requests),
@@ -50,27 +49,33 @@ func PrintTable(w io.Writer, r *Result) {
 			formatCost(p.InputCost+p.OutputCostLow),
 			formatCost(p.InputCost+p.OutputCostHigh),
 			formatCost(p.CopilotCost),
+			formatCost(p.APIMCostMin),
+			formatCost(p.APIMCostMax),
 		)
 	}
 
 	if r.Scanner.Requests > 0 {
-		fmt.Fprintf(tw, "Scanner Classification\tsonnet\t%s\t%s\t%s\t%s\t%s\n",
+		fmt.Fprintf(tw, "Scanner Classification\tsonnet\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n",
 			formatInt(r.Scanner.Requests),
 			formatInt(r.Scanner.InputTokens),
 			formatCost(r.Scanner.InputCost+r.Scanner.OutputCostLow),
 			formatCost(r.Scanner.InputCost+r.Scanner.OutputCostHigh),
 			formatCost(r.Scanner.CopilotCost),
+			formatCost(r.Scanner.APIMCostMin),
+			formatCost(r.Scanner.APIMCostMax),
 		)
 	}
 
 	// Totals row
-	fmt.Fprintln(tw, "────────────────────────\t───────\t────────\t────────────\t───────────────\t───────────────\t───────")
-	fmt.Fprintf(tw, "TOTAL\t\t%s\t%s\t%s\t%s\t%s\n",
+	fmt.Fprintln(tw, "────────────────────────\t───────\t────────\t────────────\t───────────────\t───────────────\t───────\t──────────\t──────────")
+	fmt.Fprintf(tw, "TOTAL\t\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n",
 		formatInt(r.Total.Requests),
 		formatInt(r.Total.InputTokens),
 		formatCost(r.Total.InputCost+r.Total.OutputCostLow),
 		formatCost(r.Total.InputCost+r.Total.OutputCostHigh),
 		formatCost(r.Total.CopilotCost),
+		formatCost(r.Total.APIMCostMin),
+		formatCost(r.Total.APIMCostMax),
 	)
 
 	tw.Flush()
@@ -85,6 +90,16 @@ func PrintTable(w io.Writer, r *Result) {
 		DefaultCopilotPricing.Multiplier["opus"],
 		DefaultCopilotPricing.Multiplier["sonnet"],
 		truncationRetryMultiplier,
+	)
+	fmt.Fprintf(w, "Azure APIM:    GPT-5.4 %d PTU ($%.2f/$%.0f per MTok PAYG), GPT-5-mini %d PTU ($%.2f/$%.0f per MTok PAYG)\n",
+		DefaultAPIMConfig.PTU["opus"], apimPricing["opus"].InputPerMTok, apimPricing["opus"].OutputPerMTok,
+		DefaultAPIMConfig.PTU["sonnet"], apimPricing["sonnet"].InputPerMTok, apimPricing["sonnet"].OutputPerMTok,
+	)
+	fmt.Fprintf(w, "               APIM min = duration × $%.2f/PTU/hr; APIM max = PAYG (no PTU). PTU > PAYG for small workloads.\n",
+		DefaultAPIMConfig.HourlyRate,
+	)
+	fmt.Fprintf(w, "               Est. total PTU time: %.1f min (each pass on its own PTU pool; complex+simple run concurrently)\n",
+		r.Total.APIMMinutes,
 	)
 }
 
@@ -111,8 +126,8 @@ func PrintBWTable(w io.Writer, r *BWResult) {
 	fmt.Fprintln(w)
 
 	tw := tabwriter.NewWriter(w, 0, 0, 2, ' ', 0)
-	fmt.Fprintln(tw, "Pass\tModel\tRequests\tInput Tokens\tAnthropic (typ)\tAnthropic (max)\tCopilot")
-	fmt.Fprintln(tw, "────────────────────────\t───────\t────────\t────────────\t───────────────\t───────────────\t───────")
+	fmt.Fprintln(tw, "Pass\tModel\tRequests\tInput Tokens\tAnthropic (typ)\tAnthropic (max)\tCopilot\tAPIM (min)\tAPIM (max)")
+	fmt.Fprintln(tw, "────────────────────────\t───────\t────────\t────────────\t───────────────\t───────────────\t───────\t──────────\t──────────")
 
 	passes := []PassEstimate{r.Pass1, r.Pass2, r.Pass3Repair, r.Pass3Fuzzy}
 	hasHeuristics := false
@@ -125,23 +140,27 @@ func PrintBWTable(w io.Writer, r *BWResult) {
 			label += " *"
 			hasHeuristics = true
 		}
-		fmt.Fprintf(tw, "%s\t%s\t%s\t%s\t%s\t%s\t%s\n",
+		fmt.Fprintf(tw, "%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n",
 			label, p.Model,
 			formatInt(p.Requests),
 			formatInt(p.InputTokens),
 			formatCost(p.InputCost+p.OutputCostLow),
 			formatCost(p.InputCost+p.OutputCostHigh),
 			formatCost(p.CopilotCost),
+			formatCost(p.APIMCostMin),
+			formatCost(p.APIMCostMax),
 		)
 	}
 
-	fmt.Fprintln(tw, "────────────────────────\t───────\t────────\t────────────\t───────────────\t───────────────\t───────")
-	fmt.Fprintf(tw, "TOTAL\t\t%s\t%s\t%s\t%s\t%s\n",
+	fmt.Fprintln(tw, "────────────────────────\t───────\t────────\t────────────\t───────────────\t───────────────\t───────\t──────────\t──────────")
+	fmt.Fprintf(tw, "TOTAL\t\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n",
 		formatInt(r.Total.Requests),
 		formatInt(r.Total.InputTokens),
 		formatCost(r.Total.InputCost+r.Total.OutputCostLow),
 		formatCost(r.Total.InputCost+r.Total.OutputCostHigh),
 		formatCost(r.Total.CopilotCost),
+		formatCost(r.Total.APIMCostMin),
+		formatCost(r.Total.APIMCostMax),
 	)
 	tw.Flush()
 
@@ -155,6 +174,11 @@ func PrintBWTable(w io.Writer, r *BWResult) {
 		DefaultCopilotPricing.Multiplier["opus"],
 		DefaultCopilotPricing.Multiplier["sonnet"],
 		truncationRetryMultiplier,
+	)
+	fmt.Fprintf(w, "Azure APIM:    GPT-5.4 %d PTU ($%.2f/$%.0f per MTok PAYG), GPT-5-mini %d PTU ($%.2f/$%.0f per MTok PAYG) — $%.2f/PTU/hr\n",
+		DefaultAPIMConfig.PTU["opus"], apimPricing["opus"].InputPerMTok, apimPricing["opus"].OutputPerMTok,
+		DefaultAPIMConfig.PTU["sonnet"], apimPricing["sonnet"].InputPerMTok, apimPricing["sonnet"].OutputPerMTok,
+		DefaultAPIMConfig.HourlyRate,
 	)
 }
 
@@ -178,8 +202,8 @@ func PrintTSTable(w io.Writer, r *TSResult) {
 	fmt.Fprintln(w)
 
 	tw := tabwriter.NewWriter(w, 0, 0, 2, ' ', 0)
-	fmt.Fprintln(tw, "Pass\tModel\tRequests\tInput Tokens\tAnthropic (typ)\tAnthropic (max)\tCopilot")
-	fmt.Fprintln(tw, "────────────────────────\t───────\t────────\t────────────\t───────────────\t───────────────\t───────")
+	fmt.Fprintln(tw, "Pass\tModel\tRequests\tInput Tokens\tAnthropic (typ)\tAnthropic (max)\tCopilot\tAPIM (min)\tAPIM (max)")
+	fmt.Fprintln(tw, "────────────────────────\t───────\t────────\t────────────\t───────────────\t───────────────\t───────\t──────────\t──────────")
 
 	passes := []PassEstimate{r.Pass1, r.Pass2, r.GapAgents, r.Coordinator}
 	hasHeuristics := false
@@ -192,23 +216,27 @@ func PrintTSTable(w io.Writer, r *TSResult) {
 			label += " *"
 			hasHeuristics = true
 		}
-		fmt.Fprintf(tw, "%s\t%s\t%s\t%s\t%s\t%s\t%s\n",
+		fmt.Fprintf(tw, "%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n",
 			label, p.Model,
 			formatInt(p.Requests),
 			formatInt(p.InputTokens),
 			formatCost(p.InputCost+p.OutputCostLow),
 			formatCost(p.InputCost+p.OutputCostHigh),
 			formatCost(p.CopilotCost),
+			formatCost(p.APIMCostMin),
+			formatCost(p.APIMCostMax),
 		)
 	}
 
-	fmt.Fprintln(tw, "────────────────────────\t───────\t────────\t────────────\t───────────────\t───────────────\t───────")
-	fmt.Fprintf(tw, "TOTAL\t\t%s\t%s\t%s\t%s\t%s\n",
+	fmt.Fprintln(tw, "────────────────────────\t───────\t────────\t────────────\t───────────────\t───────────────\t───────\t──────────\t──────────")
+	fmt.Fprintf(tw, "TOTAL\t\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n",
 		formatInt(r.Total.Requests),
 		formatInt(r.Total.InputTokens),
 		formatCost(r.Total.InputCost+r.Total.OutputCostLow),
 		formatCost(r.Total.InputCost+r.Total.OutputCostHigh),
 		formatCost(r.Total.CopilotCost),
+		formatCost(r.Total.APIMCostMin),
+		formatCost(r.Total.APIMCostMax),
 	)
 	tw.Flush()
 
@@ -222,6 +250,11 @@ func PrintTSTable(w io.Writer, r *TSResult) {
 		DefaultCopilotPricing.Multiplier["opus"],
 		DefaultCopilotPricing.Multiplier["sonnet"],
 		truncationRetryMultiplier,
+	)
+	fmt.Fprintf(w, "Azure APIM:    GPT-5.4 %d PTU ($%.2f/$%.0f per MTok PAYG), GPT-5-mini %d PTU ($%.2f/$%.0f per MTok PAYG) — $%.2f/PTU/hr\n",
+		DefaultAPIMConfig.PTU["opus"], apimPricing["opus"].InputPerMTok, apimPricing["opus"].OutputPerMTok,
+		DefaultAPIMConfig.PTU["sonnet"], apimPricing["sonnet"].InputPerMTok, apimPricing["sonnet"].OutputPerMTok,
+		DefaultAPIMConfig.HourlyRate,
 	)
 }
 

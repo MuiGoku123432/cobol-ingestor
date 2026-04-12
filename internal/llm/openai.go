@@ -3,6 +3,7 @@ package llm
 import (
 	"context"
 	"fmt"
+	"net/http"
 	"strings"
 
 	"cobol-ingestor/internal/config"
@@ -11,6 +12,34 @@ import (
 	"github.com/openai/openai-go/option"
 	"github.com/openai/openai-go/shared"
 )
+
+// azureTransport rewrites requests to match the Azure OpenAI API format:
+//   - Replaces Authorization: Bearer with api-key header
+//   - Appends api-version query param
+//   - Rewrites URL path to use /deployments/<model>/chat/completions
+type azureTransport struct {
+	apiKey     string
+	apiVersion string
+	model      string
+	base       http.RoundTripper
+}
+
+func (t *azureTransport) RoundTrip(req *http.Request) (*http.Response, error) {
+	req.Header.Set("api-key", t.apiKey)
+	req.Header.Del("Authorization")
+
+	q := req.URL.Query()
+	q.Set("api-version", t.apiVersion)
+	req.URL.RawQuery = q.Encode()
+
+	const suffix = "/chat/completions"
+	if strings.HasSuffix(req.URL.Path, suffix) {
+		base := req.URL.Path[:len(req.URL.Path)-len(suffix)]
+		req.URL.Path = base + "/deployments/" + t.model + suffix
+	}
+
+	return t.base.RoundTrip(req)
+}
 
 // OpenAIProvider implements Provider and ChatProvider using the OpenAI
 // Chat Completions API. Supports OpenAI, Azure OpenAI, and any
@@ -27,6 +56,11 @@ func NewOpenAIProvider(cfg *config.Config) (*OpenAIProvider, error) {
 		return nil, fmt.Errorf("openai: OPENAI_API_KEY is required")
 	}
 
+	model := cfg.LLM.OpenAIModel
+	if model == "" {
+		model = "gpt-4o"
+	}
+
 	opts := []option.RequestOption{
 		option.WithAPIKey(cfg.LLM.OpenAIAPIKey),
 	}
@@ -36,13 +70,22 @@ func NewOpenAIProvider(cfg *config.Config) (*OpenAIProvider, error) {
 	if cfg.LLM.OpenAIOrgID != "" {
 		opts = append(opts, option.WithOrganization(cfg.LLM.OpenAIOrgID))
 	}
+	if cfg.LLM.OpenAIAzure {
+		apiVersion := cfg.LLM.OpenAIAPIVersion
+		if apiVersion == "" {
+			apiVersion = "2025-04-01-preview"
+		}
+		opts = append(opts, option.WithHTTPClient(&http.Client{
+			Transport: &azureTransport{
+				apiKey:     cfg.LLM.OpenAIAPIKey,
+				apiVersion: apiVersion,
+				model:      model,
+				base:       http.DefaultTransport,
+			},
+		}))
+	}
 
 	client := openai.NewClient(opts...)
-
-	model := cfg.LLM.OpenAIModel
-	if model == "" {
-		model = "gpt-4o"
-	}
 
 	return &OpenAIProvider{
 		client:       &client,
