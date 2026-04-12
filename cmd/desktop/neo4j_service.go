@@ -287,6 +287,156 @@ LIMIT 200`
 	return &GraphData{Nodes: nodes, Relationships: rels}, nil
 }
 
+// GetFullGraph returns all visually-relevant nodes (Program, Copybook, Paragraph,
+// BusinessDomain, JCLJob) and all relationships between them for the full-graph view.
+// If domain is non-empty, only nodes connected to that business domain are returned.
+func (s *Neo4jService) GetFullGraph(domain string) (*GraphData, error) {
+	if s.client == nil {
+		return nil, fmt.Errorf("not connected to Neo4j")
+	}
+	ctx := context.Background()
+
+	// Derive a stable semantic node ID and a human-readable caption from node properties.
+	const nodeIDExpr = `CASE
+    WHEN n:Program THEN coalesce(n.programId, elementId(n))
+    WHEN n:Copybook OR n:BusinessDomain THEN coalesce(n.name, elementId(n))
+    WHEN n:JCLJob THEN coalesce(n.jobName, elementId(n))
+    ELSE coalesce(n.mergeId, n.name, elementId(n))
+  END`
+	const nodeCaptionExpr = `CASE
+    WHEN n:Paragraph THEN coalesce(n.name, n.mergeId, elementId(n))
+    ELSE coalesce(n.programId, n.name, n.jobName, elementId(n))
+  END`
+
+	// Phase 1: collect nodes.
+	var nodeQuery string
+	params := map[string]any{}
+	if domain != "" {
+		params["domain"] = domain
+		nodeQuery = fmt.Sprintf(`MATCH (prog:Program)-[:BELONGS_TO]->(:BusinessDomain {name: $domain})
+WITH collect(prog.programId) AS progIds, collect(elementId(prog)) AS progElemIds
+MATCH (n)
+WHERE (n:Program AND elementId(n) IN progElemIds)
+   OR (n:Paragraph AND n.programId IN progIds)
+   OR (n:Copybook AND EXISTS { MATCH (p:Program)-[:INCLUDES]->(n) WHERE p.programId IN progIds })
+   OR (n:BusinessDomain AND n.name = $domain)
+RETURN %s AS nodeId, %s AS caption, labels(n)[0] AS label`, nodeIDExpr, nodeCaptionExpr)
+	} else {
+		nodeQuery = fmt.Sprintf(`MATCH (n)
+WHERE n:Program OR n:Copybook OR n:Paragraph OR n:BusinessDomain OR n:JCLJob
+RETURN %s AS nodeId, %s AS caption, labels(n)[0] AS label`, nodeIDExpr, nodeCaptionExpr)
+	}
+
+	sess1 := s.client.NewSession(ctx)
+	defer sess1.Close(ctx)
+	nodeResult, err := sess1.Run(ctx, nodeQuery, params)
+	if err != nil {
+		return nil, fmt.Errorf("full graph node query: %w", err)
+	}
+	nodeMap := map[string]GraphNode{}
+	for nodeResult.Next(ctx) {
+		rec := nodeResult.Record()
+		rawID, _ := rec.Get("nodeId")
+		rawCap, _ := rec.Get("caption")
+		rawLabel, _ := rec.Get("label")
+		if rawID == nil {
+			continue
+		}
+		nid := fmt.Sprint(rawID)
+		nlabel := "Program"
+		if rawLabel != nil && fmt.Sprint(rawLabel) != "<nil>" {
+			nlabel = fmt.Sprint(rawLabel)
+		}
+		ncap := nid
+		if rawCap != nil && fmt.Sprint(rawCap) != "<nil>" {
+			ncap = fmt.Sprint(rawCap)
+		}
+		if _, exists := nodeMap[nid]; !exists {
+			nodeMap[nid] = GraphNode{
+				ID:      nid,
+				Label:   nlabel,
+				Caption: ncap,
+				Size:    nodeSize(nlabel),
+				Color:   nodeColor(nlabel),
+				Domain:  domain,
+			}
+		}
+	}
+	if err := nodeResult.Err(); err != nil {
+		return nil, fmt.Errorf("full graph node result: %w", err)
+	}
+
+	// Phase 2: collect relationships between the 5 node types.
+	// Both endpoints are checked against nodeMap in Go to filter correctly.
+	const relAIDExpr = `CASE
+    WHEN a:Program THEN coalesce(a.programId, elementId(a))
+    WHEN a:Copybook OR a:BusinessDomain THEN coalesce(a.name, elementId(a))
+    WHEN a:JCLJob THEN coalesce(a.jobName, elementId(a))
+    ELSE coalesce(a.mergeId, a.name, elementId(a))
+  END`
+	const relBIDExpr = `CASE
+    WHEN b:Program THEN coalesce(b.programId, elementId(b))
+    WHEN b:Copybook OR b:BusinessDomain THEN coalesce(b.name, elementId(b))
+    WHEN b:JCLJob THEN coalesce(b.jobName, elementId(b))
+    ELSE coalesce(b.mergeId, b.name, elementId(b))
+  END`
+	relQuery := fmt.Sprintf(`MATCH (a)-[r]->(b)
+WHERE (a:Program OR a:Copybook OR a:Paragraph OR a:BusinessDomain OR a:JCLJob)
+  AND (b:Program OR b:Copybook OR b:Paragraph OR b:BusinessDomain OR b:JCLJob)
+RETURN %s AS aId, %s AS bId, type(r) AS relType, elementId(r) AS relId`, relAIDExpr, relBIDExpr)
+
+	sess2 := s.client.NewSession(ctx)
+	defer sess2.Close(ctx)
+	relResult, err := sess2.Run(ctx, relQuery, nil)
+	if err != nil {
+		return nil, fmt.Errorf("full graph rel query: %w", err)
+	}
+
+	var rels []GraphRelationship
+	relIdx := 0
+	relSeen := map[string]bool{}
+	for relResult.Next(ctx) {
+		rec := relResult.Record()
+		rawAID, _ := rec.Get("aId")
+		rawBID, _ := rec.Get("bId")
+		rawType, _ := rec.Get("relType")
+		rawRelID, _ := rec.Get("relId")
+		if rawAID == nil || rawBID == nil || rawType == nil {
+			continue
+		}
+		aid := fmt.Sprint(rawAID)
+		bid := fmt.Sprint(rawBID)
+		if _, ok := nodeMap[aid]; !ok {
+			continue
+		}
+		if _, ok := nodeMap[bid]; !ok {
+			continue
+		}
+		rid := fmt.Sprint(rawRelID)
+		if relSeen[rid] {
+			continue
+		}
+		relSeen[rid] = true
+		rels = append(rels, GraphRelationship{
+			ID:      fmt.Sprintf("frel-%d", relIdx),
+			From:    aid,
+			To:      bid,
+			Caption: fmt.Sprint(rawType),
+			Type:    fmt.Sprint(rawType),
+		})
+		relIdx++
+	}
+	if err := relResult.Err(); err != nil {
+		return nil, fmt.Errorf("full graph rel result: %w", err)
+	}
+
+	nodes := make([]GraphNode, 0, len(nodeMap))
+	for _, n := range nodeMap {
+		nodes = append(nodes, n)
+	}
+	return &GraphData{Nodes: nodes, Relationships: rels}, nil
+}
+
 // GetNodeNeighbors returns 1-hop neighbors of a given node.
 func (s *Neo4jService) GetNodeNeighbors(nodeID, nodeLabel string) (*GraphData, error) {
 	if s.client == nil {
