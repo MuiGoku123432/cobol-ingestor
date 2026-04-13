@@ -36,7 +36,7 @@ func registerListTargetRepos(s *mcp.Server, reader n4j.Reader) {
 }
 
 type listTargetServicesInput struct {
-	RepoURL string `json:"repoUrl,omitempty" jsonschema:"description=Filter by repository URL. Leave empty to list services from all repos."`
+	RepoURL string `json:"repoUrl,omitempty" jsonschema:"Filter by repository URL. Leave empty to list services from all repos."`
 }
 
 func registerListTargetServices(s *mcp.Server, reader n4j.Reader) {
@@ -56,7 +56,7 @@ func registerListTargetServices(s *mcp.Server, reader n4j.Reader) {
 }
 
 type getTargetServiceInput struct {
-	ServiceID string `json:"serviceId" jsonschema:"required,description=The service ID (format: repoURL::serviceName)"`
+	ServiceID string `json:"serviceId" jsonschema:"The service ID (format: repoURL::serviceName)"`
 }
 
 func registerGetTargetService(s *mcp.Server, reader n4j.Reader) {
@@ -76,9 +76,9 @@ func registerGetTargetService(s *mcp.Server, reader n4j.Reader) {
 }
 
 type listBusinessGapsInput struct {
-	GapType  string `json:"gapType,omitempty"  jsonschema:"description=Filter by gap type: COBOL_ONLY\\, TARGET_ONLY\\, PARTIAL_MATCH\\, or SEMANTIC_MISMATCH"`
-	Severity string `json:"severity,omitempty" jsonschema:"description=Filter by severity: CRITICAL\\, HIGH\\, MEDIUM\\, or LOW"`
-	Category string `json:"category,omitempty" jsonschema:"description=Filter by category: BUSINESS_RULE\\, DATA_MODEL\\, INTEGRATION\\, ERROR_HANDLING\\, or BATCH_PROCESSING"`
+	GapType  string `json:"gapType,omitempty"  jsonschema:"Filter by gap type: COBOL_ONLY, TARGET_ONLY, PARTIAL_MATCH, or SEMANTIC_MISMATCH"`
+	Severity string `json:"severity,omitempty" jsonschema:"Filter by severity: CRITICAL, HIGH, MEDIUM, or LOW"`
+	Category string `json:"category,omitempty" jsonschema:"Filter by category: BUSINESS_RULE, DATA_MODEL, INTEGRATION, ERROR_HANDLING, or BATCH_PROCESSING"`
 }
 
 func registerListBusinessGaps(s *mcp.Server, reader n4j.Reader) {
@@ -98,7 +98,7 @@ func registerListBusinessGaps(s *mcp.Server, reader n4j.Reader) {
 }
 
 type listBusinessRequirementsInput struct {
-	Priority string `json:"priority,omitempty" jsonschema:"description=Filter by priority: P0\\, P1\\, P2\\, or P3"`
+	Priority string `json:"priority,omitempty" jsonschema:"Filter by priority: P0, P1, P2, or P3"`
 }
 
 func registerListBusinessRequirements(s *mcp.Server, reader n4j.Reader) {
