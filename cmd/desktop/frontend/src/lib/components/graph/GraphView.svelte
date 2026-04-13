@@ -1,7 +1,7 @@
 <script lang="ts">
   import Graph from 'graphology';
   import Sigma from 'sigma';
-  import FA2Layout from 'graphology-layout-forceatlas2/worker';
+  import forceAtlas2 from 'graphology-layout-forceatlas2';
   import ContextMenu from './ContextMenu.svelte';
   import CypherPanel from './CypherPanel.svelte';
   import { usePersistedState } from '../../stores/persisted.svelte';
@@ -18,7 +18,6 @@
   // Svelte 5 proxies would break Graphology's internal mutation tracking.
   let graph: Graph | null = null;
   let renderer: Sigma | null = null;
-  let fa2: FA2Layout | null = null;
   let layoutTimer: ReturnType<typeof setTimeout> | null = null;
 
   // Focus mode: plain let so the reducer closure reads the current value at render time.
@@ -103,34 +102,30 @@
   }
 
   function startLayout(g: Graph) {
-    if (fa2) { fa2.kill(); fa2 = null; }
     if (layoutTimer) { clearTimeout(layoutTimer); layoutTimer = null; }
 
-    // Settings tuned to mimic Neo4j Bloom's force-directed layout:
-    // - linLogMode: logarithmic attraction creates well-separated organic clusters
-    //   (this is the single biggest factor for Bloom-like hub-and-spoke patterns)
-    // - outboundAttractionDistribution: hub nodes sit at the center of their cluster
-    //   instead of being pulled toward the periphery
-    // - moderate gravity + no strongGravityMode: lets clusters breathe apart
-    fa2 = new FA2Layout(g, {
-      settings: {
-        linLogMode: true,
-        outboundAttractionDistribution: true,
-        gravity: 0.5,
-        scalingRatio: 2,
-        strongGravityMode: false,
-        barnesHutOptimize: true,
-        barnesHutTheta: 0.5,
-        slowDown: 2,
-      },
-    });
-    fa2.start();
-
-    // LinLog mode needs a bit longer to converge than standard FA2.
+    // Synchronous FA2 — no Web Worker, fully compatible with Wails/WebKit.
+    // Deferred 50ms so Sigma renders the initial seeded positions first.
+    // 150 iterations converges well for 500–2000 nodes in ~100–300ms.
+    // Settings mirror Neo4j Bloom: linLogMode creates organic hub-and-spoke
+    // clusters, outboundAttractionDistribution centers hub nodes in their group.
     layoutTimer = setTimeout(() => {
-      if (fa2?.isRunning()) fa2.stop();
+      forceAtlas2.assign(g, {
+        iterations: 150,
+        settings: {
+          linLogMode: true,
+          outboundAttractionDistribution: true,
+          gravity: 0.5,
+          scalingRatio: 2,
+          strongGravityMode: false,
+          barnesHutOptimize: true,
+          barnesHutTheta: 0.5,
+          slowDown: 2,
+        },
+      });
+      renderer?.refresh();
       renderer?.getCamera().animatedReset({ duration: 500 });
-    }, 5000);
+    }, 50);
   }
 
   // nodeReducer and edgeReducer: called by Sigma on every render frame.
@@ -333,7 +328,6 @@
 
   onDestroy(() => {
     if (layoutTimer) clearTimeout(layoutTimer);
-    fa2?.kill();
     renderer?.kill();
   });
 </script>
