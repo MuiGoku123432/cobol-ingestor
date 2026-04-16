@@ -165,6 +165,9 @@ let gapAnalysisEnabled = false;
 let messageCounter = 0;
 let activeSessionId = localStorage.getItem('activeSessionId') || null;
 let sessions = [];
+let swarmElements = [];   // swarm DOM elements to collapse when synthesis arrives
+let statusBubbles = [];   // ephemeral status wrappers to remove on first text
+let currentAbortController = null;
 
 function toggleMigrationMode() {
   migrationMode = !migrationMode;
@@ -421,6 +424,41 @@ function appendAgentDetail(id, html) {
   detail.appendChild(entry);
 }
 
+function collapseSwarmArtifacts() {
+  if (swarmElements.length === 0) return;
+  const container = document.getElementById("chatMessages");
+
+  const details = document.createElement("details");
+  details.className = "my-2 rounded-lg border border-gray-700 bg-gray-900/50 text-xs";
+  const summary = document.createElement("summary");
+  summary.className = "px-3 py-2 text-gray-400 cursor-pointer hover:text-gray-200 select-none";
+
+  const agentCount = swarmElements.filter(el => el.classList && el.classList.contains("agent-card") && !el.classList.contains("border-indigo-800")).length;
+  summary.textContent = agentCount > 0
+    ? `${agentCount} agent${agentCount !== 1 ? "s" : ""} investigated — click to expand`
+    : "Investigation details — click to expand";
+
+  details.appendChild(summary);
+
+  const wrapper = document.createElement("div");
+  wrapper.className = "px-2 pb-2 space-y-1";
+  for (const el of swarmElements) {
+    el.querySelectorAll(".pulse-dot").forEach(dot => {
+      dot.classList.remove("pulse-dot", "bg-amber-400", "bg-indigo-400");
+      dot.classList.add("bg-gray-600");
+    });
+    el.querySelectorAll(".animate-pulse").forEach(p => p.classList.remove("animate-pulse"));
+    if (el.parentNode) wrapper.appendChild(el);
+  }
+  details.appendChild(wrapper);
+
+  // Insert before the last child (the new assistant response bubble)
+  const lastChild = container.lastElementChild;
+  container.insertBefore(details, lastChild);
+
+  swarmElements = [];
+}
+
 function escapeHtml(text) {
   const div = document.createElement("div");
   div.textContent = text;
@@ -574,6 +612,10 @@ async function sendMessage(e) {
   input.value = "";
   setLoading(true);
 
+  swarmElements = [];
+  statusBubbles = [];
+  currentAbortController = new AbortController();
+
   let assistantBubble = null;
   let assistantText = "";
 
@@ -602,6 +644,7 @@ async function sendMessage(e) {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body,
+      signal: currentAbortController.signal,
     });
 
     if (!response.ok) {
@@ -650,7 +693,8 @@ async function sendMessage(e) {
         data = { ...data, id: agentId, name: data.agent, toolName: data.tool, summary: data.status === "error" ? "Error" : "" };
       }
       if (event === "coordinator_start") {
-        addMessage("assistant", '<span class="text-emerald-400 text-sm animate-pulse">Gap analysis coordinator synthesizing findings...</span>');
+        const bubble = addMessage("assistant", '<span class="text-emerald-400 text-sm animate-pulse">Gap analysis coordinator synthesizing findings...</span>');
+        statusBubbles.push(bubble.parentElement);
         return;
       }
 
@@ -659,7 +703,10 @@ async function sendMessage(e) {
           assistantText += data.content || "";
           const rendered = marked.parse(assistantText);
           if (!assistantBubble) {
+            statusBubbles.forEach(el => el.remove());
+            statusBubbles = [];
             assistantBubble = addMessage("assistant", rendered);
+            collapseSwarmArtifacts();
           } else {
             assistantBubble.innerHTML = rendered;
           }
@@ -672,9 +719,13 @@ async function sendMessage(e) {
           });
           break;
 
-        case "tool_start":
-          addToolIndicator(data.name, `${messageCounter}-${data.id}`);
+        case "tool_start": {
+          const toolId = `${messageCounter}-${data.id}`;
+          addToolIndicator(data.name, toolId);
+          const toolEl = document.getElementById(`tool-${toolId}`);
+          if (toolEl) swarmElements.push(toolEl);
           break;
+        }
 
         case "tool_result":
           updateToolIndicator(
@@ -684,9 +735,13 @@ async function sendMessage(e) {
           );
           break;
 
-        case "agent_start":
-          addAgentCard(`${messageCounter}-${data.id}`, data.name);
+        case "agent_start": {
+          const agentCardId = `${messageCounter}-${data.id}`;
+          addAgentCard(agentCardId, data.name);
+          const agentEl = document.getElementById(`agent-${agentCardId}`);
+          if (agentEl) swarmElements.push(agentEl);
           break;
+        }
 
         case "agent_tool_start":
           updateAgentCard(`${messageCounter}-${data.id}`, `Calling ${data.toolName}...`, false, false);
@@ -708,29 +763,41 @@ async function sendMessage(e) {
           updateAgentCard(`${messageCounter}-${data.id}`, "Complete", true, (data.summary || "").startsWith("Error:") || data.status === "error");
           break;
 
-        case "round_start":
-          addRoundDivider(`${messageCounter}-${data.round}`, data.maxRounds);
+        case "round_start": {
+          const roundKey = `${messageCounter}-${data.round}`;
+          addRoundDivider(roundKey, data.maxRounds);
+          const roundEl = document.getElementById(`round-divider-${roundKey}`);
+          if (roundEl) swarmElements.push(roundEl);
           break;
+        }
 
         case "round_complete":
           updateRoundDivider(`${messageCounter}-${data.round}`);
           break;
 
-        case "coordinator_decision":
-          addCoordinatorDecision(`${messageCounter}-${data.round}`, data.satisfied, data.reasoning, data.followUps);
+        case "coordinator_decision": {
+          const coordCard = addCoordinatorDecision(`${messageCounter}-${data.round}`, data.satisfied, data.reasoning, data.followUps);
+          if (coordCard) swarmElements.push(coordCard);
           break;
+        }
 
-        case "coordinator_tool_start":
-          addToolIndicator(data.toolName, `${messageCounter}-${data.toolId}`);
+        case "coordinator_tool_start": {
+          const ctoolId = `${messageCounter}-${data.toolId}`;
+          addToolIndicator(data.toolName, ctoolId);
+          const ctoolEl = document.getElementById(`tool-${ctoolId}`);
+          if (ctoolEl) swarmElements.push(ctoolEl);
           break;
+        }
 
         case "coordinator_tool_result":
           updateToolIndicator(`${messageCounter}-${data.toolId}`, data.result, false);
           break;
 
-        case "synthesis_start":
-          addMessage("assistant", '<span class="text-indigo-400 text-sm">Compiling results from all agents...</span>');
+        case "synthesis_start": {
+          const synthBubble = addMessage("assistant", '<span class="text-indigo-400 text-sm">Compiling results from all agents...</span>');
+          statusBubbles.push(synthBubble.parentElement);
           break;
+        }
 
         case "session_created":
           activeSessionId = data.id;
@@ -754,16 +821,31 @@ async function sendMessage(e) {
       }
     }
   } catch (err) {
-    addMessage(
-      "assistant",
-      `<span class="text-red-400">Connection error: ${escapeHtml(err.message)}</span>`
-    );
+    if (err.name !== "AbortError") {
+      addMessage(
+        "assistant",
+        `<span class="text-red-400">Connection error: ${escapeHtml(err.message)}</span>`
+      );
+    }
   } finally {
+    // Stop any remaining pulse animations (handles error/disconnect mid-stream)
+    document.querySelectorAll('#chatMessages .pulse-dot').forEach(dot => {
+      dot.classList.remove('pulse-dot', 'bg-amber-400', 'bg-indigo-400');
+      dot.classList.add('bg-gray-600');
+    });
+    document.querySelectorAll('#chatMessages .animate-pulse').forEach(el => {
+      el.classList.remove('animate-pulse');
+    });
+    statusBubbles.forEach(el => el.remove());
+    statusBubbles = [];
+    swarmElements = [];
+    currentAbortController = null;
     setLoading(false);
   }
 }
 
 function clearChat() {
+  currentAbortController?.abort();
   createSession();
 }
 
@@ -819,4 +901,5 @@ function addCoordinatorDecision(round, satisfied, reasoning, followUps) {
   `;
   container.appendChild(card);
   container.scrollTop = container.scrollHeight;
+  return card;
 }
