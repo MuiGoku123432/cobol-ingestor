@@ -32,6 +32,11 @@ type JAREntry struct {
 	EntryPath string         // Internal ZIP entry path
 }
 
+// isEncryptedEntry returns true if the ZIP entry has the encryption flag set.
+func isEncryptedEntry(f *zip.File) bool {
+	return f.Flags&0x1 != 0
+}
+
 // isNestedArchive returns true if the entry name has a JAR/WAR/EAR/ZIP extension.
 func isNestedArchive(name string) bool {
 	ext := strings.ToLower(filepath.Ext(name))
@@ -122,6 +127,14 @@ func extractArchiveFromReader(
 				continue
 			}
 
+			if isEncryptedEntry(f) {
+				logger.Warn("skipping encrypted nested archive entry",
+					zap.String("archive", basePath),
+					zap.String("entry", f.Name),
+				)
+				continue
+			}
+
 			data, err := readZipEntry(f)
 			if err != nil {
 				logger.Warn("failed to read nested archive entry",
@@ -176,6 +189,14 @@ func extractArchiveFromReader(
 			defer func() { <-sem }()
 
 			if ctx.Err() != nil {
+				return
+			}
+
+			if isEncryptedEntry(zf) {
+				logger.Warn("skipping encrypted JAR entry",
+					zap.String("archive", basePath),
+					zap.String("entry", zf.Name),
+				)
 				return
 			}
 

@@ -23,7 +23,10 @@ func (p *CopilotProvider) CompleteChat(ctx context.Context, req ChatRequest) (*C
 	}
 
 	// Build copilot.ChatMessage structs directly (preserves ToolCalls/ToolCallID)
-	msgs := make([]copilot.ChatMessage, 0, len(req.Messages))
+	msgs := make([]copilot.ChatMessage, 0, len(req.Messages)+1)
+	if req.System != "" {
+		msgs = append(msgs, copilot.ChatMessage{Role: "system", Content: req.System})
+	}
 	for _, m := range req.Messages {
 		switch {
 		case m.Role == RoleSystem:

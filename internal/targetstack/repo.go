@@ -86,6 +86,50 @@ func CloneOrPull(cfg RepoConfig, cloneBaseDir string, shallow bool, logger *zap.
 	}, nil
 }
 
+// LocalDirResult builds a CloneResult for a local directory, skipping the
+// clone/pull step entirely. If the directory is a git repo its HEAD SHA is
+// read; otherwise HeadSHA is left empty. The synthetic URL used as the Neo4j
+// identifier is "file://<absPath>".
+func LocalDirResult(dirPath string, logger *zap.Logger) (*CloneResult, error) {
+	absPath, err := filepath.Abs(dirPath)
+	if err != nil {
+		return nil, fmt.Errorf("resolving absolute path for %s: %w", dirPath, err)
+	}
+
+	info, statErr := os.Stat(absPath)
+	if statErr != nil {
+		return nil, fmt.Errorf("accessing directory %s: %w", absPath, statErr)
+	}
+	if !info.IsDir() {
+		return nil, fmt.Errorf("%s is not a directory", absPath)
+	}
+
+	fileURL := "file://" + absPath
+
+	var headSHA string
+	if repo, openErr := git.PlainOpen(absPath); openErr == nil {
+		if head, headErr := repo.Head(); headErr == nil {
+			headSHA = head.Hash().String()
+		}
+	}
+	if headSHA == "" {
+		logger.Info("directory is not a git repo or HEAD unreadable; using empty SHA",
+			zap.String("path", absPath))
+	}
+
+	return &CloneResult{
+		Config: RepoConfig{
+			URL:      fileURL,
+			Branch:   "",
+			Provider: "generic",
+			Token:    "",
+		},
+		LocalPath: absPath,
+		HeadSHA:   headSHA,
+		Updated:   true,
+	}, nil
+}
+
 // repoLocalPath derives a stable local directory from a repo URL.
 // e.g., https://github.com/org/repo → <base>/github.com/org/repo
 func repoLocalPath(repoURL, baseDir string) string {
