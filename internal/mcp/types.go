@@ -119,3 +119,17 @@ type GenerateMermaidDiagramInput struct {
 	Theme    string `json:"theme,omitempty" jsonschema:"Theme name: github-dark, tokyo-night, nord, catppuccin-mocha, etc."`
 	FileName string `json:"fileName,omitempty" jsonschema:"Output file name without extension"`
 }
+
+type RunCypherReadonlyInput struct {
+	Query  string         `json:"query" jsonschema:"Read-only Cypher query to execute"`
+	Params map[string]any `json:"params,omitempty" jsonschema:"Query parameters (optional)"`
+	Limit  int            `json:"limit,omitempty" jsonschema:"Max rows to return (default 100, max 1000)"`
+}
+
+type RunNamedQueryInput struct {
+	Name   string         `json:"name" jsonschema:"Named query identifier (use list_named_queries to discover)"`
+	Params map[string]any `json:"params,omitempty" jsonschema:"Query parameters as declared by the named query"`
+	Limit  int            `json:"limit,omitempty" jsonschema:"Max rows to return (default 100, max 1000)"`
+}
+
+type ListNamedQueriesInput struct{}

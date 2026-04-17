@@ -273,3 +273,31 @@ func (m *MockReader) GetGapAnalysis(_ context.Context) ([]n4j.GapInfo, error) {
 func (m *MockReader) GetDataFlowPaths(_ context.Context, _ string) ([]n4j.DataFlowPathInfo, error) {
 	return m.DataFlowPathItems, m.Err
 }
+
+func (m *MockReader) ListTargetRepos(_ context.Context) ([]n4j.TargetRepoInfo, error) {
+	return nil, m.Err
+}
+
+func (m *MockReader) ListTargetServices(_ context.Context, _ string) ([]n4j.TargetServiceInfo, error) {
+	return nil, m.Err
+}
+
+func (m *MockReader) GetTargetService(_ context.Context, _ string) (*n4j.TargetServiceDetail, error) {
+	return nil, m.Err
+}
+
+func (m *MockReader) ListBusinessGaps(_ context.Context, _, _, _ string) ([]n4j.BusinessGapInfo, error) {
+	return nil, m.Err
+}
+
+func (m *MockReader) ListBusinessRequirements(_ context.Context, _ string) ([]n4j.BusinessRequirementInfo, error) {
+	return nil, m.Err
+}
+
+func (m *MockReader) GetGapCoverageSummary(_ context.Context) (*n4j.GapCoverageSummary, error) {
+	return nil, m.Err
+}
+
+func (m *MockReader) GetTargetStackDashboard(_ context.Context) (map[string]any, error) {
+	return nil, m.Err
+}
