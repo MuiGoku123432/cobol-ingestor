@@ -97,6 +97,7 @@ var extDBCmd = &cobra.Command{
 // target-stack flags
 var (
 	tsRepos        []string
+	tsDirs         []string // local directory paths (skip clone step)
 	tsBranch       string
 	tsToken        string
 	tsProvider     string
@@ -261,6 +262,7 @@ func init() {
 	rootCmd.AddCommand(extDBCmd)
 
 	tsCmd.Flags().StringArrayVar(&tsRepos, "repo", nil, "Repository URL(s) — repeatable for multiple repos")
+	tsCmd.Flags().StringArrayVar(&tsDirs, "dir", nil, "Local directory path(s) — repeatable; skips clone step")
 	tsCmd.Flags().StringVar(&tsBranch, "branch", "main", "Branch to analyze")
 	tsCmd.Flags().StringVar(&tsToken, "token", "", "PAT for GitHub or Azure DevOps (also via TS_TOKEN env)")
 	tsCmd.Flags().StringVar(&tsProvider, "provider", "", "Git provider: github, azure_devops, generic (auto-detected if empty)")
@@ -268,7 +270,12 @@ func init() {
 	tsCmd.Flags().BoolVar(&tsShallow, "shallow", true, "Use shallow clone (depth=1)")
 	tsCmd.Flags().BoolVar(&tsEstimateFlag, "estimate", false, "Estimate LLM token cost without making any API calls (clones repo but skips LLM/Neo4j)")
 	tsCmd.Flags().BoolVar(&tsPreciseFlag, "precise", false, "Use BPE tokenizer for more accurate token counts (slower, requires internet on first use)")
-	_ = tsCmd.MarkFlagRequired("repo")
+	tsCmd.PersistentPreRunE = func(cmd *cobra.Command, args []string) error {
+		if len(tsRepos) == 0 && len(tsDirs) == 0 {
+			return fmt.Errorf("at least one --repo or --dir flag is required")
+		}
+		return nil
+	}
 	rootCmd.AddCommand(tsCmd)
 }
 
@@ -1431,6 +1438,18 @@ func runTargetStack(cmd *cobra.Command, args []string) error {
 			scanResult.RepoURL = repoURL
 			scanResults = append(scanResults, scanResult)
 		}
+		for _, dirPath := range tsDirs {
+			cloneResult, dirErr := targetstack.LocalDirResult(dirPath, logger)
+			if dirErr != nil {
+				return fmt.Errorf("resolving dir %s for estimate: %w", dirPath, dirErr)
+			}
+			scanResult, scanErr := targetstack.Scan(cloneResult.LocalPath, estExts, logger)
+			if scanErr != nil {
+				return fmt.Errorf("scanning %s for estimate: %w", dirPath, scanErr)
+			}
+			scanResult.RepoURL = cloneResult.Config.URL
+			scanResults = append(scanResults, scanResult)
+		}
 		est := estimate.NewTS(cfg, scanResults, estCache, logger)
 		if tsPreciseFlag {
 			bpe, err := tokencount.NewBPECounter()
@@ -1588,6 +1607,71 @@ func runTargetStack(cmd *cobra.Command, args []string) error {
 
 			logger.Info("repo analysis complete",
 				zap.String("repo", repoURL),
+				zap.Int("services", len(analysis.Services)),
+				zap.Int("rules", len(analysis.Rules)),
+				zap.Int("endpoints", len(analysis.Endpoints)),
+			)
+		}
+	}
+
+	// Process each local directory (--dir flag)
+	for _, dirPath := range tsDirs {
+		cloneResult, dirErr := targetstack.LocalDirResult(dirPath, logger)
+		if dirErr != nil {
+			return fmt.Errorf("resolving dir %s: %w", dirPath, dirErr)
+		}
+
+		fileURL := cloneResult.Config.URL
+		logger.Info("processing local directory", zap.String("url", fileURL), zap.String("phase", tsPhase))
+
+		if tsPhase == "scan" || tsPhase == "analyze" || tsPhase == "all" {
+			prevSHA := targetstack.HeadSHAFromNeo4j(ctx, neo4jClient, fileURL)
+			if prevSHA == cloneResult.HeadSHA && cloneResult.HeadSHA != "" && tsPhase != "all" {
+				logger.Info("HEAD SHA unchanged, skipping analysis", zap.String("sha", cloneResult.HeadSHA))
+				continue
+			}
+
+			scanResult, scanErr := targetstack.Scan(cloneResult.LocalPath, extensions, logger)
+			if scanErr != nil {
+				return fmt.Errorf("scanning %s: %w", dirPath, scanErr)
+			}
+			scanResult.RepoURL = fileURL
+			scanResult.HeadSHA = cloneResult.HeadSHA
+
+			logger.Info("scan complete",
+				zap.Int("files", len(scanResult.Files)),
+				zap.Any("by_lang", scanResult.ByLang),
+			)
+
+			if tsPhase == "scan" {
+				fmt.Printf("Scan complete: %d files discovered in %s\n", len(scanResult.Files), dirPath)
+				for lang, count := range scanResult.ByLang {
+					fmt.Printf("  %s: %d files\n", lang, count)
+				}
+				continue
+			}
+
+			extractResults, analyzeErr := analyzer.AnalyzeFiles(ctx, scanResult.Files, fileURL, fileCache, cfg.TargetStack.MaxWorkers)
+			if analyzeErr != nil {
+				return fmt.Errorf("analyzing %s: %w", dirPath, analyzeErr)
+			}
+
+			repoName := targetstack.RepoName(fileURL)
+			lang := detectPrimaryLangFromScan(scanResult)
+
+			analysis, synthErr := analyzer.Synthesize(ctx, extractResults, repoName, lang, "")
+			if synthErr != nil {
+				return fmt.Errorf("synthesis %s: %w", dirPath, synthErr)
+			}
+
+			repo := targetstack.RepoFromCloneResult(cloneResult, scanResult, analysis, cloneDir)
+
+			if err := targetstack.WriteResult(ctx, writer, repo, analysis); err != nil {
+				return fmt.Errorf("writing %s to neo4j: %w", dirPath, err)
+			}
+
+			logger.Info("dir analysis complete",
+				zap.String("repo", fileURL),
 				zap.Int("services", len(analysis.Services)),
 				zap.Int("rules", len(analysis.Rules)),
 				zap.Int("endpoints", len(analysis.Endpoints)),
