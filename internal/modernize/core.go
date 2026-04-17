@@ -74,7 +74,7 @@ func RunChat(ctx context.Context, p ChatParams) error {
 		})
 	}
 
-	tools := GetToolDefinitions()
+	tools := p.MCPClient.BuildLLMToolDefinitions(ctx)
 
 	for i := 0; p.UnlimitedIterations || i < maxToolIterations; i++ {
 		chatReq := llm.ChatRequest{
@@ -252,7 +252,7 @@ func RunSwarm(ctx context.Context, p SwarmParams) error {
 		maxRounds = 3
 	}
 
-	tools := GetToolDefinitions()
+	tools := p.MCPClient.BuildLLMToolDefinitions(ctx)
 	cache := newToolCache()
 	var allRounds []roundSummary
 	var followUpQueries map[string]string

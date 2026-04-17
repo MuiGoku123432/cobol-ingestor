@@ -132,6 +132,14 @@ func (c *Client) NewSession(ctx context.Context) neo4j.SessionWithContext {
 	return c.driver.NewSession(ctx, neo4j.SessionConfig{DatabaseName: c.database})
 }
 
+// NewReadOnlySession creates a new Neo4j session scoped to read-only access.
+func (c *Client) NewReadOnlySession(ctx context.Context) neo4j.SessionWithContext {
+	return c.driver.NewSession(ctx, neo4j.SessionConfig{
+		DatabaseName: c.database,
+		AccessMode:   neo4j.AccessModeRead,
+	})
+}
+
 // Close shuts down the Neo4j driver.
 func (c *Client) Close(ctx context.Context) error {
 	return c.driver.Close(ctx)
