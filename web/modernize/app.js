@@ -162,6 +162,7 @@ let migrationMode = true;
 let swarmEnabled = false;
 let multiRoundEnabled = false;
 let gapAnalysisEnabled = false;
+let unlimitedIterationsEnabled = false;
 let messageCounter = 0;
 let activeSessionId = localStorage.getItem('activeSessionId') || null;
 let sessions = [];
@@ -233,6 +234,24 @@ function toggleMultiRound() {
   } else {
     toggle.classList.remove("swarm-active");
     thumb.classList.remove("swarm-thumb");
+  }
+}
+
+function toggleUnlimited() {
+  unlimitedIterationsEnabled = !unlimitedIterationsEnabled;
+  const toggle = document.getElementById("unlimitedToggle");
+  const thumb = document.getElementById("unlimitedToggleThumb");
+  toggle.setAttribute("aria-checked", unlimitedIterationsEnabled);
+  if (unlimitedIterationsEnabled) {
+    toggle.classList.add("bg-amber-600");
+    toggle.classList.remove("bg-gray-700");
+    thumb.classList.add("translate-x-5", "bg-white");
+    thumb.classList.remove("bg-gray-400");
+  } else {
+    toggle.classList.remove("bg-amber-600");
+    toggle.classList.add("bg-gray-700");
+    thumb.classList.remove("translate-x-5", "bg-white");
+    thumb.classList.add("bg-gray-400");
   }
 }
 
@@ -638,6 +657,7 @@ async function sendMessage(e) {
         discoveryMode: !migrationMode,
         sessionId: activeSessionId || '',
         multiRound: swarmEnabled && multiRoundEnabled,
+        unlimitedIterations: unlimitedIterationsEnabled,
       });
     }
     const response = await fetch(endpoint, {

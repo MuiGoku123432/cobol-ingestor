@@ -136,13 +136,14 @@ func SwarmHandler(ps *ProviderState, mcpClient *MCPClient, defaultModel string, 
 		}
 
 		var req struct {
-			Messages       []chatInputMessage `json:"messages"`
-			TargetLanguage string             `json:"targetLanguage"`
-			Framework      string             `json:"framework"`
-			Integrations   string             `json:"integrations"`
-			DiscoveryMode  bool               `json:"discoveryMode"`
-			SessionID      string             `json:"sessionId"`
-			MultiRound     bool               `json:"multiRound"`
+			Messages             []chatInputMessage `json:"messages"`
+			TargetLanguage       string             `json:"targetLanguage"`
+			Framework            string             `json:"framework"`
+			Integrations         string             `json:"integrations"`
+			DiscoveryMode        bool               `json:"discoveryMode"`
+			SessionID            string             `json:"sessionId"`
+			MultiRound           bool               `json:"multiRound"`
+			UnlimitedIterations  bool               `json:"unlimitedIterations"`
 		}
 		if err := c.ShouldBindJSON(&req); err != nil {
 			c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
@@ -154,18 +155,19 @@ func SwarmHandler(ps *ProviderState, mcpClient *MCPClient, defaultModel string, 
 		emitter := &SSEEmitter{W: c.Writer, Mu: &sync.Mutex{}}
 
 		err := RunSwarm(c.Request.Context(), SwarmParams{
-			Provider:      ps,
-			MCPClient:     mcpClient,
-			SessionStore:  sessionStore,
-			SessionID:     req.SessionID,
-			Messages:      req.Messages,
-			DiscoveryMode: req.DiscoveryMode,
-			MultiRound:    req.MultiRound,
-			TargetLang:    req.TargetLanguage,
-			Framework:     req.Framework,
-			Integrations:  req.Integrations,
-			Emitter:       emitter,
-			Logger:        nil,
+			Provider:            ps,
+			MCPClient:           mcpClient,
+			SessionStore:        sessionStore,
+			SessionID:           req.SessionID,
+			Messages:            req.Messages,
+			DiscoveryMode:       req.DiscoveryMode,
+			MultiRound:          req.MultiRound,
+			UnlimitedIterations: req.UnlimitedIterations,
+			TargetLang:          req.TargetLanguage,
+			Framework:           req.Framework,
+			Integrations:        req.Integrations,
+			Emitter:             emitter,
+			Logger:              nil,
 		})
 		if err != nil {
 			emitter.Emit("error", map[string]string{"error": err.Error()})
@@ -257,6 +259,7 @@ func runAgent(
 	emitter EventEmitter,
 	round int,
 	isMultiRound bool,
+	unlimited bool,
 ) (string, error) {
 	// Send agent_start event
 	startEvent := map[string]any{
@@ -283,7 +286,7 @@ func runAgent(
 
 	var fullText string
 
-	for i := 0; i < maxSwarmToolIterations; i++ {
+	for i := 0; unlimited || i < maxSwarmToolIterations; i++ {
 		if ctx.Err() != nil {
 			return "", ctx.Err()
 		}
@@ -377,10 +380,11 @@ func runAgent(
 		})
 	}
 
-	// Max iterations reached — return what we have
+	// Max iterations reached — emit a visible error so the user knows, then return partial findings
 	emitter.Emit("agent_complete", map[string]string{
 		"id":      sseRole.ID,
-		"summary": truncate(fullText, 500),
+		"summary": fmt.Sprintf("Hit %d-iteration limit. Partial findings: %s", maxSwarmToolIterations, truncate(fullText, 400)),
+		"status":  "error",
 	})
 	return fullText, nil
 }
@@ -485,15 +489,15 @@ func runCoordinatorDecision(
 	if !parsed {
 		text := resp.TextContent()
 		if err := json.Unmarshal([]byte(text), &decision); err != nil {
-			decision = coordinatorDecision{Satisfied: false, Reasoning: "Could not parse decision response"}
+			// Default to Satisfied=true on parse failure — a hiccup shouldn't trigger another full agent round
+			decision = coordinatorDecision{Satisfied: true, Reasoning: "Could not parse decision response"}
 			if extracted := extractJSON(text); extracted != "" {
 				if jsonErr := json.Unmarshal([]byte(extracted), &decision); jsonErr != nil {
-					// Extraction found JSON but it didn't match our schema — keep default
-					decision = coordinatorDecision{Satisfied: false, Reasoning: "Could not parse decision response"}
+					decision = coordinatorDecision{Satisfied: true, Reasoning: "Could not parse decision response"}
 				}
 			}
-			if decision.Reasoning == "Could not parse decision response" && logger != nil {
-				logger.Warn("coordinator decision parse failed",
+			if logger != nil {
+				logger.Warn("coordinator decision parse failed — defaulting to satisfied",
 					zap.String("raw_response", truncate(text, 500)),
 					zap.String("stop_reason", resp.StopReason),
 					zap.Error(err),
@@ -564,6 +568,7 @@ func runCoordinatorSynthesis(
 	model string,
 	maxTokens int,
 	emitter EventEmitter,
+	unlimited bool,
 ) (string, error) {
 	coordSystemPrompt, err := buildSwarmPrompt(coordinatorPrompt, promptData)
 	if err != nil {
@@ -580,7 +585,7 @@ func runCoordinatorSynthesis(
 
 	var fullText string
 
-	for i := 0; i < maxCoordinatorToolIterations; i++ {
+	for i := 0; unlimited || i < maxCoordinatorToolIterations; i++ {
 		if ctx.Err() != nil {
 			return "", ctx.Err()
 		}
@@ -663,5 +668,9 @@ func runCoordinatorSynthesis(
 		})
 	}
 
+	// Coordinator hit iteration limit — emit a visible error before returning partial text
+	emitter.Emit("error", map[string]string{
+		"error": fmt.Sprintf("Synthesis hit %d-iteration limit. Try again, enable Unlimited Iterations, or simplify the question.", maxCoordinatorToolIterations),
+	})
 	return fullText, nil
 }

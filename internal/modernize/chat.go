@@ -19,12 +19,13 @@ func ChatHandler(ps *ProviderState, mcpClient *MCPClient, defaultModel string, d
 		}
 
 		var req struct {
-			Messages       []chatInputMessage `json:"messages"`
-			TargetLanguage string             `json:"targetLanguage"`
-			Framework      string             `json:"framework"`
-			Integrations   string             `json:"integrations"`
-			DiscoveryMode  bool               `json:"discoveryMode"`
-			SessionID      string             `json:"sessionId"`
+			Messages            []chatInputMessage `json:"messages"`
+			TargetLanguage      string             `json:"targetLanguage"`
+			Framework           string             `json:"framework"`
+			Integrations        string             `json:"integrations"`
+			DiscoveryMode       bool               `json:"discoveryMode"`
+			SessionID           string             `json:"sessionId"`
+			UnlimitedIterations bool               `json:"unlimitedIterations"`
 		}
 		if err := c.ShouldBindJSON(&req); err != nil {
 			c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
@@ -36,17 +37,18 @@ func ChatHandler(ps *ProviderState, mcpClient *MCPClient, defaultModel string, d
 		emitter := &SSEEmitter{W: c.Writer, Mu: &sync.Mutex{}}
 
 		err := RunChat(c.Request.Context(), ChatParams{
-			Provider:      ps,
-			MCPClient:     mcpClient,
-			SessionStore:  sessionStore,
-			SessionID:     req.SessionID,
-			Messages:      req.Messages,
-			DiscoveryMode: req.DiscoveryMode,
-			TargetLang:    req.TargetLanguage,
-			Framework:     req.Framework,
-			Integrations:  req.Integrations,
-			Emitter:       emitter,
-			Logger:        nil,
+			Provider:            ps,
+			MCPClient:           mcpClient,
+			SessionStore:        sessionStore,
+			SessionID:           req.SessionID,
+			Messages:            req.Messages,
+			DiscoveryMode:       req.DiscoveryMode,
+			UnlimitedIterations: req.UnlimitedIterations,
+			TargetLang:          req.TargetLanguage,
+			Framework:           req.Framework,
+			Integrations:        req.Integrations,
+			Emitter:             emitter,
+			Logger:              nil,
 		})
 		if err != nil {
 			emitter.Emit("error", map[string]string{"error": err.Error()})
