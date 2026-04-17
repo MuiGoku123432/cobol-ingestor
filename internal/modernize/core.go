@@ -16,19 +16,20 @@ type InputMessage = chatInputMessage
 
 // ChatParams holds all parameters for a headless chat invocation.
 type ChatParams struct {
-	Provider         *ProviderState
-	MCPClient        *MCPClient
-	SessionStore     SessionStore
-	SessionID        string
-	Messages         []InputMessage
-	DiscoveryMode    bool
-	GenerateDiagram  bool
-	TargetLang       string
-	Framework        string
-	Integrations     string
-	Emitter          EventEmitter
-	Logger           *zap.Logger
-	DiagramOutputDir string
+	Provider             *ProviderState
+	MCPClient            *MCPClient
+	SessionStore         SessionStore
+	SessionID            string
+	Messages             []InputMessage
+	DiscoveryMode        bool
+	GenerateDiagram      bool
+	UnlimitedIterations  bool
+	TargetLang           string
+	Framework            string
+	Integrations         string
+	Emitter              EventEmitter
+	Logger               *zap.Logger
+	DiagramOutputDir     string
 }
 
 // RunChat executes the chat tool-use loop, emitting events via the Emitter.
@@ -75,7 +76,7 @@ func RunChat(ctx context.Context, p ChatParams) error {
 
 	tools := GetToolDefinitions()
 
-	for i := 0; i < maxToolIterations; i++ {
+	for i := 0; p.UnlimitedIterations || i < maxToolIterations; i++ {
 		chatReq := llm.ChatRequest{
 			Model:       model,
 			System:      systemPrompt,
@@ -186,20 +187,21 @@ func RunChat(ctx context.Context, p ChatParams) error {
 
 // SwarmParams holds all parameters for a headless swarm invocation.
 type SwarmParams struct {
-	Provider         *ProviderState
-	MCPClient        *MCPClient
-	SessionStore     SessionStore
-	SessionID        string
-	Messages         []InputMessage
-	DiscoveryMode    bool
-	MultiRound       bool
-	GenerateDiagram  bool
-	TargetLang       string
-	Framework        string
-	Integrations     string
-	Emitter          EventEmitter
-	Logger           *zap.Logger
-	DiagramOutputDir string
+	Provider             *ProviderState
+	MCPClient            *MCPClient
+	SessionStore         SessionStore
+	SessionID            string
+	Messages             []InputMessage
+	DiscoveryMode        bool
+	MultiRound           bool
+	GenerateDiagram      bool
+	UnlimitedIterations  bool
+	TargetLang           string
+	Framework            string
+	Integrations         string
+	Emitter              EventEmitter
+	Logger               *zap.Logger
+	DiagramOutputDir     string
 }
 
 // RunSwarm executes the full swarm agent orchestration, emitting events via the Emitter.
@@ -297,7 +299,7 @@ func RunSwarm(ctx context.Context, p SwarmParams) error {
 				}
 				sseRole := agentRole{ID: sseID, Name: role.Name, Prompt: role.Prompt}
 
-				summary, err := runAgent(ctx, sseRole, role.Prompt, userQuery, agentPromptData, provider, p.MCPClient, cache, tools, model, maxTokens, p.Emitter, round, maxRounds > 1)
+				summary, err := runAgent(ctx, sseRole, role.Prompt, userQuery, agentPromptData, provider, p.MCPClient, cache, tools, model, maxTokens, p.Emitter, round, maxRounds > 1, p.UnlimitedIterations)
 				if err != nil {
 					p.Emitter.Emit("agent_complete", map[string]string{
 						"id":      sseID,
@@ -350,7 +352,7 @@ func RunSwarm(ctx context.Context, p SwarmParams) error {
 	promptData.UserQuery = userQuery
 	promptData.AgentResults = finalResults
 
-	coordText, err := runCoordinatorSynthesis(ctx, promptData, provider, p.MCPClient, cache, tools, model, maxTokens, p.Emitter)
+	coordText, err := runCoordinatorSynthesis(ctx, promptData, provider, p.MCPClient, cache, tools, model, maxTokens, p.Emitter, p.UnlimitedIterations)
 	if err != nil {
 		p.Emitter.Emit("error", map[string]string{"error": fmt.Sprintf("Coordinator error: %v", err)})
 		p.Emitter.Emit("done", map[string]string{})

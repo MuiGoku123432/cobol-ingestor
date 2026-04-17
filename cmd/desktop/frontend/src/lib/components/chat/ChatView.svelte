@@ -30,6 +30,7 @@
     swarmMode: false,
     multiRound: false,
     generateDiagram: false,
+    unlimitedIterations: false,
     targetLang: 'Java',
     framework: 'Spring Boot',
     integrations: '',
@@ -131,12 +132,12 @@
       if (saved.swarmMode) {
         // @ts-ignore
         await window.go.main.ChatService.SendSwarm(
-          sessionId, allMsgs, saved.discoveryMode, saved.multiRound, saved.generateDiagram, saved.targetLang, saved.framework, saved.integrations
+          sessionId, allMsgs, saved.discoveryMode, saved.multiRound, saved.generateDiagram, saved.unlimitedIterations, saved.targetLang, saved.framework, saved.integrations
         );
       } else {
         // @ts-ignore
         await window.go.main.ChatService.SendChat(
-          sessionId, allMsgs, saved.discoveryMode, saved.generateDiagram, saved.targetLang, saved.framework, saved.integrations
+          sessionId, allMsgs, saved.discoveryMode, saved.generateDiagram, saved.unlimitedIterations, saved.targetLang, saved.framework, saved.integrations
         );
       }
     } catch (e: any) {
@@ -183,11 +184,11 @@
         streaming = false;
       }),
       EventsOn('chat:error', (data: any) => {
-        const errorContent = streamedContent
-          ? streamedContent + `\n\nError: ${data?.error}`
-          : `Error: ${data?.error}`;
-        messages = [...messages, { role: 'assistant', content: errorContent }];
-        streamedContent = '';
+        if (streamedContent) {
+          messages = [...messages, { role: 'assistant', content: streamedContent }];
+          streamedContent = '';
+        }
+        messages = [...messages, { role: 'error', content: data?.error || 'Unknown error' }];
         streaming = false;
       }),
 
@@ -258,11 +259,11 @@
         synthesizing = false;
       }),
       EventsOn('swarm:error', (data: any) => {
-        const errorContent = streamedContent
-          ? streamedContent + `\n\nError: ${data?.error}`
-          : `Error: ${data?.error}`;
-        messages = [...messages, { role: 'assistant', content: errorContent }];
-        streamedContent = '';
+        if (streamedContent) {
+          messages = [...messages, { role: 'assistant', content: streamedContent }];
+          streamedContent = '';
+        }
+        messages = [...messages, { role: 'error', content: data?.error || 'Unknown error' }];
         streaming = false;
         synthesizing = false;
       }),
@@ -317,6 +318,10 @@
       <label class="toggle">
         <input type="checkbox" bind:checked={saved.generateDiagram} />
         <span>Diagram</span>
+      </label>
+      <label class="toggle" title="Remove tool-call iteration caps. Use Stop to abort.">
+        <input type="checkbox" bind:checked={saved.unlimitedIterations} />
+        <span>Unlimited</span>
       </label>
       {#if !saved.discoveryMode}
         <select bind:value={saved.targetLang}>
@@ -390,9 +395,11 @@
     <!-- Messages -->
     <div class="messages">
       {#each messages as msg, i}
-        <div class="message" class:user={msg.role === 'user'} class:assistant={msg.role === 'assistant'}>
+        <div class="message" class:user={msg.role === 'user'} class:assistant={msg.role === 'assistant'} class:error={msg.role === 'error'}>
           <div class="role">{msg.role}</div>
-          {#if msg.role === 'assistant'}
+          {#if msg.role === 'error'}
+            <div class="content">{msg.content}</div>
+          {:else if msg.role === 'assistant'}
             <MarkdownContent content={msg.content} />
             <button class="copy-btn" title="Copy to clipboard" onclick={() => copyMessage(msg.content, i)}>
               {#if copiedIndex === i}
@@ -791,6 +798,13 @@
     align-self: flex-start;
     background: #161b22;
     border: 1px solid #21262d;
+  }
+
+  .message.error {
+    align-self: flex-start;
+    background: #1a0f0f;
+    border: 1px solid #6e2020;
+    color: #f85149;
   }
 
   .message.streaming {
