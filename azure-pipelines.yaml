@@ -20,12 +20,6 @@ variables:
   value: "0"
 - name: GOFLAGS
   value: "-trimpath"
-- name: CONTAINER.REGISTRY
-  value: winacr02
-- name: REPOSITORY
-  value: cobol-graph/cobol-graph-api
-- name: DockerTag
-  value: '$(Build.BuildId)'
 
 # ---------------------------------------------------------------------------
 # Stage 1 — Test & Lint
@@ -230,25 +224,3 @@ stages:
             artifact: desktop-windows-amd64
             displayName: "Publish Windows desktop app"
 
-  # ---------------------------------------------------------------------------
-  # Stage 3 — Docker image → Azure Container Registry
-  # ---------------------------------------------------------------------------
-  - stage: Docker
-    displayName: "Docker → ACR"
-    dependsOn: Test
-    jobs:
-      - job: DockerBuildPush
-        displayName: "Build & push image"
-        pool:
-          vmImage: ubuntu-latest
-        steps:
-          - task: Docker@2
-            displayName: "Build & push image"
-            inputs:
-              containerRegistry: $(CONTAINER.REGISTRY)
-              repository: '$(REPOSITORY)'
-              command: buildAndPush
-              Dockerfile: 'Dockerfile'
-              tags: |
-                $(DockerTag)
-                latest
