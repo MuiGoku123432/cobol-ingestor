@@ -189,52 +189,6 @@ stages:
             displayName: "Publish macOS desktop app"
 
       # -----------------------------------------------------------------------
-      # Desktop (Wails) — Linux amd64
-      # -----------------------------------------------------------------------
-      - job: DesktopLinux
-        displayName: "Desktop — linux/amd64"
-        pool:
-          vmImage: ubuntu-latest
-        steps:
-          - task: GoTool@0
-            displayName: "Install Go $(GO_VERSION)"
-            inputs:
-              version: $(GO_VERSION)
-
-          - task: NodeTool@0
-            displayName: "Install Node.js $(NODE_VERSION)"
-            inputs:
-              versionSpec: $(NODE_VERSION)
-
-          - script: |
-              sudo apt-get update
-              sudo apt-get install -y libgtk-3-dev libwebkit2gtk-4.1-dev pkg-config
-            displayName: "Install GTK/WebKit dev libraries"
-
-          - script: go install github.com/wailsapp/wails/v2/cmd/wails@latest
-            displayName: "Install Wails CLI"
-
-          - script: echo "##vso[task.prependpath]$(go env GOPATH)/bin"
-            displayName: "Add GOPATH/bin to PATH"
-
-          - script: go mod download
-            displayName: "Download modules"
-
-          - script: |
-              cd cmd/desktop
-              wails build -platform linux/amd64
-            displayName: "Build desktop app"
-
-          - script: |
-              mkdir -p $(Build.ArtifactStagingDirectory)/desktop
-              cp cmd/desktop/build/bin/cobol-graph-desktop $(Build.ArtifactStagingDirectory)/desktop/
-            displayName: "Copy binary"
-
-          - publish: $(Build.ArtifactStagingDirectory)/desktop
-            artifact: desktop-linux-amd64
-            displayName: "Publish Linux desktop app"
-
-      # -----------------------------------------------------------------------
       # Desktop (Wails) — Windows amd64
       # -----------------------------------------------------------------------
       - job: DesktopWindows
@@ -294,7 +248,7 @@ stages:
               containerRegistry: $(CONTAINER.REGISTRY)
               repository: '$(REPOSITORY)'
               command: buildAndPush
-              Dockerfile: '**/Dockerfile'
+              Dockerfile: 'Dockerfile'
               tags: |
                 $(DockerTag)
                 latest
