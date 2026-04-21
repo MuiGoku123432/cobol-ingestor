@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"time"
 
 	"cobol-ingestor/internal/config"
 )
@@ -60,6 +61,7 @@ type LLMError struct {
 	Retriable  bool
 	Message    string
 	Err        error
+	RetryAfter time.Duration // non-zero when the provider returned a Retry-After header
 }
 
 func (e *LLMError) Error() string {

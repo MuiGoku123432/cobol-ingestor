@@ -86,6 +86,10 @@ type Reader interface {
 	ListBusinessRequirements(ctx context.Context, priority string) ([]BusinessRequirementInfo, error)
 	GetGapCoverageSummary(ctx context.Context) (*GapCoverageSummary, error)
 	GetTargetStackDashboard(ctx context.Context) (map[string]any, error)
+	// Glossary
+	GetGlossaryTerm(ctx context.Context, codebase, term string) (*GlossaryTermDetail, error)
+	SearchGlossaryTerms(ctx context.Context, codebase, query string, limit int) ([]GlossaryTermDetail, error)
+	ListGlossaryTerms(ctx context.Context, codebase string, page, pageSize int) (*GlossaryTermPage, error)
 }
 
 // Ensure Client implements Reader.

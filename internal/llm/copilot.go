@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"io"
+	"strings"
 
 	"cobol-ingestor/internal/config"
 
@@ -76,7 +77,7 @@ func (p *CopilotProvider) Complete(ctx context.Context, req CompletionRequest) (
 
 	stream, err := p.provider.GenerateChatCompletion(ctx, opts)
 	if err != nil {
-		return nil, fmt.Errorf("copilot completion: %w", err)
+		return nil, classifyCopilotError(err)
 	}
 	defer stream.Close()
 
@@ -84,23 +85,44 @@ func (p *CopilotProvider) Complete(ctx context.Context, req CompletionRequest) (
 	var usage types.Usage
 	var finishReason string
 
+	type nextResult struct {
+		chunk types.ChatCompletionChunk
+		err   error
+	}
+
 	for {
-		chunk, err := stream.Next()
-		if err == io.EOF {
-			break
-		}
-		if err != nil {
-			return nil, fmt.Errorf("reading copilot stream: %w", err)
-		}
-		content += chunk.Content
-		usage = chunk.Usage
-		// Track finish reason from choices (set on the final chunk)
-		for _, choice := range chunk.Choices {
-			if choice.FinishReason != "" {
-				finishReason = choice.FinishReason
+		ch := make(chan nextResult, 1)
+		go func() {
+			c, e := stream.Next()
+			ch <- nextResult{c, e}
+		}()
+
+		select {
+		case <-ctx.Done():
+			_ = stream.Close()
+			return nil, &LLMError{
+				StatusCode: 0,
+				Retriable:  true,
+				Message:    fmt.Sprintf("copilot stream deadline exceeded after %d bytes", len(content)),
+				Err:        ctx.Err(),
+			}
+		case r := <-ch:
+			if r.err == io.EOF {
+				goto done
+			}
+			if r.err != nil {
+				return nil, classifyCopilotError(fmt.Errorf("reading copilot stream: %w", r.err))
+			}
+			content += r.chunk.Content
+			usage = r.chunk.Usage
+			for _, choice := range r.chunk.Choices {
+				if choice.FinishReason != "" {
+					finishReason = choice.FinishReason
+				}
 			}
 		}
 	}
+done:
 
 	return &CompletionResponse{
 		Content:      content,
@@ -127,4 +149,19 @@ func (p *CopilotProvider) HealthCheck(ctx context.Context) error {
 
 func (p *CopilotProvider) Close() error {
 	return nil
+}
+
+// classifyCopilotError converts an ai-provider-kit error into *LLMError.
+// The library embeds the HTTP status in the error string, so we parse heuristically.
+func classifyCopilotError(err error) *LLMError {
+	if err == nil {
+		return nil
+	}
+	msg := err.Error()
+	// Non-retriable: auth failures and bad requests.
+	if strings.Contains(msg, "401") || strings.Contains(msg, "403") ||
+		strings.Contains(msg, "400") || strings.Contains(msg, "404") {
+		return &LLMError{StatusCode: 0, Retriable: false, Message: msg, Err: err}
+	}
+	return &LLMError{StatusCode: 0, Retriable: true, Message: msg, Err: err}
 }

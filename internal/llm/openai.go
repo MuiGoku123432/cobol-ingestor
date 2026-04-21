@@ -2,8 +2,11 @@ package llm
 
 import (
 	"context"
+	"errors"
 	"fmt"
+	"strconv"
 	"strings"
+	"time"
 
 	"cobol-ingestor/internal/config"
 
@@ -103,7 +106,7 @@ func (p *OpenAIProvider) Complete(ctx context.Context, req CompletionRequest) (*
 
 	resp, err := p.client.Chat.Completions.New(ctx, params)
 	if err != nil {
-		return nil, fmt.Errorf("openai complete: %w", err)
+		return nil, classifyOpenAIError(err)
 	}
 
 	var content string
@@ -137,4 +140,30 @@ func (p *OpenAIProvider) HealthCheck(ctx context.Context) error {
 
 func (p *OpenAIProvider) Close() error {
 	return nil
+}
+
+// classifyOpenAIError converts an openai-go error into *LLMError with correct retriability.
+// On 429, it extracts Retry-After from the response header.
+func classifyOpenAIError(err error) *LLMError {
+	var apiErr *openai.Error
+	if errors.As(err, &apiErr) {
+		sc := apiErr.StatusCode
+		retriable := sc == 429 || sc == 500 || sc == 502 || sc == 503 || sc == 529
+		llmErr := &LLMError{
+			StatusCode: sc,
+			Retriable:  retriable,
+			Message:    apiErr.Error(),
+			Err:        err,
+		}
+		if sc == 429 && apiErr.Response != nil {
+			if ra := apiErr.Response.Header.Get("Retry-After"); ra != "" {
+				if secs, parseErr := strconv.ParseFloat(ra, 64); parseErr == nil && secs > 0 {
+					llmErr.RetryAfter = time.Duration(secs * float64(time.Second))
+				}
+			}
+		}
+		return llmErr
+	}
+	// Network-level or context error — treat as retriable.
+	return &LLMError{StatusCode: 0, Retriable: true, Message: err.Error(), Err: err}
 }

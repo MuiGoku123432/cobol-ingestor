@@ -27,6 +27,7 @@ type ChatParams struct {
 	TargetLang           string
 	Framework            string
 	Integrations         string
+	Codebase             string // used to scope glossary lookups (default "default")
 	Emitter              EventEmitter
 	Logger               *zap.Logger
 	DiagramOutputDir     string
@@ -57,9 +58,13 @@ func RunChat(ctx context.Context, p ChatParams) error {
 		return fmt.Errorf("building system prompt: %w", err)
 	}
 
+	glossaryPreamble := fetchGlossaryPreamble(ctx, p.MCPClient, p.Codebase)
 	var preamble string
-	if !p.DiscoveryMode {
-		preamble = BuildContextPreamble(p.TargetLang, p.Framework, p.Integrations)
+	if p.DiscoveryMode {
+		// In discovery mode there's no migration target, but glossary context is still useful.
+		preamble = BuildContextPreamble("", "", "", glossaryPreamble)
+	} else {
+		preamble = BuildContextPreamble(p.TargetLang, p.Framework, p.Integrations, glossaryPreamble)
 	}
 
 	messages := make([]llm.ChatMessage, 0, len(p.Messages))
@@ -199,6 +204,7 @@ type SwarmParams struct {
 	TargetLang           string
 	Framework            string
 	Integrations         string
+	Codebase             string // used to scope glossary lookups (default "default")
 	Emitter              EventEmitter
 	Logger               *zap.Logger
 	DiagramOutputDir     string
@@ -240,10 +246,13 @@ func RunSwarm(ctx context.Context, p SwarmParams) error {
 		integrations = ""
 	}
 
+	glossaryPreamble := fetchGlossaryPreamble(ctx, p.MCPClient, p.Codebase)
+
 	promptData := swarmPromptData{
 		TargetLanguage:  targetLanguage,
 		Framework:       framework,
 		Integrations:    integrations,
+		Glossary:        glossaryPreamble,
 		GenerateDiagram: p.GenerateDiagram,
 	}
 
@@ -397,6 +406,26 @@ func RunSwarm(ctx context.Context, p SwarmParams) error {
 
 	p.Emitter.Emit("done", map[string]string{})
 	return nil
+}
+
+// fetchGlossaryPreamble calls the list_glossary_terms MCP tool and returns a formatted
+// [Company Glossary] preamble string. Returns empty string on any error or empty glossary.
+func fetchGlossaryPreamble(ctx context.Context, mcpClient *MCPClient, codebase string) string {
+	if mcpClient == nil {
+		return ""
+	}
+	cb := codebase
+	if cb == "" {
+		cb = "default"
+	}
+	result, err := mcpClient.CallTool(ctx, "list_glossary_terms", map[string]any{
+		"codebase": cb,
+		"pageSize": 200,
+	})
+	if err != nil {
+		return ""
+	}
+	return BuildGlossaryPreamble(result)
 }
 
 // ListModels returns available models from the provider.

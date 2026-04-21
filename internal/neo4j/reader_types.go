@@ -551,3 +551,21 @@ type JobStatus struct {
 	Error     string    `json:"error,omitempty"`
 	Progress  string    `json:"progress,omitempty"`
 }
+
+// GlossaryTermDetail is a full glossary entry returned by reader queries.
+type GlossaryTermDetail struct {
+	Term       string   `json:"term"`
+	Kind       string   `json:"kind"`
+	Definition string   `json:"definition"`
+	Aliases    []string `json:"aliases,omitempty"`
+	Codebase   string   `json:"codebase"`
+	SourceFile string   `json:"sourceFile,omitempty"`
+}
+
+// GlossaryTermPage is a paginated list of glossary terms.
+type GlossaryTermPage struct {
+	Data     []GlossaryTermDetail `json:"data"`
+	Total    int                  `json:"total"`
+	Page     int                  `json:"page"`
+	PageSize int                  `json:"pageSize"`
+}

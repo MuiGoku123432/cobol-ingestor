@@ -61,3 +61,6 @@ var TSGapAgents string
 
 //go:embed ts_gap_coordinator.tmpl
 var TSGapCoordinator string
+
+//go:embed glossary_extract.tmpl
+var GlossaryExtract string

@@ -76,6 +76,10 @@ func registerAllTools(s *mcp.Server, reader n4j.Reader, writer *n4j.BatchWriter,
 	registerGetCrossCodebaseCalls(s, client)
 	// Cypher escape hatch + named query library
 	registerCypherTools(s, client)
+	// Glossary tools
+	registerLookupGlossaryTerm(s, reader)
+	registerSearchGlossary(s, reader)
+	registerListGlossaryTerms(s, reader)
 	// Write tools (require writer)
 	if writer != nil {
 		registerReassignProgramDomain(s, writer)

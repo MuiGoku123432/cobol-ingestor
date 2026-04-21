@@ -296,3 +296,15 @@ func (m *MockReader) GetGapCoverageSummary(_ context.Context) (*n4j.GapCoverageS
 func (m *MockReader) GetTargetStackDashboard(_ context.Context) (map[string]any, error) {
 	return nil, m.Err
 }
+
+func (m *MockReader) GetGlossaryTerm(_ context.Context, _, _ string) (*n4j.GlossaryTermDetail, error) {
+	return nil, m.Err
+}
+
+func (m *MockReader) SearchGlossaryTerms(_ context.Context, _, _ string, _ int) ([]n4j.GlossaryTermDetail, error) {
+	return nil, m.Err
+}
+
+func (m *MockReader) ListGlossaryTerms(_ context.Context, _ string, _, _ int) (*n4j.GlossaryTermPage, error) {
+	return nil, m.Err
+}

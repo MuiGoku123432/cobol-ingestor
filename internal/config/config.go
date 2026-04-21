@@ -22,6 +22,7 @@ type Config struct {
 	ExternalDB  ExternalDBConfig
 	BW          BWConfig
 	TargetStack TargetStackConfig
+	Glossary    GlossaryConfig
 }
 
 // TargetStackConfig holds settings for target stack repo analysis and gap analysis.
@@ -36,6 +37,13 @@ type TargetStackConfig struct {
 	ShallowClone  bool   // TS_SHALLOW_CLONE — use depth=1 clone (default true)
 	Pass2Batch    int    // TS_PASS2_BATCH — entities per synthesis batch (default 25)
 	Pass2MaxTokens int   // TS_PASS2_MAX_TOKENS — max tokens for synthesis pass (default 8000)
+}
+
+// GlossaryConfig holds settings for HTML glossary ingestion.
+type GlossaryConfig struct {
+	TokenLimit      int // GLOSSARY_TOKEN_LIMIT — input chunk size in tokens (default 30000)
+	MaxTokens       int // GLOSSARY_MAX_TOKENS — LLM output cap per chunk (default 16000)
+	MaxContextTerms int // GLOSSARY_MAX_CONTEXT_TERMS — max terms injected into chat preamble (default 200)
 }
 
 // BWConfig holds settings for Businessware ingestion.
@@ -250,6 +258,11 @@ func Load() (*Config, error) {
 	viper.SetDefault("BW_PASS2_MAX_TOKENS", 4000)
 	viper.SetDefault("BW_PASS3_MAX_TOKENS", 4000)
 
+	// Glossary defaults
+	viper.SetDefault("GLOSSARY_TOKEN_LIMIT", 30000)
+	viper.SetDefault("GLOSSARY_MAX_TOKENS", 16000)
+	viper.SetDefault("GLOSSARY_MAX_CONTEXT_TERMS", 200)
+
 	// Target stack defaults
 	viper.SetDefault("TS_CLONE_DIR", "")
 	viper.SetDefault("TS_MAX_WORKERS", 10)
@@ -394,6 +407,11 @@ func Load() (*Config, error) {
 			ShallowClone:   viper.GetBool("TS_SHALLOW_CLONE"),
 			Pass2Batch:     viper.GetInt("TS_PASS2_BATCH"),
 			Pass2MaxTokens: viper.GetInt("TS_PASS2_MAX_TOKENS"),
+		},
+		Glossary: GlossaryConfig{
+			TokenLimit:      viper.GetInt("GLOSSARY_TOKEN_LIMIT"),
+			MaxTokens:       viper.GetInt("GLOSSARY_MAX_TOKENS"),
+			MaxContextTerms: viper.GetInt("GLOSSARY_MAX_CONTEXT_TERMS"),
 		},
 	}
 

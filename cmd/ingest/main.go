@@ -18,6 +18,7 @@ import (
 	"cobol-ingestor/internal/config"
 	"cobol-ingestor/internal/estimate"
 	"cobol-ingestor/internal/extdb"
+	"cobol-ingestor/internal/glossary"
 	"cobol-ingestor/internal/graph"
 	"cobol-ingestor/internal/llm"
 	cobolmcp "cobol-ingestor/internal/mcp"
@@ -92,6 +93,18 @@ var extDBCmd = &cobra.Command{
 	Use:   "external-db",
 	Short: "Connect to an external database via MCP and map to COBOL DB2 tables",
 	RunE:  runExternalDB,
+}
+
+// glossary flags
+var (
+	glossaryFile     string
+	glossaryCodebase string
+)
+
+var glossaryCmd = &cobra.Command{
+	Use:   "glossary",
+	Short: "Ingest a company glossary HTML file and store terms in Neo4j",
+	RunE:  runGlossary,
 }
 
 // target-stack flags
@@ -277,6 +290,11 @@ func init() {
 		return nil
 	}
 	rootCmd.AddCommand(tsCmd)
+
+	glossaryCmd.Flags().StringVar(&glossaryFile, "file", "", "Path to the glossary HTML file")
+	glossaryCmd.Flags().StringVar(&glossaryCodebase, "codebase", "global", "Codebase scope for the glossary — 'global' makes terms available across all codebases (default: global)")
+	_ = glossaryCmd.MarkFlagRequired("file")
+	rootCmd.AddCommand(glossaryCmd)
 }
 
 func runIngest(cmd *cobra.Command, args []string) error {
@@ -687,13 +705,31 @@ func runBW(cmd *cobra.Command, args []string) error {
 	}
 	resultCh := make(chan bwChunkResult, len(chunkItems))
 
+	var bwChunksDone atomic.Int64
+	totalChunkItems := len(chunkItems)
+
 	for _, item := range chunkItems {
 		sem <- struct{}{}
 		go func(ci bwChunkItem) {
 			defer func() { <-sem }()
 
+			logger.Debug("BW chunk start",
+				zap.String("file", ci.file.Path),
+				zap.Int("chunk", ci.chunk.Index),
+				zap.Int("of", ci.totalChunks),
+			)
+
 			resp, analyzeErr := claudeClient.AnalyzeBW(ctx, ci.file.Path, ci.fileType, ci.chunk.Content, bwPromptCtx, cfg.BW.MaxTokens)
+			done := int(bwChunksDone.Add(1))
+			if done%25 == 0 {
+				logger.Info("BW progress", zap.Int("chunks_done", done), zap.Int("total", totalChunkItems))
+			}
 			if analyzeErr != nil {
+				logger.Error("BW chunk analyze error",
+					zap.String("file", ci.file.Path),
+					zap.Int("chunk", ci.chunk.Index),
+					zap.Error(analyzeErr),
+				)
 				resultCh <- bwChunkResult{filePath: ci.file.Path, file: ci.file, index: ci.chunk.Index, total: ci.totalChunks, err: fmt.Errorf("analyzing %s chunk %d: %w", ci.file.Path, ci.chunk.Index, analyzeErr)}
 				return
 			}
@@ -1741,6 +1777,76 @@ func runTargetStack(cmd *cobra.Command, args []string) error {
 		logger.Info("requirements generation complete", zap.Int("requirements", len(reqs)))
 	}
 
+	return nil
+}
+
+func runGlossary(cmd *cobra.Command, args []string) error {
+	logger, _ := zap.NewProduction()
+	defer logger.Sync()
+
+	cfg, err := config.Load()
+	if err != nil {
+		return fmt.Errorf("loading config: %w", err)
+	}
+
+	htmlBytes, err := os.ReadFile(glossaryFile)
+	if err != nil {
+		return fmt.Errorf("reading glossary file: %w", err)
+	}
+
+	ctx := context.Background()
+
+	// Build LLM provider
+	provider, err := llm.NewProvider(cfg)
+	if err != nil {
+		return fmt.Errorf("creating LLM provider: %w", err)
+	}
+	defer provider.Close()
+
+	claudeClient, err := claude.NewClient(provider, cfg.Claude, logger)
+	if err != nil {
+		return fmt.Errorf("creating Claude client: %w", err)
+	}
+
+	logger.Info("extracting glossary terms",
+		zap.String("file", glossaryFile),
+		zap.String("codebase", glossaryCodebase),
+	)
+
+	terms, err := glossary.Extract(ctx, glossaryFile, htmlBytes, glossaryCodebase, cfg, claudeClient)
+	if err != nil {
+		return fmt.Errorf("extracting glossary: %w", err)
+	}
+
+	if len(terms) == 0 {
+		logger.Info("no glossary terms extracted — nothing to write")
+		return nil
+	}
+
+	logger.Info("terms extracted", zap.Int("count", len(terms)))
+
+	// Connect to Neo4j and run migrations
+	neo4jClient, err := n4j.NewClient(ctx, cfg.Neo4j, logger)
+	if err != nil {
+		return fmt.Errorf("connecting to Neo4j: %w", err)
+	}
+	defer neo4jClient.Close(ctx)
+
+	migrationsDir := filepath.Join("migrations", "neo4j")
+	if err := neo4jClient.RunMigrations(ctx, migrationsDir); err != nil {
+		return fmt.Errorf("running migrations: %w", err)
+	}
+
+	writer := n4j.NewBatchWriter(neo4jClient, cfg.Ingest.BatchSize, glossaryCodebase, logger)
+
+	if err := writer.WriteGlossaryTerms(ctx, glossaryCodebase, glossaryFile, terms); err != nil {
+		return fmt.Errorf("writing glossary terms: %w", err)
+	}
+
+	logger.Info("glossary ingestion complete",
+		zap.Int("terms", len(terms)),
+		zap.String("codebase", glossaryCodebase),
+	)
 	return nil
 }
 

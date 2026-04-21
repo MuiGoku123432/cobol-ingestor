@@ -57,6 +57,7 @@ type Client struct {
 	domainMergeTmpl    *template.Template
 	bwSynthesisTmpl    *template.Template
 	bwRepairTmpl       *template.Template
+	glossaryTmpl       *template.Template
 	calibrator         *chunker.TokenCalibrator
 }
 
@@ -127,6 +128,11 @@ func NewClient(provider llm.Provider, cfg config.ClaudeConfig, logger *zap.Logge
 		return nil, fmt.Errorf("parsing BW repair template: %w", err)
 	}
 
+	glossaryTmpl, err := template.New("glossary").Parse(prompts.GlossaryExtract)
+	if err != nil {
+		return nil, fmt.Errorf("parsing glossary template: %w", err)
+	}
+
 	// Rate limit: ~120 requests per minute to stay within API limits.
 	// DISABLE_RATE_LIMIT=true removes the limit entirely.
 	var limiter *rate.Limiter
@@ -172,6 +178,7 @@ func NewClient(provider llm.Provider, cfg config.ClaudeConfig, logger *zap.Logge
 		domainMergeTmpl:    domainMergeTmpl,
 		bwSynthesisTmpl:    bwSynthesisTmpl,
 		bwRepairTmpl:       bwRepairTmpl,
+		glossaryTmpl:       glossaryTmpl,
 	}, nil
 }
 
@@ -640,6 +647,38 @@ func (c *Client) AnalyzeBWRepair(ctx context.Context, repairType, entitiesContex
 	return c.prependPrefill(resp), nil
 }
 
+// ExtractGlossary sends preprocessed HTML text to Claude Sonnet and returns a JSON array
+// of glossary entries. The caller is responsible for unmarshalling and deduplication.
+func (c *Client) ExtractGlossary(ctx context.Context, sourceFile, htmlText string, maxTokens int) (string, error) {
+	var userMsg bytes.Buffer
+	if err := c.glossaryTmpl.Execute(&userMsg, map[string]string{
+		"SourceFile": sourceFile,
+		"Content":    htmlText,
+	}); err != nil {
+		return "", fmt.Errorf("rendering glossary template: %w", err)
+	}
+
+	if maxTokens <= 0 {
+		maxTokens = 16000
+	}
+
+	resp, err := c.completeWithRetry(ctx, llm.CompletionRequest{
+		Model:     c.sonnetModel,
+		MaxTokens: maxTokens,
+		Messages: c.withJSONPrefill([]llm.Message{
+			{Role: llm.RoleSystem, Content: "You are a precise data extraction assistant for enterprise documentation. You extract glossary entries and return strict JSON arrays. No commentary, no markdown."},
+			{Role: llm.RoleUser, Content: userMsg.String()},
+		}),
+	})
+	if err != nil {
+		if resp != "" {
+			resp = c.prependPrefill(resp)
+		}
+		return resp, err
+	}
+	return c.prependPrefill(resp), nil
+}
+
 // isDiagramType returns true if the file type represents a diagram format.
 func isDiagramType(fileType string) bool {
 	switch fileType {
@@ -686,12 +725,23 @@ func (c *Client) completeWithRetry(ctx context.Context, req llm.CompletionReques
 				)
 				return "", fmt.Errorf("LLM API non-retriable error: %w", err)
 			}
-			c.logger.Warn("LLM API call failed, retrying",
-				zap.String("provider", c.provider.Name()),
-				zap.Int("attempt", attempt+1),
-				zap.Error(err),
-			)
 			backoff := time.Duration(math.Pow(2, float64(attempt))) * time.Second
+			var llmErr *llm.LLMError
+			if errors.As(err, &llmErr) && llmErr.RetryAfter > 0 {
+				backoff = llmErr.RetryAfter
+				c.logger.Warn("LLM API call failed, retrying after provider backoff",
+					zap.String("provider", c.provider.Name()),
+					zap.Int("status", llmErr.StatusCode),
+					zap.Duration("retry_after", backoff),
+					zap.Int("attempt", attempt+1),
+				)
+			} else {
+				c.logger.Warn("LLM API call failed, retrying",
+					zap.String("provider", c.provider.Name()),
+					zap.Int("attempt", attempt+1),
+					zap.Error(err),
+				)
+			}
 			select {
 			case <-time.After(backoff):
 			case <-ctx.Done():

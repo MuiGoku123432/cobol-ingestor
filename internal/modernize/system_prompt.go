@@ -2,6 +2,7 @@ package modernize
 
 import (
 	"bytes"
+	"encoding/json"
 	"fmt"
 	"strings"
 	"text/template"
@@ -150,9 +151,12 @@ func BuildDiscoveryPrompt(generateDiagram bool) (string, error) {
 }
 
 // BuildContextPreamble generates a short context block to prepend to user messages,
-// reinforcing the migration target and integrations throughout the conversation.
-func BuildContextPreamble(targetLanguage, framework, integrations string) string {
+// reinforcing the migration target, integrations, and optional glossary context.
+func BuildContextPreamble(targetLanguage, framework, integrations, glossaryPreamble string) string {
 	var parts []string
+	if glossaryPreamble != "" {
+		parts = append(parts, glossaryPreamble)
+	}
 	target := targetLanguage
 	if framework != "" {
 		target += " with " + framework
@@ -167,4 +171,34 @@ func BuildContextPreamble(targetLanguage, framework, integrations string) string
 		return ""
 	}
 	return strings.Join(parts, "\n") + "\n\n"
+}
+
+// BuildGlossaryPreamble parses the JSON response from the list_glossary_terms MCP tool
+// and formats the entries as a compact [Company Glossary] block for prompt injection.
+// Returns an empty string if the input is empty or malformed — never fails.
+func BuildGlossaryPreamble(glossaryJSON string) string {
+	if strings.TrimSpace(glossaryJSON) == "" || glossaryJSON == "null" {
+		return ""
+	}
+	type termEntry struct {
+		Term       string `json:"term"`
+		Definition string `json:"definition"`
+	}
+	type pageResult struct {
+		Data []termEntry `json:"data"`
+	}
+	var p pageResult
+	if err := json.Unmarshal([]byte(glossaryJSON), &p); err != nil || len(p.Data) == 0 {
+		return ""
+	}
+	var sb strings.Builder
+	sb.WriteString("[Company Glossary]\n")
+	for _, t := range p.Data {
+		def := t.Definition
+		if len(def) > 100 {
+			def = def[:97] + "..."
+		}
+		sb.WriteString(fmt.Sprintf("  %s: %s\n", t.Term, def))
+	}
+	return sb.String()
 }

@@ -140,6 +140,7 @@ func SwarmHandler(ps *ProviderState, mcpClient *MCPClient, defaultModel string, 
 			TargetLanguage       string             `json:"targetLanguage"`
 			Framework            string             `json:"framework"`
 			Integrations         string             `json:"integrations"`
+			Codebase             string             `json:"codebase"`
 			DiscoveryMode        bool               `json:"discoveryMode"`
 			SessionID            string             `json:"sessionId"`
 			MultiRound           bool               `json:"multiRound"`
@@ -166,6 +167,7 @@ func SwarmHandler(ps *ProviderState, mcpClient *MCPClient, defaultModel string, 
 			TargetLang:          req.TargetLanguage,
 			Framework:           req.Framework,
 			Integrations:        req.Integrations,
+			Codebase:            req.Codebase,
 			Emitter:             emitter,
 			Logger:              nil,
 		})
@@ -276,7 +278,7 @@ func runAgent(
 		return "", fmt.Errorf("build prompt: %w", err)
 	}
 
-	preamble := BuildContextPreamble(promptData.TargetLanguage, promptData.Framework, promptData.Integrations)
+	preamble := BuildContextPreamble(promptData.TargetLanguage, promptData.Framework, promptData.Integrations, promptData.Glossary)
 	messages := []llm.ChatMessage{
 		{
 			Role:    llm.RoleUser,
@@ -575,7 +577,7 @@ func runCoordinatorSynthesis(
 		return "", fmt.Errorf("build coordinator prompt: %w", err)
 	}
 
-	coordPreamble := BuildContextPreamble(promptData.TargetLanguage, promptData.Framework, promptData.Integrations)
+	coordPreamble := BuildContextPreamble(promptData.TargetLanguage, promptData.Framework, promptData.Integrations, promptData.Glossary)
 	messages := []llm.ChatMessage{
 		{
 			Role:    llm.RoleUser,

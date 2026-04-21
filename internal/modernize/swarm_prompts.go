@@ -9,6 +9,7 @@ type swarmPromptData struct {
 	TargetLanguage  string
 	Framework       string
 	Integrations    string
+	Glossary        string // formatted [Company Glossary] block, empty if none
 	GenerateDiagram bool
 	UserQuery       string
 	AgentResults    []agentResult
@@ -68,7 +69,12 @@ Investigate thoroughly, then write a concise summary of your structural findings
 {{if .Integrations}}
 The modernized system should integrate with: {{.Integrations}}.
 {{end}}
-{{if .TargetLanguage}}The user is interested in translating to {{.TargetLanguage}}{{if .Framework}} using {{.Framework}}{{end}}.{{end}}` + validationBlock + crossPollinationBlock))
+{{if .TargetLanguage}}The user is interested in translating to {{.TargetLanguage}}{{if .Framework}} using {{.Framework}}{{end}}.{{end}}
+{{if .Glossary}}
+## Company Glossary
+Use these company-specific definitions when interpreting program names, paragraph names, and data items:
+{{.Glossary}}
+{{end}}` + validationBlock + crossPollinationBlock))
 
 var dataFlowAnalystPrompt = template.Must(template.New("dataflow").Parse(`You are a COBOL Data Flow Analyst. Your job is to investigate data structures, data movement, and SQL usage relevant to the user's question.
 
@@ -84,7 +90,12 @@ Investigate thoroughly, then write a concise summary of your data flow findings 
 {{if .Integrations}}
 The modernized system should integrate with: {{.Integrations}}.
 {{end}}
-{{if .TargetLanguage}}The user is interested in translating to {{.TargetLanguage}}{{if .Framework}} using {{.Framework}}{{end}}.{{end}}` + validationBlock + crossPollinationBlock))
+{{if .TargetLanguage}}The user is interested in translating to {{.TargetLanguage}}{{if .Framework}} using {{.Framework}}{{end}}.{{end}}
+{{if .Glossary}}
+## Company Glossary
+Use these company-specific definitions when interpreting data item names, field names, and domain concepts:
+{{.Glossary}}
+{{end}}` + validationBlock + crossPollinationBlock))
 
 var dependencyMapperPrompt = template.Must(template.New("dependency").Parse(`You are a COBOL Dependency Mapper. Your job is to investigate call chains, copybook usage, CICS transactions, and blast radius relevant to the user's question.
 
@@ -100,7 +111,12 @@ Investigate thoroughly, then write a concise summary of your dependency findings
 {{if .Integrations}}
 The modernized system should integrate with: {{.Integrations}}.
 {{end}}
-{{if .TargetLanguage}}The user is interested in translating to {{.TargetLanguage}}{{if .Framework}} using {{.Framework}}{{end}}.{{end}}` + validationBlock + crossPollinationBlock))
+{{if .TargetLanguage}}The user is interested in translating to {{.TargetLanguage}}{{if .Framework}} using {{.Framework}}{{end}}.{{end}}
+{{if .Glossary}}
+## Company Glossary
+Use these company-specific definitions when interpreting program names and integration points:
+{{.Glossary}}
+{{end}}` + validationBlock + crossPollinationBlock))
 
 var businessLogicExtractorPrompt = template.Must(template.New("business").Parse(`You are a COBOL Business Logic Extractor. Your job is to investigate business rules, domain classification, and modernization readiness relevant to the user's question.
 
@@ -110,12 +126,18 @@ Key tools to use:
 - list_business_domains: See domain classifications
 - list_modernization_candidates: Get scored modernization recommendations
 - search_programs: Full-text search for related programs
+- search_glossary: Look up company-specific terminology, acronyms, and business concepts
 
 Investigate thoroughly, then write a concise summary of your business logic findings relevant to the question. Cite specific domain classifications, modernization scores, and business rule patterns returned by the tools you called.
 {{if .Integrations}}
 The modernized system should integrate with: {{.Integrations}}.
 {{end}}
-{{if .TargetLanguage}}The user is interested in translating to {{.TargetLanguage}}{{if .Framework}} using {{.Framework}}{{end}}.{{end}}` + validationBlock + crossPollinationBlock))
+{{if .TargetLanguage}}The user is interested in translating to {{.TargetLanguage}}{{if .Framework}} using {{.Framework}}{{end}}.{{end}}
+{{if .Glossary}}
+## Company Glossary
+Use these company-specific definitions when interpreting business domain names, rules, and program purposes:
+{{.Glossary}}
+{{end}}` + validationBlock + crossPollinationBlock))
 
 var coordinatorPrompt = template.Must(template.New("coordinator").Parse(`You are the Coordinator for a multi-agent COBOL analysis team. Four specialist agents have investigated different aspects of the user's question. Your job is to synthesize their findings into one cohesive, well-organized response.
 

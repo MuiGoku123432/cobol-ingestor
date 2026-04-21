@@ -23,6 +23,7 @@ func ChatHandler(ps *ProviderState, mcpClient *MCPClient, defaultModel string, d
 			TargetLanguage      string             `json:"targetLanguage"`
 			Framework           string             `json:"framework"`
 			Integrations        string             `json:"integrations"`
+			Codebase            string             `json:"codebase"`
 			DiscoveryMode       bool               `json:"discoveryMode"`
 			SessionID           string             `json:"sessionId"`
 			UnlimitedIterations bool               `json:"unlimitedIterations"`
@@ -47,6 +48,7 @@ func ChatHandler(ps *ProviderState, mcpClient *MCPClient, defaultModel string, d
 			TargetLang:          req.TargetLanguage,
 			Framework:           req.Framework,
 			Integrations:        req.Integrations,
+			Codebase:            req.Codebase,
 			Emitter:             emitter,
 			Logger:              nil,
 		})

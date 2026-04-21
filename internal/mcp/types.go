@@ -133,3 +133,20 @@ type RunNamedQueryInput struct {
 }
 
 type ListNamedQueriesInput struct{}
+
+type LookupGlossaryTermInput struct {
+	Term     string `json:"term" jsonschema:"The term or acronym to look up (case-insensitive)"`
+	Codebase string `json:"codebase,omitempty" jsonschema:"Codebase scope (default: default)"`
+}
+
+type SearchGlossaryInput struct {
+	Query    string `json:"query" jsonschema:"Search query for term name or definition"`
+	Codebase string `json:"codebase,omitempty" jsonschema:"Codebase scope (default: default)"`
+	Limit    int    `json:"limit,omitempty" jsonschema:"Max results (default 20)"`
+}
+
+type ListGlossaryTermsInput struct {
+	Codebase string `json:"codebase,omitempty" jsonschema:"Codebase scope (default: default)"`
+	Page     int    `json:"page,omitempty" jsonschema:"Page number (default 1)"`
+	PageSize int    `json:"pageSize,omitempty" jsonschema:"Results per page (default 50)"`
+}

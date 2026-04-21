@@ -708,6 +708,22 @@ type BusinessRequirement struct {
 	GapID              string
 }
 
+// GlossaryTerm represents a company glossary entry (term or acronym).
+type GlossaryTerm struct {
+	Term       string   // canonical form, e.g. "PBT" or "Profit Before Tax"
+	Kind       string   // "term" | "acronym"
+	Definition string
+	Aliases    []string // synonyms / alternate spellings
+	Codebase   string   // scope (matches ingest codebase flag)
+	SourceFile string   // path to the source HTML file
+}
+
+// GlossaryResult aggregates all terms extracted from one glossary file.
+type GlossaryResult struct {
+	SourceFile string
+	Terms      []GlossaryTerm
+}
+
 // TargetStackResult aggregates extraction results for one target repo.
 type TargetStackResult struct {
 	Repo         TargetRepo
