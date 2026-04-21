@@ -1,0 +1,30 @@
+Extract all glossary entries from the following enterprise documentation.
+
+Return ONLY a valid JSON array. No prose, no markdown, no code fences. Each element must match this schema:
+
+{
+  "term": "<canonical name, e.g. PBT or Profit Before Tax>",
+  "kind": "<acronym | term>",
+  "definition": "<clear, concise definition>",
+  "aliases": ["<optional alternate spellings or abbreviations>"]
+}
+
+Rules:
+- "kind" is "acronym" when the term is an abbreviation or initialism (e.g. PBT, CRO, FICA).
+- "kind" is "term" for full-word domain vocabulary (e.g. "Profit Before Tax", "Clearing Run").
+- If an acronym and its expansion both appear, emit ONE entry as "acronym" with the expansion as the definition.
+- Strip HTML artifacts (entities, tags) from definitions.
+- Omit entries with no meaningful definition.
+- "aliases" may be empty ([]).
+
+Example output:
+[
+  {"term":"PBT","kind":"acronym","definition":"Profit Before Tax — the net income of a business before income tax is applied.","aliases":["Profit Before Tax"]},
+  {"term":"Clearing Run","kind":"term","definition":"The nightly batch process that settles all pending transactions and posts final balances.","aliases":["EOD Clear","End-of-Day Clearing"]}
+]
+
+---
+
+Source document ({{.SourceFile}}):
+
+{{.Content}}
