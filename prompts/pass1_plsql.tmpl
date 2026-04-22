@@ -1,0 +1,84 @@
+You are analyzing an Oracle PL/SQL source file to extract its structural skeleton. Extract ONLY what is explicitly present — do not infer or fabricate.
+
+File: {{.FileName}}
+
+Return a single JSON object with these fields:
+
+{
+  "objectType": "string — PACKAGE, PACKAGE_BODY, PROCEDURE, FUNCTION, TRIGGER, TYPE, TYPE_BODY, or UNKNOWN",
+  "objectName": "string — fully qualified object name (e.g. PKG_CUSTOMERS, PROCESS_ORDER)",
+  "schemaName": "string — schema prefix if present (e.g. HR), else empty",
+  "procedures": [
+    {
+      "name": "string — procedure name",
+      "params": [
+        {
+          "name": "string — parameter name",
+          "type": "string — Oracle type (VARCHAR2, NUMBER, etc.)",
+          "direction": "string — IN, OUT, IN OUT"
+        }
+      ]
+    }
+  ],
+  "functions": [
+    {
+      "name": "string — function name",
+      "returnType": "string — Oracle return type",
+      "params": [
+        {
+          "name": "string — parameter name",
+          "type": "string — Oracle type",
+          "direction": "string — IN, OUT, IN OUT"
+        }
+      ]
+    }
+  ],
+  "cursors": [
+    {
+      "name": "string — cursor name",
+      "query": "string — first 200 chars of the SELECT statement"
+    }
+  ],
+  "triggers": [
+    {
+      "name": "string — trigger name",
+      "tableName": "string — table the trigger fires on",
+      "event": "string — INSERT, UPDATE, DELETE, or combination",
+      "timing": "string — BEFORE or AFTER"
+    }
+  ],
+  "callTargets": [
+    {
+      "packageName": "string — called package name, or empty for standalone call",
+      "procName": "string — called procedure or function name"
+    }
+  ],
+  "tableReferences": [
+    {
+      "tableName": "string — table name (uppercase)",
+      "schemaName": "string — schema if qualified, else empty",
+      "operations": ["SELECT", "INSERT", "UPDATE", "DELETE", "MERGE"]
+    }
+  ],
+  "exceptionHandlers": [
+    {
+      "exceptionName": "string — exception name (e.g. NO_DATA_FOUND, OTHERS)",
+      "context": "string — enclosing procedure/function name"
+    }
+  ],
+  "utlFileRefs": [
+    {
+      "operation": "string — FOPEN, GET_LINE, PUT_LINE, PUT, FCLOSE, IS_OPEN, etc.",
+      "filePath": "string — string literal path, or empty if dynamic",
+      "context": "string — enclosing procedure/function name"
+    }
+  ]
+}
+
+Rules:
+- objectType: derive from the CREATE [OR REPLACE] statement (PACKAGE = spec, PACKAGE_BODY = body)
+- For tableReferences: extract from SELECT/INSERT/UPDATE/DELETE/MERGE statements inside procedures, functions, triggers, and standalone blocks
+- For callTargets: include calls like PKG.PROC, schema.PKG.PROC, and standalone procedure calls
+- For utlFileRefs: UTL_FILE.FOPEN/FCLOSE/GET_LINE/PUT_LINE are ISAM file I/O proxies — always capture them
+- Omit empty arrays
+- Return ONLY the JSON object, no markdown fences, no explanation

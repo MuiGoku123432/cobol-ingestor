@@ -89,9 +89,20 @@ func (p *Pipeline) Run(ctx context.Context, scanResult *scanner.ScanResult, pass
 		if err := p.RunPass1(ctx, scanResult); err != nil {
 			return fmt.Errorf("pass 1: %w", err)
 		}
-		// JCL analysis runs as part of Pass 1
 		if err := p.RunPass1JCL(ctx, scanResult); err != nil {
 			return fmt.Errorf("pass 1 JCL: %w", err)
+		}
+		if err := p.RunPass1C(ctx, scanResult); err != nil {
+			return fmt.Errorf("pass 1 C: %w", err)
+		}
+		if err := p.RunPass1PLSQL(ctx, scanResult); err != nil {
+			return fmt.Errorf("pass 1 PL/SQL: %w", err)
+		}
+		if err := p.RunPass1Ksh(ctx, scanResult); err != nil {
+			return fmt.Errorf("pass 1 ksh: %w", err)
+		}
+		if err := p.RunPass1Custom(ctx, scanResult); err != nil {
+			return fmt.Errorf("pass 1 custom: %w", err)
 		}
 	}
 	// Static CHILD_OF extraction: deterministic data hierarchy from level numbers
@@ -2154,4 +2165,240 @@ func (p *Pipeline) mergeDomainCandidatesWithLLM(ctx context.Context) {
 	if merged > 0 {
 		p.Logger.Info("pass 5: LLM domain merges complete", zap.Int("merged", merged))
 	}
+}
+
+// ── Multi-language lanes ──────────────────────────────────────────────────
+
+func runMultiLangPass1[R any](
+	ctx context.Context,
+	p *Pipeline,
+	scanResult *scanner.ScanResult,
+	fileType graph.FileType,
+	label string,
+	analyze func(ctx context.Context, fileName, content string) (string, error),
+	parse func(jsonStr, sourceFile string) (R, error),
+	write func(ctx context.Context, result R) error,
+) error {
+	fileMap := make(map[string]graph.FileInfo)
+	pathHashes := make(map[string]string)
+	for _, f := range scanResult.Files {
+		if f.Type != fileType {
+			continue
+		}
+		fileMap[f.Path] = f
+		pathHashes[f.Path] = f.Hash
+	}
+
+	changedPaths, err := p.Cache.BatchIsChanged(pathHashes)
+	if err != nil {
+		return fmt.Errorf("batch checking %s cache: %w", label, err)
+	}
+
+	files := make([]graph.FileInfo, 0, len(changedPaths))
+	for _, path := range changedPaths {
+		files = append(files, fileMap[path])
+	}
+
+	if len(files) == 0 {
+		p.Logger.Info(label+": no changed files", zap.String("type", string(fileType)))
+		return nil
+	}
+	p.Logger.Info(label+": files to process", zap.Int("count", len(files)))
+
+	var successCount, errorCount int
+	var mu sync.Mutex
+	sem := make(chan struct{}, p.Config.Ingest.WorkersForPass(1))
+	var wg sync.WaitGroup
+
+	for _, f := range files {
+		wg.Add(1)
+		go func(f graph.FileInfo) {
+			defer wg.Done()
+			sem <- struct{}{}
+			defer func() { <-sem }()
+
+			if ctx.Err() != nil {
+				return
+			}
+
+			data, err := os.ReadFile(f.Path)
+			if err != nil {
+				p.Logger.Error(label+": failed to read file", zap.String("file", f.Path), zap.Error(err))
+				mu.Lock()
+				errorCount++
+				mu.Unlock()
+				return
+			}
+
+			jsonResp, err := analyze(ctx, f.Path, string(data))
+			if err != nil {
+				p.Logger.Error(label+": claude analysis failed", zap.String("file", f.Path), zap.Error(err))
+				mu.Lock()
+				errorCount++
+				mu.Unlock()
+				return
+			}
+
+			result, err := parse(jsonResp, f.Path)
+			if err != nil {
+				p.Logger.Error(label+": parse failed", zap.String("file", f.Path), zap.Error(err))
+				mu.Lock()
+				errorCount++
+				mu.Unlock()
+				return
+			}
+
+			if err := write(ctx, result); err != nil {
+				p.Logger.Error(label+": write failed", zap.String("file", f.Path), zap.Error(err))
+				mu.Lock()
+				errorCount++
+				mu.Unlock()
+				return
+			}
+
+			if err := p.Cache.MarkProcessed(f.Path, f.Hash); err != nil {
+				p.Logger.Error(label+": cache update failed", zap.String("file", f.Path), zap.Error(err))
+			}
+			mu.Lock()
+			successCount++
+			mu.Unlock()
+		}(f)
+	}
+
+	wg.Wait()
+	p.Logger.Info(label+" complete", zap.Int("success", successCount), zap.Int("errors", errorCount))
+	return nil
+}
+
+// RunPass1C analyzes C source files.
+func (p *Pipeline) RunPass1C(ctx context.Context, scanResult *scanner.ScanResult) error {
+	return runMultiLangPass1(ctx, p, scanResult, graph.FileTypeC, "pass 1 C",
+		p.Claude.AnalyzeCStructural,
+		parser.ParseCPass1Response,
+		p.Writer.WriteCPass1Result,
+	)
+}
+
+// RunPass1PLSQL analyzes PL/SQL source files.
+func (p *Pipeline) RunPass1PLSQL(ctx context.Context, scanResult *scanner.ScanResult) error {
+	return runMultiLangPass1(ctx, p, scanResult, graph.FileTypePLSQL, "pass 1 PL/SQL",
+		p.Claude.AnalyzePLSQL,
+		parser.ParsePLSQLPass1Response,
+		p.Writer.WritePLSQLPass1Result,
+	)
+}
+
+// RunPass1Ksh analyzes Korn shell scripts.
+func (p *Pipeline) RunPass1Ksh(ctx context.Context, scanResult *scanner.ScanResult) error {
+	return runMultiLangPass1(ctx, p, scanResult, graph.FileTypeKsh, "pass 1 ksh",
+		p.Claude.AnalyzeKsh,
+		parser.ParseKshPass1Response,
+		p.Writer.WriteKshPass1Result,
+	)
+}
+
+// RunPass1Custom analyzes proprietary-format files captured by --all-extensions.
+func (p *Pipeline) RunPass1Custom(ctx context.Context, scanResult *scanner.ScanResult) error {
+	fileMap := make(map[string]graph.FileInfo)
+	pathHashes := make(map[string]string)
+	for _, f := range scanResult.Files {
+		if f.Type != graph.FileTypeCustom {
+			continue
+		}
+		fileMap[f.Path] = f
+		pathHashes[f.Path] = f.Hash
+	}
+
+	changedPaths, err := p.Cache.BatchIsChanged(pathHashes)
+	if err != nil {
+		return fmt.Errorf("batch checking custom cache: %w", err)
+	}
+
+	files := make([]graph.FileInfo, 0, len(changedPaths))
+	for _, path := range changedPaths {
+		files = append(files, fileMap[path])
+	}
+
+	if len(files) == 0 {
+		p.Logger.Info("pass 1 custom: no changed files")
+		return nil
+	}
+	p.Logger.Info("pass 1 custom: files to process", zap.Int("count", len(files)))
+
+	var successCount, errorCount int
+	var mu sync.Mutex
+	sem := make(chan struct{}, p.Config.Ingest.WorkersForPass(1))
+	var wg sync.WaitGroup
+
+	for _, f := range files {
+		wg.Add(1)
+		go func(f graph.FileInfo) {
+			defer wg.Done()
+			sem <- struct{}{}
+			defer func() { <-sem }()
+
+			if ctx.Err() != nil {
+				return
+			}
+
+			data, err := os.ReadFile(f.Path)
+			if err != nil {
+				p.Logger.Error("pass 1 custom: failed to read file", zap.String("file", f.Path), zap.Error(err))
+				mu.Lock()
+				errorCount++
+				mu.Unlock()
+				return
+			}
+
+			ext := strings.TrimPrefix(strings.ToUpper(getFileExt(f.Path)), ".")
+			jsonResp, err := p.Claude.AnalyzeCustom(ctx, f.Path, ext, string(data))
+			if err != nil {
+				p.Logger.Error("pass 1 custom: claude analysis failed", zap.String("file", f.Path), zap.Error(err))
+				mu.Lock()
+				errorCount++
+				mu.Unlock()
+				return
+			}
+
+			result, err := parser.ParseCustomExtractResponse(jsonResp, f.Path)
+			if err != nil {
+				p.Logger.Error("pass 1 custom: parse failed", zap.String("file", f.Path), zap.Error(err))
+				mu.Lock()
+				errorCount++
+				mu.Unlock()
+				return
+			}
+
+			if err := p.Writer.WriteCustomExtractResult(ctx, result); err != nil {
+				p.Logger.Error("pass 1 custom: write failed", zap.String("file", f.Path), zap.Error(err))
+				mu.Lock()
+				errorCount++
+				mu.Unlock()
+				return
+			}
+
+			if err := p.Cache.MarkProcessed(f.Path, f.Hash); err != nil {
+				p.Logger.Error("pass 1 custom: cache update failed", zap.String("file", f.Path), zap.Error(err))
+			}
+			mu.Lock()
+			successCount++
+			mu.Unlock()
+		}(f)
+	}
+
+	wg.Wait()
+	p.Logger.Info("pass 1 custom complete", zap.Int("success", successCount), zap.Int("errors", errorCount))
+	return nil
+}
+
+func getFileExt(path string) string {
+	for i := len(path) - 1; i >= 0; i-- {
+		if path[i] == '.' {
+			return path[i+1:]
+		}
+		if path[i] == '/' || path[i] == '\\' {
+			break
+		}
+	}
+	return ""
 }

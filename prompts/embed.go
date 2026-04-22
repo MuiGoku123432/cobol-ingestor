@@ -64,3 +64,15 @@ var TSGapCoordinator string
 
 //go:embed glossary_extract.tmpl
 var GlossaryExtract string
+
+//go:embed pass1_c_structural.tmpl
+var Pass1CStructural string
+
+//go:embed pass1_plsql.tmpl
+var Pass1PLSQL string
+
+//go:embed pass1_ksh.tmpl
+var Pass1Ksh string
+
+//go:embed custom_extract.tmpl
+var CustomExtract string

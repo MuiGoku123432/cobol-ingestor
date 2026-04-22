@@ -31,8 +31,10 @@ Return a single JSON object with these fields:
   ],
   "sqlStatements": [
     {
-      "type": "string — SELECT, INSERT, UPDATE, DELETE, DECLARE, etc.",
-      "text": "string — first 200 chars of the SQL"
+      "type": "string — SELECT, INSERT, UPDATE, DELETE, DECLARE, CALL, EXECUTE, etc.",
+      "text": "string — first 200 chars of the SQL",
+      "targetTable": "string — primary table name or Oracle object name referenced, or empty",
+      "hostVars": ["array of host variable names bound to this statement (strip the : prefix). E.g. :WS-CUST-ID → 'WS-CUST-ID'"]
     }
   ],
   "cicsCommands": [

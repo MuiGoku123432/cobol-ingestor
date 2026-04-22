@@ -504,7 +504,7 @@ func TestBuildClassifyPrompt(t *testing.T) {
 		"/tmp/A.txt": {"line1", "line2"},
 		"/tmp/B.txt": {"line3"},
 	}
-	prompt := buildClassifyPrompt(batch, snippets)
+	prompt := buildClassifyPrompt(batch, snippets, false)
 	assert.Contains(t, prompt, "=== File: A.txt")
 	assert.Contains(t, prompt, "=== File: B.txt")
 	assert.Contains(t, prompt, "line1")
@@ -863,7 +863,7 @@ func TestBuildClassifyPrompt_Enhanced(t *testing.T) {
 	snippets := map[string][]string{
 		"/tmp/TEST.txt": {"IDENTIFICATION DIVISION."},
 	}
-	prompt := buildClassifyPrompt(batch, snippets)
+	prompt := buildClassifyPrompt(batch, snippets, false)
 
 	assert.Contains(t, prompt, "Confidence Rubric")
 	assert.Contains(t, prompt, "0.95-1.0")
@@ -878,7 +878,7 @@ func TestBuildClassifyPrompt_FilenameHints(t *testing.T) {
 		"/tmp/CPYACCT.txt": {"01 WS-ACCT."},
 		"/tmp/DCLCUST.txt": {"EXEC SQL DECLARE"},
 	}
-	prompt := buildClassifyPrompt(batch, snippets)
+	prompt := buildClassifyPrompt(batch, snippets, false)
 
 	assert.Contains(t, prompt, "name suggests: COPYBOOK")
 	assert.Contains(t, prompt, "name suggests: DCLGEN")
@@ -1188,7 +1188,7 @@ func TestParseClassifyResponse_SingleObjectTrailingText(t *testing.T) {
 func TestBuildClassifyPrompt_AntiUnknown(t *testing.T) {
 	batch := []string{"/tmp/TEST.txt"}
 	snippets := map[string][]string{"/tmp/TEST.txt": {"line1"}}
-	prompt := buildClassifyPrompt(batch, snippets)
+	prompt := buildClassifyPrompt(batch, snippets, false)
 
 	assert.Contains(t, prompt, "NEVER return UNKNOWN")
 	assert.NotContains(t, prompt, "consider UNKNOWN")
@@ -1197,7 +1197,7 @@ func TestBuildClassifyPrompt_AntiUnknown(t *testing.T) {
 func TestBuildClassifyPrompt_ShortFileGuidance(t *testing.T) {
 	batch := []string{"/tmp/TEST.txt"}
 	snippets := map[string][]string{"/tmp/TEST.txt": {"line1"}}
-	prompt := buildClassifyPrompt(batch, snippets)
+	prompt := buildClassifyPrompt(batch, snippets, false)
 
 	assert.Contains(t, prompt, "Short File Guidance")
 	assert.Contains(t, prompt, "Short does not mean UNKNOWN")
@@ -1206,7 +1206,7 @@ func TestBuildClassifyPrompt_ShortFileGuidance(t *testing.T) {
 func TestBuildClassifyPrompt_ExampleTypes(t *testing.T) {
 	batch := []string{"/tmp/TEST.txt"}
 	snippets := map[string][]string{"/tmp/TEST.txt": {"line1"}}
-	prompt := buildClassifyPrompt(batch, snippets)
+	prompt := buildClassifyPrompt(batch, snippets, false)
 
 	assert.Contains(t, prompt, "EASYTRIEVE")
 	assert.Contains(t, prompt, "CONTROL")

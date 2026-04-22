@@ -58,6 +58,10 @@ type Client struct {
 	bwSynthesisTmpl    *template.Template
 	bwRepairTmpl       *template.Template
 	glossaryTmpl       *template.Template
+	cTmpl              *template.Template
+	plsqlTmpl          *template.Template
+	kshTmpl            *template.Template
+	customTmpl         *template.Template
 	calibrator         *chunker.TokenCalibrator
 }
 
@@ -133,6 +137,26 @@ func NewClient(provider llm.Provider, cfg config.ClaudeConfig, logger *zap.Logge
 		return nil, fmt.Errorf("parsing glossary template: %w", err)
 	}
 
+	cTmpl, err := template.New("c").Parse(prompts.Pass1CStructural)
+	if err != nil {
+		return nil, fmt.Errorf("parsing C template: %w", err)
+	}
+
+	plsqlTmpl, err := template.New("plsql").Parse(prompts.Pass1PLSQL)
+	if err != nil {
+		return nil, fmt.Errorf("parsing PL/SQL template: %w", err)
+	}
+
+	kshTmpl, err := template.New("ksh").Parse(prompts.Pass1Ksh)
+	if err != nil {
+		return nil, fmt.Errorf("parsing ksh template: %w", err)
+	}
+
+	customTmpl, err := template.New("custom").Parse(prompts.CustomExtract)
+	if err != nil {
+		return nil, fmt.Errorf("parsing custom template: %w", err)
+	}
+
 	// Rate limit: ~120 requests per minute to stay within API limits.
 	// DISABLE_RATE_LIMIT=true removes the limit entirely.
 	var limiter *rate.Limiter
@@ -179,6 +203,10 @@ func NewClient(provider llm.Provider, cfg config.ClaudeConfig, logger *zap.Logge
 		bwSynthesisTmpl:    bwSynthesisTmpl,
 		bwRepairTmpl:       bwRepairTmpl,
 		glossaryTmpl:       glossaryTmpl,
+		cTmpl:              cTmpl,
+		plsqlTmpl:          plsqlTmpl,
+		kshTmpl:            kshTmpl,
+		customTmpl:         customTmpl,
 	}, nil
 }
 
@@ -323,6 +351,107 @@ func (c *Client) AnalyzeJCL(ctx context.Context, fileName, content string) (stri
 		MaxTokens: c.pass1MaxTokens,
 		Messages: c.withJSONPrefill([]llm.Message{
 			{Role: llm.RoleSystem, Content: "You are a mainframe JCL analysis assistant. You extract structural information from JCL files and return it as JSON."},
+			{Role: llm.RoleUser, Content: userMsg.String() + "\n\n---\n\n" + content},
+		}),
+	})
+	if err != nil {
+		if resp != "" {
+			resp = c.prependPrefill(resp)
+		}
+		return resp, err
+	}
+	return c.prependPrefill(resp), nil
+}
+
+// AnalyzeCStructural sends a C source file to Claude Sonnet for structural extraction.
+func (c *Client) AnalyzeCStructural(ctx context.Context, fileName, content string) (string, error) {
+	var userMsg bytes.Buffer
+	if err := c.cTmpl.Execute(&userMsg, map[string]string{
+		"FileName": fileName,
+	}); err != nil {
+		return "", fmt.Errorf("rendering C template: %w", err)
+	}
+	resp, err := c.completeWithRetry(ctx, llm.CompletionRequest{
+		Model:     c.sonnetModel,
+		MaxTokens: c.pass1MaxTokens,
+		Messages: c.withJSONPrefill([]llm.Message{
+			{Role: llm.RoleSystem, Content: "You are a C source code analyst. You extract structural information from C source files and return it as JSON."},
+			{Role: llm.RoleUser, Content: userMsg.String() + "\n\n---\n\n" + content},
+		}),
+	})
+	if err != nil {
+		if resp != "" {
+			resp = c.prependPrefill(resp)
+		}
+		return resp, err
+	}
+	return c.prependPrefill(resp), nil
+}
+
+// AnalyzePLSQL sends a PL/SQL source file to Claude Sonnet for structural extraction.
+func (c *Client) AnalyzePLSQL(ctx context.Context, fileName, content string) (string, error) {
+	var userMsg bytes.Buffer
+	if err := c.plsqlTmpl.Execute(&userMsg, map[string]string{
+		"FileName": fileName,
+	}); err != nil {
+		return "", fmt.Errorf("rendering PL/SQL template: %w", err)
+	}
+	resp, err := c.completeWithRetry(ctx, llm.CompletionRequest{
+		Model:     c.sonnetModel,
+		MaxTokens: c.pass1MaxTokens,
+		Messages: c.withJSONPrefill([]llm.Message{
+			{Role: llm.RoleSystem, Content: "You are an Oracle PL/SQL analyst. You extract structural information from PL/SQL source files and return it as JSON."},
+			{Role: llm.RoleUser, Content: userMsg.String() + "\n\n---\n\n" + content},
+		}),
+	})
+	if err != nil {
+		if resp != "" {
+			resp = c.prependPrefill(resp)
+		}
+		return resp, err
+	}
+	return c.prependPrefill(resp), nil
+}
+
+// AnalyzeKsh sends a Korn shell script to Claude Sonnet for structural extraction.
+func (c *Client) AnalyzeKsh(ctx context.Context, fileName, content string) (string, error) {
+	var userMsg bytes.Buffer
+	if err := c.kshTmpl.Execute(&userMsg, map[string]string{
+		"FileName": fileName,
+	}); err != nil {
+		return "", fmt.Errorf("rendering ksh template: %w", err)
+	}
+	resp, err := c.completeWithRetry(ctx, llm.CompletionRequest{
+		Model:     c.sonnetModel,
+		MaxTokens: c.pass1MaxTokens,
+		Messages: c.withJSONPrefill([]llm.Message{
+			{Role: llm.RoleSystem, Content: "You are a shell script analyst. You extract structural information from Korn shell scripts and return it as JSON."},
+			{Role: llm.RoleUser, Content: userMsg.String() + "\n\n---\n\n" + content},
+		}),
+	})
+	if err != nil {
+		if resp != "" {
+			resp = c.prependPrefill(resp)
+		}
+		return resp, err
+	}
+	return c.prependPrefill(resp), nil
+}
+
+// AnalyzeCustom sends a custom-format source file to Claude Sonnet for generic entity extraction.
+func (c *Client) AnalyzeCustom(ctx context.Context, fileName, extension, content string) (string, error) {
+	var userMsg bytes.Buffer
+	if err := c.customTmpl.Execute(&userMsg, map[string]string{
+		"FileName":  fileName,
+		"Extension": extension,
+	}); err != nil {
+		return "", fmt.Errorf("rendering custom template: %w", err)
+	}
+	resp, err := c.completeWithRetry(ctx, llm.CompletionRequest{
+		Model:     c.sonnetModel,
+		MaxTokens: c.pass1MaxTokens,
+		Messages: c.withJSONPrefill([]llm.Message{
+			{Role: llm.RoleSystem, Content: "You are a legacy application analyst. You extract structural information from proprietary source files and return it as JSON."},
 			{Role: llm.RoleUser, Content: userMsg.String() + "\n\n---\n\n" + content},
 		}),
 	})

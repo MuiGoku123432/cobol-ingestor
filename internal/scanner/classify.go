@@ -32,11 +32,24 @@ var retrySnippetLines = [3]int{150, 400, 800}
 // retryBatchSizes defines batch sizes for each attempt.
 var retryBatchSizes = [3]int{8, 4, 1}
 
+// ClassifyOptions controls optional classification behavior.
+type ClassifyOptions struct {
+	// MultiLang enables multi-language classification mode. When true, the LLM prompt
+	// includes C, PL/SQL, Korn shell, and CUSTOM as valid output types and does NOT
+	// bias unknown content toward COBOL. Use when scanning non-mainframe source trees
+	// (e.g. with --all-extensions on a legacy AIX codebase).
+	MultiLang bool
+}
+
 // ClassifyPendingFiles resolves FileTypePending entries in result using LLM
 // classification (when provider is non-nil) or heuristic fallback.
 // Files classified as UNKNOWN are removed from result.Files.
 // classifyCache is optional (nil skips caching).
-func ClassifyPendingFiles(ctx context.Context, result *ScanResult, provider llm.Provider, model string, logger *zap.Logger, classifyCache *cache.Cache) error {
+func ClassifyPendingFiles(ctx context.Context, result *ScanResult, provider llm.Provider, model string, logger *zap.Logger, classifyCache *cache.Cache, opts ...ClassifyOptions) error {
+	var opt ClassifyOptions
+	if len(opts) > 0 {
+		opt = opts[0]
+	}
 	// Collect indices of pending files
 	var pendingIdx []int
 	for i, f := range result.Files {
@@ -99,7 +112,7 @@ func ClassifyPendingFiles(ctx context.Context, result *ScanResult, provider llm.
 
 	var classifyErr error
 	if provider != nil {
-		classifyErr = classifyWithLLMProgressive(ctx, result, pathIdx, provider, model, logger, classifiedBy, classifiedConf)
+		classifyErr = classifyWithLLMProgressive(ctx, result, pathIdx, provider, model, logger, classifiedBy, classifiedConf, opt.MultiLang)
 	} else {
 		classifyWithHeuristic(result, pathIdx, logger, classifiedBy, classifiedConf)
 	}
@@ -169,7 +182,7 @@ type llmClassification struct {
 // Attempt 2: 400-line snippet, batch size 4 (files with confidence < 0.7 or UNKNOWN)
 // Attempt 3: 800-line snippet, batch size 1 (still uncertain)
 // Heuristic fallback only for files where all LLM attempts errored.
-func classifyWithLLMProgressive(ctx context.Context, result *ScanResult, pathIdx map[string]int, provider llm.Provider, model string, logger *zap.Logger, classifiedBy map[string]string, classifiedConf map[string]float64) error {
+func classifyWithLLMProgressive(ctx context.Context, result *ScanResult, pathIdx map[string]int, provider llm.Provider, model string, logger *zap.Logger, classifiedBy map[string]string, classifiedConf map[string]float64, multiLang bool) error {
 	// Collect pending paths in sorted order for deterministic batching
 	allPaths := make([]string, 0, len(pathIdx))
 	for p := range pathIdx {
@@ -289,8 +302,8 @@ func classifyWithLLMProgressive(ctx context.Context, result *ScanResult, pathIdx
 				}
 				mu.Unlock()
 
-				prompt := buildClassifyPrompt(batch, batchSnippets)
-				systemMsg := classifySystemMessage
+				prompt := buildClassifyPrompt(batch, batchSnippets, multiLang)
+				systemMsg := classifySystemMsg(multiLang)
 
 				if attempt > 0 && len(batchPrevResults) > 0 {
 					prompt = buildRetryClassifyPrompt(batch, batchSnippets, batchPrevResults, attempt+1)
@@ -415,22 +428,47 @@ func classifyWithLLMProgressive(ctx context.Context, result *ScanResult, pathIdx
 	return firstErr
 }
 
-// classifySystemMessage is the system prompt for LLM classification.
-const classifySystemMessage = `You are an expert IBM mainframe and COBOL analyst with decades of experience classifying source code from mainframe COBOL codebases that have been migrated to flat files. Files have lost their original extensions and are wrapped in .txt or other generic extensions. You must determine the original source type from the content.
+// classifySystemMsg returns the LLM system prompt for classification.
+// When multiLang is true, the prompt covers multi-language legacy codebases (C, PL/SQL,
+// Korn shell, CUSTOM) and does not bias ambiguous files toward COBOL.
+func classifySystemMsg(multiLang bool) string {
+	if multiLang {
+		return `You are an expert source code analyst specializing in legacy systems. You must classify source code files from a heterogeneous legacy codebase that may include IBM mainframe code (COBOL, JCL), C, PL/SQL, shell scripts, and proprietary application-specific formats.
+
+Classify each file based strictly on its content. If you cannot determine the type from the content, classify as CUSTOM — do NOT guess COBOL for files that lack clear mainframe signals.
+Never classify a C function, PL/SQL package, shell script, or application-specific format as COBOL.`
+	}
+	return `You are an expert IBM mainframe and COBOL analyst with decades of experience classifying source code from mainframe COBOL codebases that have been migrated to flat files. Files have lost their original extensions and are wrapped in .txt or other generic extensions. You must determine the original source type from the content.
 
 When uncertain, prefer COBOL or COPYBOOK over UNKNOWN — it is better to include a borderline file than to miss real mainframe source code.
 Never classify a file as UNKNOWN if it contains any structured code, data definitions, or mainframe-related content.`
+}
 
 // buildClassifyPrompt builds the classification prompt for a batch of files.
-func buildClassifyPrompt(batch []string, snippets map[string][]string) string {
+// When multiLang is true, C, PL/SQL, KSH, and CUSTOM are included as valid types.
+func buildClassifyPrompt(batch []string, snippets map[string][]string, multiLang bool) string {
 	var sb strings.Builder
-	sb.WriteString("Classify each file snippet by its mainframe source type.\n\n")
+
+	if multiLang {
+		sb.WriteString("Classify each file snippet by its source type. This codebase is heterogeneous — it may contain mainframe COBOL, C, PL/SQL, shell scripts, or proprietary legacy formats.\n\n")
+	} else {
+		sb.WriteString("Classify each file snippet by its mainframe source type.\n\n")
+	}
 
 	sb.WriteString("## Valid Types\n")
 	sb.WriteString("COBOL, COPYBOOK, JCL, BMS, DCLGEN, ASM, PLI, REXX, NATURAL, PROC, CLIST\n")
-	sb.WriteString("Use UNKNOWN only for files that are clearly not mainframe/programming source code.\n")
+	if multiLang {
+		sb.WriteString("C, PLSQL, KSH, CUSTOM\n")
+		sb.WriteString("Use CUSTOM for proprietary application-specific files whose type cannot be identified from content.\n")
+		sb.WriteString("Use UNKNOWN only for files with no structured content at all (pure prose, binary dump, etc.).\n")
+	} else {
+		sb.WriteString("Use UNKNOWN only for files that are clearly not mainframe/programming source code.\n")
+	}
 	sb.WriteString("Return any type that accurately describes the source — you are not limited to the list above.\n")
-	sb.WriteString("Examples of other valid types: CONTROL, DATA, EASYTRIEVE, IDMS, ADABAS, SORT, UTILITY, SCRIPT, MACRO.\n\n")
+	if !multiLang {
+		sb.WriteString("Examples of other valid types: CONTROL, DATA, EASYTRIEVE, IDMS, ADABAS, SORT, UTILITY, SCRIPT, MACRO.\n")
+	}
+	sb.WriteString("\n")
 
 	sb.WriteString("## Classification Rules & Signals\n\n")
 
@@ -459,6 +497,28 @@ func buildClassifyPrompt(batch []string, snippets map[string][]string) string {
 	sb.WriteString("**DCLGEN** (strong signals: EXEC SQL DECLARE TABLE, generated host variables):\n")
 	sb.WriteString("- DB2 DCLGEN output with EXEC SQL DECLARE TABLE statements\n\n")
 
+	if multiLang {
+		sb.WriteString("**C** (strong signals: #include, main(), function definitions with C types):\n")
+		sb.WriteString("- C source/header: #include directives, C type keywords (int, char, struct, typedef, void, unsigned)\n")
+		sb.WriteString("- Function prototypes, pointer syntax (*ptr), curly-brace blocks\n")
+		sb.WriteString("- Strong: #include + C type declarations → 0.9+ confidence\n\n")
+
+		sb.WriteString("**PLSQL** (strong signals: CREATE OR REPLACE PACKAGE/PROCEDURE/FUNCTION, PL/SQL blocks):\n")
+		sb.WriteString("- Oracle PL/SQL: DECLARE/BEGIN/END blocks, CREATE PACKAGE, IS/AS keywords\n")
+		sb.WriteString("- Cursor definitions, EXCEPTION handlers, %TYPE/%ROWTYPE attributes\n")
+		sb.WriteString("- Strong: CREATE [OR REPLACE] PROCEDURE/PACKAGE/FUNCTION → 0.95+ confidence\n\n")
+
+		sb.WriteString("**KSH** (strong signals: #!/bin/ksh, function keyword, ksh idioms):\n")
+		sb.WriteString("- Korn shell or POSIX shell: #!/bin/ksh or #!/bin/sh shebang, function definitions\n")
+		sb.WriteString("- Shell constructs: if/then/fi, for/do/done, case/esac, [ ] tests, $(...) subshells\n")
+		sb.WriteString("- Strong: shebang + shell constructs → 0.9+ confidence\n\n")
+
+		sb.WriteString("**CUSTOM** (default for unrecognized proprietary formats):\n")
+		sb.WriteString("- Application-specific configuration, screen definitions, menu definitions, report layouts\n")
+		sb.WriteString("- Structured text that doesn't match any known language pattern\n")
+		sb.WriteString("- Use this instead of UNKNOWN when the file has structure but no matching language type\n\n")
+	}
+
 	sb.WriteString("**UNKNOWN**: Use ONLY for files that contain NO structured content, code, or data definitions whatsoever — pure English prose documentation, XML/HTML markup, or CSV data with no mainframe indicators. NEVER return UNKNOWN if the file contains ANY code-like structure, level numbers, verbs, or column-based formatting.\n\n")
 
 	sb.WriteString("## Confidence Rubric\n")
@@ -466,14 +526,21 @@ func buildClassifyPrompt(batch []string, snippets map[string][]string) string {
 	sb.WriteString("- 0.80-0.94: Clear signals present, high certainty\n")
 	sb.WriteString("- 0.70-0.79: Some signals present but could be ambiguous\n")
 	sb.WriteString("- 0.50-0.69: Weak signals, uncertain classification\n")
-	sb.WriteString("- Below 0.50: Weak signals — provide your best-guess type (do NOT default to UNKNOWN)\n\n")
+	sb.WriteString("- Below 0.50: Weak signals — provide your best-guess type\n\n")
 
 	sb.WriteString("## Short File Guidance\n")
-	sb.WriteString("For very short files (under 20 lines), classify based on whatever signals exist — even a single line with a COBOL verb, level number, JCL statement, or column-based formatting is sufficient to assign a type. Short does not mean UNKNOWN.\n\n")
+	sb.WriteString("For very short files (under 20 lines), classify based on whatever signals exist. Short does not mean UNKNOWN or CUSTOM.\n\n")
 
 	sb.WriteString("## Tiebreaker Rules\n")
-	sb.WriteString("If a file shows even one strong mainframe indicator, classify with a specific type, not UNKNOWN.\n")
-	sb.WriteString("Priority: COBOL > COPYBOOK > JCL > UNKNOWN\n\n")
+	if multiLang {
+		sb.WriteString("If a file has clear mainframe indicators, classify as COBOL/COPYBOOK/JCL/etc.\n")
+		sb.WriteString("If a file has clear C/PL/SQL/shell indicators, classify accordingly.\n")
+		sb.WriteString("If content is structured but language is ambiguous, use CUSTOM — never guess COBOL for non-mainframe content.\n")
+		sb.WriteString("Priority: exact-match language > CUSTOM > UNKNOWN\n\n")
+	} else {
+		sb.WriteString("If a file shows even one strong mainframe indicator, classify with a specific type, not UNKNOWN.\n")
+		sb.WriteString("Priority: COBOL > COPYBOOK > JCL > UNKNOWN\n\n")
+	}
 
 	sb.WriteString("## Response Format\n")
 	sb.WriteString("Respond with ONLY a JSON array:\n")
@@ -869,11 +936,21 @@ func isLevelNumber(upper string) bool {
 }
 
 // mapClassificationType converts an LLM classification string to a graph.FileType.
-// Passes through any non-empty type as-is (uppercased), only defaulting to UNKNOWN if empty.
+// Normalizes multi-language aliases to canonical FileType constants, then passes
+// through any other non-empty type as-is (uppercased).
 func mapClassificationType(t string) graph.FileType {
 	upper := strings.ToUpper(strings.TrimSpace(t))
-	if upper == "" {
+	switch upper {
+	case "":
 		return "UNKNOWN"
+	case "C", "C_HEADER", "CHEADER", "C_SOURCE":
+		return graph.FileTypeC
+	case "PLSQL", "PL/SQL", "ORACLE_PLSQL", "PLSQL_PACKAGE", "PLSQL_PROC":
+		return graph.FileTypePLSQL
+	case "KSH", "KSHELL", "KORN_SHELL", "SHELL", "SH", "BASH":
+		return graph.FileTypeKsh
+	case "CUSTOM", "PROPRIETARY", "APP_SPECIFIC", "UNKNOWN_STRUCTURED":
+		return graph.FileTypeCustom
 	}
 	return graph.FileType(upper)
 }

@@ -1,0 +1,76 @@
+You are analyzing a C source file to extract its structural skeleton. Extract ONLY what is explicitly present — do not infer or fabricate.
+
+File: {{.FileName}}
+
+Return a single JSON object with these fields:
+
+{
+  "language": "C",
+  "functions": [
+    {
+      "name": "string — function name",
+      "returnType": "string — return type (e.g. int, void, char*)",
+      "isStatic": false,
+      "params": [
+        {
+          "name": "string — parameter name",
+          "type": "string — parameter type"
+        }
+      ]
+    }
+  ],
+  "includes": ["array of included header names (without angle brackets or quotes)"],
+  "structs": [
+    {
+      "name": "string — struct tag name or typedef alias",
+      "fields": [
+        {
+          "name": "string — field name",
+          "type": "string — field type"
+        }
+      ]
+    }
+  ],
+  "typedefs": [
+    {
+      "alias": "string — new type name",
+      "underlying": "string — underlying type"
+    }
+  ],
+  "globals": [
+    {
+      "name": "string — variable name",
+      "type": "string — variable type",
+      "isExtern": false
+    }
+  ],
+  "callTargets": [
+    {
+      "target": "string — called function name",
+      "isDynamic": false
+    }
+  ],
+  "fileOperations": [
+    {
+      "operation": "string — fopen, fread, fwrite, fclose, open, read, write, close, fgets, fputs",
+      "filePath": "string — string literal path argument, or empty if dynamic",
+      "functionContext": "string — enclosing function name"
+    }
+  ],
+  "oracleCalls": [
+    {
+      "functionName": "string — Oracle OCI or Pro*C function name (e.g. OCIStmtExecute, EXEC SQL)",
+      "context": "string — enclosing function name"
+    }
+  ]
+}
+
+Rules:
+- For functions: include all function definitions (not declarations/prototypes)
+- For includes: strip angle brackets and quotes; "stdio.h" not "<stdio.h>"
+- For callTargets: list all direct function calls; isDynamic=true only for calls through function pointers
+- For fileOperations: capture POSIX file calls (open/read/write/close) and C standard library calls (fopen/fread/fwrite/fclose)
+- For oracleCalls: capture any Oracle OCI function calls or EXEC SQL statements (Pro*C embedded SQL)
+- For structs: include both named struct definitions and typedef'd structs
+- Omit empty arrays
+- Return ONLY the JSON object, no markdown fences, no explanation

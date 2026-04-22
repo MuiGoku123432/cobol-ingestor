@@ -48,9 +48,10 @@ Return a single JSON object with these fields:
   ],
   "sqlStatements": [
     {
-      "type": "string — SELECT, INSERT, UPDATE, DELETE, DECLARE, etc.",
+      "type": "string — SELECT, INSERT, UPDATE, DELETE, DECLARE, CALL, EXECUTE, etc.",
       "text": "string — first 200 chars of the SQL",
-      "targetTable": "string — primary table name referenced in the statement, or empty"
+      "targetTable": "string — primary table name referenced in the statement, or empty",
+      "hostVars": ["array of COBOL/Pro*C host variable names bound to this statement (e.g. :WS-CUST-ID without the colon prefix)"]
     }
   ],
   "cicsCommands": [
@@ -109,7 +110,8 @@ Rules:
 - For usage: extract the USAGE clause (COMP, COMP-3, BINARY, POINTER, DISPLAY); leave empty if not specified
 - For conditions: extract ALL 88-level items with their parent data item and value(s)
 - For parameters: extract data items from the LINKAGE SECTION; infer direction from how they are used (read-only = IN, written = OUT, both = INOUT)
-- For SQL: extract from EXEC SQL ... END-EXEC blocks; targetTable is the primary table (FROM, INTO, UPDATE, DELETE FROM)
+- For SQL: extract from EXEC SQL ... END-EXEC blocks (both DB2 and Oracle); targetTable is the primary table (FROM, INTO, UPDATE, DELETE FROM). Pro*COBOL/Pro*C files use the same EXEC SQL syntax — treat identically
+- For hostVars: list all COBOL data items or C variables used as bind variables in the SQL statement (prefixed with : in the source). Strip the colon. Examples: ":WS-CUST-ID" → "WS-CUST-ID", ":host_var" → "host_var". Only include host vars for this specific statement
 - For CICS: extract from EXEC CICS ... END-EXEC blocks
 - For executionMode: CICS if program contains EXEC CICS commands; BATCH if invoked only from JCL with no CICS; BATCH_AND_CICS if both patterns present; UNKNOWN if unclear
 - For fileDefinitions: infer data store type from SELECT/ASSIGN clauses and file organization. INDEXED → VSAM KSDS, SEQUENTIAL with VSAM in ASSIGN → ESDS, RELATIVE → RRDS. If no VSAM indicators, classify as FLAT_FILE

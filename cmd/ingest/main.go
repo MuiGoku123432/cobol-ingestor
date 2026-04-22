@@ -46,12 +46,13 @@ var ingestCmd = &cobra.Command{
 }
 
 var (
-	dir            string
-	passFlag       int
-	codebaseFlag   string
-	contentDetect  bool
-	estimateFlag   bool
-	preciseFlag    bool
+	dir              string
+	passFlag         int
+	codebaseFlag     string
+	contentDetect    bool
+	allExtensions    bool
+	estimateFlag     bool
+	preciseFlag      bool
 )
 
 // bw flags
@@ -239,6 +240,7 @@ func init() {
 	ingestCmd.Flags().IntVar(&passFlag, "pass", 0, "Which pass to run: 0=all, 1=Pass 1, 2=Pass 2, 3=Pass 3")
 	ingestCmd.Flags().StringVar(&codebaseFlag, "codebase", "default", "Codebase identifier for multi-codebase support")
 	ingestCmd.Flags().BoolVar(&contentDetect, "content-detect", false, "Enable content-based detection of COBOL/copybook/JCL in .txt files")
+	ingestCmd.Flags().BoolVar(&allExtensions, "all-extensions", false, "Ingest every text-like file regardless of extension; unrecognized types → CUSTOM (use with --codebase for mixed-language legacy codebases)")
 	ingestCmd.Flags().BoolVar(&estimateFlag, "estimate", false, "Estimate LLM token cost without making any API calls")
 	ingestCmd.Flags().BoolVar(&preciseFlag, "precise", false, "Use BPE tokenizer for more accurate token counts (slower, requires internet on first use)")
 	_ = ingestCmd.MarkFlagRequired("dir")
@@ -322,8 +324,12 @@ func runIngest(cmd *cobra.Command, args []string) error {
 
 	// Scan filesystem
 	detect := contentDetect || cfg.Ingest.ContentDetect
+	if allExtensions && codebaseFlag == "default" {
+		logger.Warn("--all-extensions is intended for custom codebases; consider using --codebase=<name> to avoid mixing with the default COBOL graph")
+	}
 	scanResult, err := scanner.Scan(ctx, cfg.Ingest.RootDir, logger, scanner.ScanOptions{
 		ContentDetect: detect,
+		AllExtensions: allExtensions,
 	})
 	if err != nil {
 		return fmt.Errorf("scanning: %w", err)
@@ -431,9 +437,10 @@ func runIngest(cmd *cobra.Command, args []string) error {
 		}
 	}
 
-	// Classify .txt files if content detection is enabled
-	if detect && len(scanResult.Snippets) > 0 {
-		if err := scanner.ClassifyPendingFiles(ctx, scanResult, provider, cfg.Claude.SonnetModel, logger, fileCache); err != nil {
+	// Classify pending files (content-detect .txt files or --all-extensions unknowns)
+	if (detect || allExtensions) && len(scanResult.Snippets) > 0 {
+		classifyOpts := scanner.ClassifyOptions{MultiLang: allExtensions}
+		if err := scanner.ClassifyPendingFiles(ctx, scanResult, provider, cfg.Claude.SonnetModel, logger, fileCache, classifyOpts); err != nil {
 			logger.Warn("content classification had errors", zap.Error(err))
 		}
 	}

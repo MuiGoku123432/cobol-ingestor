@@ -21,6 +21,7 @@ import (
 // ScanOptions controls optional scanning behavior.
 type ScanOptions struct {
 	ContentDetect bool // enable .txt file detection
+	AllExtensions bool // ingest every text-like file; unknown extensions → FileTypeCustom
 }
 
 // ScanResult holds the outcome of a filesystem scan.
@@ -101,7 +102,7 @@ func Scan(ctx context.Context, rootDir string, logger *zap.Logger, opts ...ScanO
 		}
 
 		// Content detection path for unrecognized extensions
-		if !opt.ContentDetect {
+		if !opt.ContentDetect && !opt.AllExtensions {
 			return nil
 		}
 
@@ -124,6 +125,40 @@ func Scan(ctx context.Context, rootDir string, logger *zap.Logger, opts ...ScanO
 				Size:      info.Size(),
 				LineCount: lineCount,
 			})
+			return nil
+		}
+
+		// --all-extensions: ingest any text-like file with unrecognized extension as Custom/Pending
+		if opt.AllExtensions && !isContentDetectEligible(name) {
+			info, err := d.Info()
+			if err != nil {
+				result.Errors = append(result.Errors, fmt.Errorf("stat %s: %w", path, err))
+				return nil
+			}
+			// Skip files that are clearly binary or too large
+			if isBinaryDenied(name) || info.Size() > allExtensionsMaxBytes {
+				return nil
+			}
+			// Quick text-likeness check before hashing
+			if !isTextLike(path) {
+				return nil
+			}
+			hash, lineCount, snippet, err := hashCountAndSnippet(path, snippetMaxLines)
+			if err != nil {
+				result.Errors = append(result.Errors, fmt.Errorf("hash %s: %w", path, err))
+				return nil
+			}
+			result.Files = append(result.Files, graph.FileInfo{
+				Path:      path,
+				Type:      graph.FileTypePending,
+				Hash:      hash,
+				Size:      info.Size(),
+				LineCount: lineCount,
+			})
+			if result.Snippets == nil {
+				result.Snippets = make(map[string][]string)
+			}
+			result.Snippets[path] = snippet
 			return nil
 		}
 
@@ -172,6 +207,44 @@ func Scan(ctx context.Context, rootDir string, logger *zap.Logger, opts ...ScanO
 	return result, nil
 }
 
+// allExtensionsMaxBytes is the file-size ceiling for --all-extensions ingestion.
+const allExtensionsMaxBytes = 2 * 1024 * 1024 // 2 MB
+
+// binaryDeniedExts is the deny-list of extensions skipped by --all-extensions.
+var binaryDeniedExts = map[string]bool{
+	".exe": true, ".so": true, ".a": true, ".o": true, ".obj": true,
+	".bin": true, ".tar": true, ".gz": true, ".zip": true, ".jar": true,
+	".class": true, ".war": true, ".ear": true,
+	".png": true, ".jpg": true, ".jpeg": true, ".gif": true, ".bmp": true,
+	".pdf": true, ".doc": true, ".docx": true, ".xls": true, ".xlsx": true,
+}
+
+// isBinaryDenied returns true when the file extension is on the binary deny-list.
+func isBinaryDenied(name string) bool {
+	return binaryDeniedExts[strings.ToLower(filepath.Ext(name))]
+}
+
+// isTextLike opens the first 512 bytes of a file and returns false if it looks binary
+// (contains a NUL byte, which is extremely rare in text source files).
+func isTextLike(path string) bool {
+	f, err := os.Open(path)
+	if err != nil {
+		return false
+	}
+	defer f.Close()
+	buf := make([]byte, 512)
+	n, err := f.Read(buf)
+	if err != nil && n == 0 {
+		return false
+	}
+	for _, b := range buf[:n] {
+		if b == 0x00 {
+			return false
+		}
+	}
+	return true
+}
+
 func classifyFile(name string) (graph.FileType, bool) {
 	ext := strings.ToLower(filepath.Ext(name))
 	switch ext {
@@ -187,6 +260,18 @@ func classifyFile(name string) (graph.FileType, bool) {
 		return graph.FileType("BMS"), true
 	case ".pli":
 		return graph.FileType("PLI"), true
+	// Pro*COBOL — treat as COBOL (EXEC SQL embedded in COBOL source)
+	case ".pc", ".pco":
+		return graph.FileTypeCOBOL, true
+	// C / C header
+	case ".c", ".h":
+		return graph.FileTypeC, true
+	// PL/SQL
+	case ".sql", ".pks", ".pkb", ".pls", ".trg", ".fnc", ".prc", ".typ":
+		return graph.FileTypePLSQL, true
+	// Korn shell / POSIX shell
+	case ".ksh", ".sh":
+		return graph.FileTypeKsh, true
 	default:
 		return "", false
 	}

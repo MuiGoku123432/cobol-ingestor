@@ -1,0 +1,46 @@
+You are analyzing a Korn shell (ksh) or POSIX shell script to extract its structural skeleton. Extract ONLY what is explicitly present — do not infer or fabricate.
+
+File: {{.FileName}}
+
+Return a single JSON object with these fields:
+
+{
+  "shebang": "string — first line shebang (e.g. #!/bin/ksh), or empty",
+  "scriptPurpose": "string — 1-sentence description of what the script does, inferred from its content",
+  "functions": [
+    {
+      "name": "string — shell function name",
+      "description": "string — brief description inferred from code comments or logic"
+    }
+  ],
+  "executedBinaries": [
+    {
+      "binary": "string — binary or script name being executed (e.g. sqlplus, awk, PROGNAME, ./run.sh)",
+      "args": "string — first 100 chars of arguments, or empty",
+      "functionContext": "string — enclosing function name, or MAIN if at script level"
+    }
+  ],
+  "sourcedFiles": ["array of file paths sourced via . or source command"],
+  "envVars": ["array of environment variable names set or exported by this script"],
+  "fileOperations": [
+    {
+      "path": "string — file path (string literal only; skip dynamic paths)",
+      "operation": "string — READ (< redirect), WRITE (> redirect), APPEND (>> redirect), PIPE",
+      "functionContext": "string — enclosing function name, or MAIN"
+    }
+  ],
+  "callTargets": [
+    {
+      "target": "string — called function name (internal calls only)",
+      "functionContext": "string — calling function or MAIN"
+    }
+  ]
+}
+
+Rules:
+- For executedBinaries: capture external programs invoked via exec, command substitution $(), backticks, or direct invocation. Include sqlplus, COBOL program names, other shell scripts
+- For sourcedFiles: capture `. filepath` and `source filepath` patterns
+- For fileOperations: only capture redirections to/from string-literal paths (not pipes to other commands)
+- For callTargets: only internal shell function calls, not external binaries (those go in executedBinaries)
+- Omit empty arrays
+- Return ONLY the JSON object, no markdown fences, no explanation

@@ -60,7 +60,10 @@ func ScopedKey(codebase, value string) string {
 func isSharedLabel(label string) bool {
 	switch label {
 	case "Copybook", "File", "BusinessDomain", "DBTable",
-		"ExternalDatabase", "ExternalDBTable":
+		"ExternalDatabase", "ExternalDBTable",
+		// Multi-language shared labels — Oracle objects and ISAM files are
+		// referenced across codebases (e.g. COBOL + PL/SQL hitting the same table)
+		"ISAMFile", "PLSQLPackage", "GlossaryTerm":
 		return true
 	}
 	return false
@@ -260,6 +263,27 @@ func mergeKeyForLabel(label string) string {
 	case "BWFile":
 		return "path"
 	case "BWEntity":
+		return "mergeId"
+	// Multi-language labels
+	case "CProgram":
+		return "filePath"
+	case "CFunction":
+		return "mergeId"
+	case "CStruct", "CTypedef", "CHeader":
+		return "mergeId"
+	case "PLSQLPackage", "PLSQLPackageBody":
+		return "name"
+	case "PLSQLProcedure", "PLSQLFunction", "PLSQLTrigger", "PLSQLCursor", "PLSQLType":
+		return "mergeId"
+	case "ShellScript":
+		return "filePath"
+	case "ShellFunction":
+		return "mergeId"
+	case "CustomEntity":
+		return "mergeId"
+	case "ISAMFile":
+		return "name"
+	case "GlossaryTerm":
 		return "mergeId"
 	default:
 		return "id"
@@ -1107,6 +1131,33 @@ func (w *BatchWriter) WritePass2Result(ctx context.Context, result *graph.Pass2R
 			annRows); err != nil {
 			w.logger.Error("failed to update paragraph annotations", zap.Error(err))
 			w.Stats.Pass2WriteErrors.Add(1)
+		}
+	}
+
+	// Extra relationships (e.g. HOST_VAR_OF from Pro*COBOL/Pro*C host variable bindings)
+	if len(result.Relationships) > 0 {
+		grouped := groupRelationships(result.Relationships)
+		for key, grels := range grouped {
+			rows := make([]map[string]any, len(grels))
+			for i, r := range grels {
+				props := r.Properties
+				if props == nil {
+					props = map[string]any{}
+				}
+				fromKey := r.FromKey
+				if !isSharedLabel(key.fromLabel) {
+					fromKey = ScopedKey(cb, fromKey)
+				}
+				toKey := r.ToKey
+				if !isSharedLabel(key.toLabel) {
+					toKey = ScopedKey(cb, toKey)
+				}
+				rows[i] = map[string]any{"fromKey": fromKey, "toKey": toKey, "props": props}
+			}
+			if err := w.WriteRelationships(ctx, string(key.relType), key.fromLabel, mergeKeyForLabel(key.fromLabel), key.toLabel, mergeKeyForLabel(key.toLabel), rows); err != nil {
+				w.logger.Error("failed to write pass2 extra relationships", zap.String("type", string(key.relType)), zap.Error(err))
+				w.Stats.Pass2WriteErrors.Add(1)
+			}
 		}
 	}
 

@@ -1,0 +1,43 @@
+You are analyzing a source file from a legacy application. The file has an unusual or proprietary extension. Extract its structural content and relationships.
+
+File: {{.FileName}}
+Extension: {{.Extension}}
+
+Return a single JSON object using the following schema:
+
+{
+  "entities": [
+    {
+      "name": "string — entity name (form name, menu name, proc name, etc.)",
+      "entityType": "string — one of: Form, Menu, Page, Report, Submission, Config, Script, Data, Trigger, Layout, Unknown",
+      "description": "string — 1-2 sentence description of what this entity does or represents",
+      "properties": {
+        "any key": "any value — key/value pairs relevant to this entity type (fields, columns, actions, etc.)"
+      }
+    }
+  ],
+  "relationships": [
+    {
+      "from": "string — source entity name",
+      "to": "string — target entity name",
+      "type": "string — CALLS, NAVIGATES_TO, READS, WRITES, TRIGGERS, INCLUDES, USES",
+      "description": "string — brief description of the relationship"
+    }
+  ],
+  "crossReferences": [
+    {
+      "entityName": "string — name of the entity in this file that references an external artifact",
+      "targetName": "string — name of the external artifact being referenced",
+      "targetType": "string — Program (COBOL), Copybook, PLSQLProcedure, PLSQLPackage, CFunction, ShellScript, ISAMFile, DBTable, or Other",
+      "referenceType": "string — CALLS, READS, WRITES, USES, SUBMITS, DISPLAYS, or Other"
+    }
+  ]
+}
+
+Rules:
+- Infer entityType from the file content and extension. For example: screens/forms → Form, menu definitions → Menu, batch submission defs → Submission, data layout defs → Data
+- For properties: include any structured attributes you can identify (field names, column headers, action codes, status values, etc.)
+- For crossReferences: identify any references to known artifacts (COBOL program names in CALL-like syntax, file names that look like data files, PL/SQL package calls via SQL, etc.)
+- If the file contains only one entity (e.g. a single form definition), return one entity in the entities array
+- Omit empty arrays
+- Return ONLY the JSON object, no markdown fences, no explanation

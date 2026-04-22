@@ -8,6 +8,13 @@ const (
 	FileTypeCopybook FileType = "COPYBOOK"
 	FileTypeJCL      FileType = "JCL"
 	FileTypePending  FileType = "PENDING" // awaiting content-based classification
+
+	// Multi-language support
+	FileTypeC        FileType = "C"
+	FileTypePLSQL    FileType = "PLSQL"
+	FileTypeKsh      FileType = "KSH"
+	FileTypeCustom   FileType = "CUSTOM" // unknown extensions captured by --all-extensions
+	FileTypeISAMFile FileType = "ISAM_FILE"
 )
 
 // FileInfo represents a discovered source file.
@@ -56,6 +63,16 @@ const (
 	RelReadyArea           RelType = "READIES"       // Program → IDMSArea
 	RelConnectsSet         RelType = "CONNECTS"      // Program → IDMSSet
 	RelDisconnectsSet      RelType = "DISCONNECTS"   // Program → IDMSSet
+
+	// Multi-language relationships
+	RelSources         RelType = "SOURCES"          // ShellScript → ShellScript (. file)
+	RelExecutesBinary  RelType = "EXECUTES_BINARY"  // ShellScript → Program/CProgram (invokes binary)
+	RelUsesOracleObj   RelType = "USES_ORACLE_OBJ"  // PLSQLProcedure → ExternalDBTable/view
+	RelHostVarOf       RelType = "HOST_VAR_OF"      // DataItem → SQLStatement (Pro*COBOL EXEC SQL bind)
+	RelDefines         RelType = "DEFINES"           // CProgram → CFunction, PLSQLPackage → PLSQLProcedure
+	RelUsesType        RelType = "USES_TYPE"         // CFunction → CStruct/CTypedef
+	RelFiresOn         RelType = "FIRES_ON"          // PLSQLTrigger → ExternalDBTable
+	RelOwnsCursor      RelType = "OWNS_CURSOR"       // PLSQLProcedure → PLSQLCursor
 )
 
 // Relationship is a generic edge in the graph.
@@ -287,6 +304,7 @@ type Pass2Result struct {
 	DynamicCallResolutions []DynamicCallResolution
 	ErrorHandlers  []ErrorHandler
 	IDMSOperations []IDMSOperation
+	Relationships  []Relationship // extra relationships not covered by typed fields (e.g. HOST_VAR_OF)
 }
 
 // PerformRelation represents a PERFORM control flow.
@@ -722,6 +740,133 @@ type GlossaryTerm struct {
 type GlossaryResult struct {
 	SourceFile string
 	Terms      []GlossaryTerm
+}
+
+// ── Multi-language node types ─────────────────────────────────────────────
+
+// CProgram represents a C source file.
+type CProgram struct {
+	ID       string
+	FilePath string
+	Language string
+}
+
+// CFunction represents a C function definition.
+type CFunction struct {
+	ID       string
+	Name     string
+	RetType  string
+	IsStatic bool
+	FilePath string
+	MergeID  string
+}
+
+// CStruct represents a C struct definition.
+type CStruct struct {
+	ID       string
+	Name     string
+	FilePath string
+	MergeID  string
+}
+
+// CTypedef represents a C typedef.
+type CTypedef struct {
+	ID         string
+	Alias      string
+	Underlying string
+	FilePath   string
+	MergeID    string
+}
+
+// CHeader represents an #include header.
+type CHeader struct {
+	ID      string
+	Name    string
+	MergeID string
+}
+
+// PLSQLPackage represents a PL/SQL package or standalone object.
+type PLSQLPackage struct {
+	ID         string
+	Name       string
+	ObjectType string
+	SchemaName string
+	FilePath   string
+}
+
+// PLSQLProcedure represents a PL/SQL stored procedure.
+type PLSQLProcedure struct {
+	ID          string
+	Name        string
+	PackageName string
+	FilePath    string
+	MergeID     string
+}
+
+// PLSQLFunction represents a PL/SQL function.
+type PLSQLFunction struct {
+	ID          string
+	Name        string
+	ReturnType  string
+	PackageName string
+	FilePath    string
+	MergeID     string
+}
+
+// PLSQLTrigger represents a PL/SQL trigger.
+type PLSQLTrigger struct {
+	ID        string
+	Name      string
+	TableName string
+	Event     string
+	Timing    string
+	FilePath  string
+	MergeID   string
+}
+
+// PLSQLCursor represents a PL/SQL cursor definition.
+type PLSQLCursor struct {
+	ID          string
+	Name        string
+	Query       string
+	PackageName string
+	MergeID     string
+}
+
+// ShellScript represents a ksh/sh script file.
+type ShellScript struct {
+	ID       string
+	FilePath string
+	Shebang  string
+	Purpose  string
+}
+
+// ShellFunction represents a function defined inside a shell script.
+type ShellFunction struct {
+	ID          string
+	Name        string
+	Description string
+	ScriptPath  string
+	MergeID     string
+}
+
+// CustomEntity represents a proprietary-format entity extracted via the generic custom lane.
+type CustomEntity struct {
+	ID          string
+	Name        string
+	EntityType  string
+	Description string
+	SourceFile  string
+	Extension   string
+	MergeID     string
+	Properties  map[string]any
+}
+
+// ISAMFile represents a flat-file data store detected passively from consumer code.
+type ISAMFile struct {
+	ID       string
+	Name     string // file path or logical name
+	Codebase string
 }
 
 // TargetStackResult aggregates extraction results for one target repo.

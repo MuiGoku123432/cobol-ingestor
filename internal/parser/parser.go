@@ -86,9 +86,10 @@ type ParameterJSON struct {
 }
 
 type SQLJSON struct {
-	Type        string `json:"type"`
-	Text        string `json:"text"`
-	TargetTable string `json:"targetTable"`
+	Type        string   `json:"type"`
+	Text        string   `json:"text"`
+	TargetTable string   `json:"targetTable"`
+	HostVars    []string `json:"hostVars"`
 }
 
 type CICSJSON struct {
@@ -310,6 +311,19 @@ func ParsePass1Response(jsonStr, sourceFile string) (*graph.Pass1Result, error) 
 			ToLabel:   "SQLStatement",
 			ToKey:     stmt.ID,
 		})
+		// Pro*COBOL/Pro*C host variable bindings
+		for _, hv := range sql.HostVars {
+			if hv == "" {
+				continue
+			}
+			result.Relationships = append(result.Relationships, graph.Relationship{
+				Type:      graph.RelHostVarOf,
+				FromLabel: "DataItem",
+				FromKey:   programID + "." + hv,
+				ToLabel:   "SQLStatement",
+				ToKey:     stmt.ID,
+			})
+		}
 	}
 
 	// CICS transactions
@@ -590,13 +604,26 @@ func ParsePass2Response(jsonStr, sourceFile, programID string) (*graph.Pass2Resu
 	}
 
 	for _, s := range raw.SQLStatements {
-		result.SQLDetails = append(result.SQLDetails, graph.SQLStatement{
+		stmt := graph.SQLStatement{
 			ID:          newID(),
 			Text:        s.Text,
 			ProgramID:   programID,
 			Type:        s.Type,
 			TargetTable: s.TargetTable,
-		})
+		}
+		result.SQLDetails = append(result.SQLDetails, stmt)
+		for _, hv := range s.HostVars {
+			if hv == "" {
+				continue
+			}
+			result.Relationships = append(result.Relationships, graph.Relationship{
+				Type:      graph.RelHostVarOf,
+				FromLabel: "DataItem",
+				FromKey:   programID + "." + hv,
+				ToLabel:   "SQLStatement",
+				ToKey:     stmt.ID,
+			})
+		}
 	}
 
 	for _, c := range raw.CICSCommands {
