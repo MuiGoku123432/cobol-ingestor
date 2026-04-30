@@ -459,6 +459,45 @@ func (c *Cache) ClearChunkResults(path string, pass int) error {
 	return nil
 }
 
+// Clear wipes ingestion-related cache tables (file_cache, pass_cache, chunk_cache),
+// forcing a full re-run on the next ingestion. When keepClassifications is true,
+// classify_cache is preserved so the LLM classifier pass stays a cache hit.
+// Returns the number of rows deleted from each table.
+func (c *Cache) Clear(keepClassifications bool) (map[string]int64, error) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	tables := []string{"file_cache", "pass_cache", "chunk_cache"}
+	if !keepClassifications {
+		tables = append(tables, "classify_cache")
+	}
+
+	tx, err := c.db.Begin()
+	if err != nil {
+		return nil, fmt.Errorf("begin clear tx: %w", err)
+	}
+	defer tx.Rollback() //nolint:errcheck
+
+	deleted := make(map[string]int64, len(tables))
+	for _, t := range tables {
+		res, err := tx.Exec("DELETE FROM " + t)
+		if err != nil {
+			return nil, fmt.Errorf("clearing %s: %w", t, err)
+		}
+		n, _ := res.RowsAffected()
+		deleted[t] = n
+	}
+
+	if err := tx.Commit(); err != nil {
+		return nil, fmt.Errorf("commit clear: %w", err)
+	}
+
+	if _, err := c.db.Exec("VACUUM"); err != nil {
+		return deleted, fmt.Errorf("vacuum: %w", err)
+	}
+	return deleted, nil
+}
+
 // Close closes the underlying database connection.
 func (c *Cache) Close() error {
 	return c.db.Close()

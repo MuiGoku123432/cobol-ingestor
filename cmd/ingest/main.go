@@ -132,6 +132,31 @@ var authCmd = &cobra.Command{
 	Short: "Manage GitHub Copilot authentication",
 }
 
+// cache flags
+var (
+	cacheCodebase           string
+	cacheDBPath             string
+	cacheKeepClassifications bool
+)
+
+var cacheCmd = &cobra.Command{
+	Use:   "cache",
+	Short: "Manage the ingestion cache (SQLite)",
+}
+
+var cacheClearCmd = &cobra.Command{
+	Use:   "clear",
+	Short: "Clear ingestion cache tables so the next run re-processes every file",
+	Long: `Clears file_cache, pass_cache, and chunk_cache from the SQLite cache DB,
+forcing the next ingestion to re-run Pass 1 / Pass 2 / chunked LLM calls from scratch.
+
+Useful when the Neo4j database has been reset but the cache still says every file is
+already processed. Use --keep-classifications to preserve the classify_cache table so
+the file-type classifier stays a cache hit (recommended — classification is the most
+expensive cached step that doesn't depend on Neo4j state).`,
+	RunE: runCacheClear,
+}
+
 var authLoginCmd = &cobra.Command{
 	Use:   "login",
 	Short: "Authenticate with GitHub Copilot via device flow",
@@ -248,6 +273,12 @@ func init() {
 
 	authCmd.AddCommand(authLoginCmd, authLogoutCmd, authStatusCmd, authModelsCmd)
 	rootCmd.AddCommand(authCmd)
+
+	cacheClearCmd.Flags().StringVar(&cacheCodebase, "codebase", "default", "Codebase identifier — resolves to cache-<codebase>.sqlite (or the default cache DB when 'default')")
+	cacheClearCmd.Flags().StringVar(&cacheDBPath, "db", "", "Explicit cache DB path (overrides --codebase and config)")
+	cacheClearCmd.Flags().BoolVar(&cacheKeepClassifications, "keep-classifications", false, "Preserve classify_cache so the LLM classifier pass stays a cache hit")
+	cacheCmd.AddCommand(cacheClearCmd)
+	rootCmd.AddCommand(cacheCmd)
 
 	bwCmd.Flags().StringVar(&bwDir, "dir", "", "Root directory of Businessware files")
 	bwCmd.Flags().StringVar(&bwExtensions, "extensions", "", "Comma-separated file extensions (default: .java,.md,.bw,.txt,.xml)")
@@ -1415,6 +1446,47 @@ func main() {
 		fmt.Fprintln(os.Stderr, err)
 		os.Exit(1)
 	}
+}
+
+func runCacheClear(cmd *cobra.Command, args []string) error {
+	dbPath := cacheDBPath
+	if dbPath == "" {
+		cfg, err := config.Load()
+		if err != nil {
+			return fmt.Errorf("loading config: %w", err)
+		}
+		dbPath = cfg.Ingest.CacheDB
+		if cacheCodebase != "default" {
+			dbPath = fmt.Sprintf("cache-%s.sqlite", cacheCodebase)
+		}
+	}
+
+	if _, err := os.Stat(dbPath); os.IsNotExist(err) {
+		fmt.Printf("Cache DB %s does not exist — nothing to clear.\n", dbPath)
+		return nil
+	}
+
+	c, err := cache.New(dbPath)
+	if err != nil {
+		return fmt.Errorf("opening cache %s: %w", dbPath, err)
+	}
+	defer c.Close()
+
+	deleted, err := c.Clear(cacheKeepClassifications)
+	if err != nil {
+		return fmt.Errorf("clearing cache: %w", err)
+	}
+
+	fmt.Printf("Cleared cache at %s\n", dbPath)
+	tables := []string{"file_cache", "pass_cache", "chunk_cache", "classify_cache"}
+	for _, t := range tables {
+		if n, ok := deleted[t]; ok {
+			fmt.Printf("  %-16s %d rows deleted\n", t, n)
+		} else {
+			fmt.Printf("  %-16s preserved\n", t)
+		}
+	}
+	return nil
 }
 
 // runTargetStack runs the full target stack pipeline: clone → scan → analyze → gap → requirements.
