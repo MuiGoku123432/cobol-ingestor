@@ -7,15 +7,18 @@ const (
 	FileTypeCOBOL    FileType = "COBOL"
 	FileTypeCopybook FileType = "COPYBOOK"
 	FileTypeJCL      FileType = "JCL"
+	FileTypePending  FileType = "PENDING" // awaiting content-based classification
 )
 
 // FileInfo represents a discovered source file.
 type FileInfo struct {
-	Path      string
-	Type      FileType
-	Hash      string // SHA-256
-	Size      int64
-	LineCount int
+	Path       string
+	Type       FileType
+	Hash       string  // SHA-256
+	Size       int64
+	LineCount  int
+	Confidence float64 // 0.0-1.0 classification confidence
+	Classifier string  // "EXTENSION", "LLM", "HEURISTIC", "CACHE"
 }
 
 // RelType enumerates Neo4j relationship types.
@@ -246,6 +249,7 @@ type IDMSOperation struct {
 // Pass1Result aggregates all extracted data from a single file's Pass 1 analysis.
 type Pass1Result struct {
 	SourceFile         string
+	Partial            bool // true when recovered from a truncated LLM response
 	Programs           []Program
 	Paragraphs         []Paragraph
 	Sections           []Section
@@ -269,6 +273,7 @@ type Pass1Result struct {
 type Pass2Result struct {
 	SourceFile     string
 	ProgramID      string
+	Partial        bool // true when recovered from a truncated LLM response
 	Performs       []PerformRelation
 	DataFlows      []DataFlowRelation
 	FileOps        []FileOpRelation
@@ -447,7 +452,7 @@ type DBTable struct {
 type CrossProgramFlow struct {
 	FromProgram string
 	ToProgram   string
-	Channel     string // FILE, DB2, LINKAGE, CICS_COMMAREA
+	Channel     string // FILE, DB2, LINKAGE, CICS_COMMAREA, CICS_TS, CICS_TD, MQ, JCL_STEP
 	Fields      []FieldPair
 	SharedResource string // file name, table name, etc.
 }
@@ -585,4 +590,132 @@ type BWResult struct {
 	Entities        []BWEntity
 	Relationships   []BWRelationship
 	CobolReferences []BWCobolReference
+}
+
+// ---- Target Stack Types ----
+
+const (
+	// Target stack relationship types
+	RelTSContains      RelType = "TS_CONTAINS"       // TargetRepo → TargetService
+	RelTSExposes       RelType = "TS_EXPOSES"         // TargetService → TargetEndpoint
+	RelTSEnforces      RelType = "TS_ENFORCES"        // TargetService → TargetBusinessRule
+	RelTSModels        RelType = "TS_MODELS"          // TargetService → TargetDataModel
+	RelTSIntegrates    RelType = "TS_INTEGRATES"      // TargetService → TargetIntegration
+	RelTSHandlesError  RelType = "TS_HANDLES_ERROR"   // TargetService → TargetErrorHandler
+	RelTSMapsToCobol   RelType = "TS_MAPS_TO_COBOL"  // TargetService → Program (coverage)
+	RelTSRuleMapsTo    RelType = "TS_RULE_MAPS_TO"   // TargetBusinessRule → Paragraph (matched logic)
+	RelGapFrom         RelType = "GAP_FROM"           // BusinessGap → source node
+	RelGapTo           RelType = "GAP_TO"             // BusinessGap → target node
+	RelRequirementFor  RelType = "REQUIREMENT_FOR"    // BusinessRequirement → BusinessGap
+)
+
+// TargetRepo represents a connected Git repository (the modern "target stack").
+type TargetRepo struct {
+	ID         string // URL-normalized unique key
+	Name       string
+	URL        string
+	Provider   string // "github", "azure_devops", "generic"
+	Branch     string
+	LastCommit string // HEAD SHA at last analysis
+	LocalPath  string // where cloned on disk
+	Language   string // primary language detected
+	Framework  string // primary framework detected
+}
+
+// TargetService represents a logical service or module extracted from a target repo.
+type TargetService struct {
+	ID          string // repoID + "::" + name
+	Name        string
+	ServiceType string // REST_API, GRPC, MESSAGE_CONSUMER, BATCH_JOB, LIBRARY
+	Description string
+	RepoURL     string
+	BasePath    string // relative path within the repo
+	Language    string
+	Framework   string
+}
+
+// TargetEndpoint represents an API endpoint or message consumer entry point.
+type TargetEndpoint struct {
+	ID          string // serviceID + "::" + method + "::" + path
+	Method      string // GET, POST, PUT, DELETE, CONSUME, PRODUCE
+	Path        string
+	Description string
+	ServiceName string
+	Parameters  string // JSON-encoded summary
+}
+
+// TargetBusinessRule represents an extracted business rule or validation.
+type TargetBusinessRule struct {
+	ID          string // serviceID + "::" + name
+	Name        string
+	Description string
+	Category    string  // VALIDATION, CALCULATION, AUTHORIZATION, WORKFLOW, TRANSFORMATION
+	ServiceName string
+	SourceFile  string
+	Confidence  float64
+}
+
+// TargetDataModel represents a data entity or model class.
+type TargetDataModel struct {
+	ID          string // serviceID + "::" + name
+	Name        string
+	Description string
+	ServiceName string
+	SourceFile  string
+	Fields      string // JSON-encoded field definitions
+	TableName   string // database table if ORM-mapped
+}
+
+// TargetIntegration represents an external integration point in the target stack.
+type TargetIntegration struct {
+	ID              string
+	IntegrationType string // DATABASE, REST_CLIENT, MESSAGE_QUEUE, FILE_IO, CACHE, EXTERNAL_API
+	Target          string // connection string, URL, queue name
+	Description     string
+	ServiceName     string
+}
+
+// TargetErrorHandler represents an error handling pattern in the target stack.
+type TargetErrorHandler struct {
+	ID          string
+	Pattern     string // TRY_CATCH, ERROR_MIDDLEWARE, CIRCUIT_BREAKER, RETRY, FALLBACK
+	Description string
+	ServiceName string
+	SourceFile  string
+}
+
+// BusinessGap represents an identified gap between COBOL and the target stack.
+type BusinessGap struct {
+	ID           string
+	GapType      string  // COBOL_ONLY, TARGET_ONLY, PARTIAL_MATCH, SEMANTIC_MISMATCH
+	Category     string  // BUSINESS_RULE, DATA_MODEL, INTEGRATION, ERROR_HANDLING, BATCH_PROCESSING
+	Description  string
+	Severity     string  // CRITICAL, HIGH, MEDIUM, LOW
+	CobolSource  string  // Program/paragraph reference
+	TargetSource string  // Service/file reference
+	Confidence   float64
+}
+
+// BusinessRequirement represents a generated business requirement derived from gaps.
+type BusinessRequirement struct {
+	ID                 string
+	Title              string
+	Description        string
+	Priority           string // P0, P1, P2, P3
+	Category           string
+	AcceptanceCriteria string // JSON-encoded []string
+	EstimatedEffort    string
+	GapID              string
+}
+
+// TargetStackResult aggregates extraction results for one target repo.
+type TargetStackResult struct {
+	Repo         TargetRepo
+	Services     []TargetService
+	Endpoints    []TargetEndpoint
+	Rules        []TargetBusinessRule
+	DataModels   []TargetDataModel
+	Integrations []TargetIntegration
+	ErrorHandlers []TargetErrorHandler
+	Relationships []Relationship
 }

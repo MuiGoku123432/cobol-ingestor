@@ -531,7 +531,16 @@ type DataFlowPathInfo struct {
 
 // Filter holds common query filters.
 type Filter struct {
-	Search string
+	Search   string
+	Codebase string // empty = all codebases
+}
+
+// CrossCodebaseCall holds a cross-codebase call relationship.
+type CrossCodebaseCall struct {
+	CallerID       string
+	CallerCodebase string
+	CalleeID       string
+	CalleeCodebase string
 }
 
 // JobStatus tracks an async ingestion job.

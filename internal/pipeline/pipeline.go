@@ -2,11 +2,15 @@ package pipeline
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
+	"errors"
 	"fmt"
 	"os"
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 
 	"cobol-ingestor/internal/cache"
 	"cobol-ingestor/internal/chunker"
@@ -17,9 +21,36 @@ import (
 	"cobol-ingestor/internal/parser"
 	"cobol-ingestor/internal/pool"
 	"cobol-ingestor/internal/scanner"
+	"cobol-ingestor/internal/static"
+	"cobol-ingestor/internal/validator"
 
 	"go.uber.org/zap"
 )
+
+// PipelineStats aggregates metrics across all pipeline passes.
+type PipelineStats struct {
+	Pass1Processed   atomic.Int64
+	Pass1Skipped     atomic.Int64
+	Pass1Failed      atomic.Int64
+	Pass2Processed   atomic.Int64
+	Pass2Skipped     atomic.Int64
+	Pass2Failed      atomic.Int64
+	Pass3Batches     atomic.Int64
+	Pass3Failed      atomic.Int64
+	ChunksTotal      atomic.Int64
+	ChunksCached     atomic.Int64
+	ChunksFailed     atomic.Int64
+	TruncationRetries atomic.Int64
+	PartialRecoveries atomic.Int64
+	LLMCalls         atomic.Int64
+}
+
+// multiRepairItem holds a program ID and the set of repair types it requires.
+// Used by repairCombined to batch multiple gap types into a single LLM call.
+type multiRepairItem struct {
+	pid   string
+	types []string
+}
 
 // Pipeline orchestrates the multi-pass COBOL analysis workflow.
 type Pipeline struct {
@@ -29,10 +60,31 @@ type Pipeline struct {
 	Writer      *n4j.BatchWriter
 	Cache       *cache.Cache
 	Logger      *zap.Logger
+	Stats       PipelineStats
+	Calibrator  *chunker.TokenCalibrator
+	Validator   *validator.Validator
 }
 
 // Run executes the pipeline for the specified pass (0=all, 1/2/3/4=individual).
 func (p *Pipeline) Run(ctx context.Context, scanResult *scanner.ScanResult, passFlag int) error {
+	// Apply config to package-level vars
+	if p.Config.Ingest.TokenEstimationRatio > 0 {
+		chunker.TokenEstimationRatio = p.Config.Ingest.TokenEstimationRatio
+	}
+	chunker.StripSequenceColumns = p.Config.Ingest.StripSequenceColumns
+	parser.SetLogger(p.Logger)
+
+	// Initialize token calibrator
+	if p.Calibrator == nil {
+		p.Calibrator = chunker.NewTokenCalibrator(200, p.Logger)
+	}
+	p.Claude.SetCalibrator(p.Calibrator)
+
+	// Initialize validator
+	if p.Validator == nil {
+		p.Validator = validator.New(p.Logger)
+	}
+
 	if passFlag == 0 || passFlag == 1 {
 		if err := p.RunPass1(ctx, scanResult); err != nil {
 			return fmt.Errorf("pass 1: %w", err)
@@ -42,6 +94,11 @@ func (p *Pipeline) Run(ctx context.Context, scanResult *scanner.ScanResult, pass
 			return fmt.Errorf("pass 1 JCL: %w", err)
 		}
 	}
+	// Static CHILD_OF extraction: deterministic data hierarchy from level numbers
+	if passFlag == 0 || passFlag == 1 {
+		p.runStaticDataHierarchy(ctx, scanResult)
+	}
+
 	// Mark external programs early so Pass 3 can exclude them
 	if passFlag == 0 || passFlag == 1 {
 		if fixed, err := p.Writer.FixDanglingCalls(ctx); err != nil {
@@ -83,6 +140,24 @@ func (p *Pipeline) Run(ctx context.Context, scanResult *scanner.ScanResult, pass
 			p.Logger.Warn("pass 5 validation/repair failed", zap.Error(err))
 		}
 	}
+
+	// Phase 7: Log pipeline stats summary
+	p.Logger.Info("pipeline stats summary",
+		zap.Int64("pass1_processed", p.Stats.Pass1Processed.Load()),
+		zap.Int64("pass1_skipped", p.Stats.Pass1Skipped.Load()),
+		zap.Int64("pass1_failed", p.Stats.Pass1Failed.Load()),
+		zap.Int64("pass2_processed", p.Stats.Pass2Processed.Load()),
+		zap.Int64("pass2_skipped", p.Stats.Pass2Skipped.Load()),
+		zap.Int64("pass2_failed", p.Stats.Pass2Failed.Load()),
+		zap.Int64("pass3_batches", p.Stats.Pass3Batches.Load()),
+		zap.Int64("pass3_failed", p.Stats.Pass3Failed.Load()),
+		zap.Int64("chunks_total", p.Stats.ChunksTotal.Load()),
+		zap.Int64("chunks_cached", p.Stats.ChunksCached.Load()),
+		zap.Int64("chunks_failed", p.Stats.ChunksFailed.Load()),
+		zap.Int64("truncation_retries", p.Stats.TruncationRetries.Load()),
+		zap.Int64("partial_recoveries", p.Stats.PartialRecoveries.Load()),
+		zap.Int64("llm_calls", p.Stats.LLMCalls.Load()),
+	)
 
 	return nil
 }
@@ -138,15 +213,84 @@ func (p *Pipeline) RunPass1(ctx context.Context, scanResult *scanner.ScanResult)
 		chunks = append(chunks, fileChunks...)
 	}
 
+	// Phase 4: Build content hashes for per-chunk caching
+	chunkHashes := make(map[string][]string) // filePath → []hash
+	for _, chunk := range chunks {
+		h := sha256.Sum256([]byte(chunk.Content))
+		hash := hex.EncodeToString(h[:])
+		chunkHashes[chunk.FileName] = append(chunkHashes[chunk.FileName], hash)
+	}
+
+	// Phase 4: Check for cached chunk results and filter out already-cached chunks
+	var uncachedChunks []chunker.Chunk
+	cachedResults := make(map[string]map[int]string) // filePath → chunkIndex → resultJSON
+
+	for _, chunk := range chunks {
+		p.Stats.ChunksTotal.Add(1)
+		if chunk.Total > 1 {
+			// Only use per-chunk cache for multi-chunk files
+			cached, err := p.Cache.LoadChunkResults(chunk.FileName, 1)
+			if err == nil && len(cached) > 0 {
+				hashes := chunkHashes[chunk.FileName]
+				// Check if this specific chunk is cached with matching hash
+				for _, cr := range cached {
+					if cr.ChunkIndex == chunk.Index && chunk.Index < len(hashes) && cr.ContentHash == hashes[chunk.Index] {
+						if cachedResults[chunk.FileName] == nil {
+							cachedResults[chunk.FileName] = make(map[int]string)
+						}
+						cachedResults[chunk.FileName][chunk.Index] = cr.ResultJSON
+						p.Stats.ChunksCached.Add(1)
+					}
+				}
+			}
+		}
+		if _, ok := cachedResults[chunk.FileName][chunk.Index]; !ok {
+			uncachedChunks = append(uncachedChunks, chunk)
+		}
+	}
+
+	if len(cachedResults) > 0 {
+		p.Logger.Info("pass 1: using cached chunk results",
+			zap.Int("cached_chunks", int(p.Stats.ChunksCached.Load())),
+			zap.Int("uncached_chunks", len(uncachedChunks)),
+		)
+	}
+
 	processFn := func(ctx context.Context, chunk chunker.Chunk) (*graph.Pass1Result, error) {
+		p.Stats.LLMCalls.Add(1)
 		jsonResp, err := p.Claude.AnalyzeStructural(ctx, chunk.FileName, chunk.Content)
 		if err != nil {
+			if errors.Is(err, claude.ErrResponseTruncated) {
+				p.Stats.TruncationRetries.Add(1)
+			}
+			// Even on truncation error, jsonResp may contain partial content
+			if jsonResp != "" {
+				result, parseErr := parser.ParsePass1Response(jsonResp, chunk.FileName)
+				if parseErr == nil && result.Partial {
+					p.Stats.PartialRecoveries.Add(1)
+					// Cache the partial result for multi-chunk files
+					if chunk.Total > 1 {
+						hashes := chunkHashes[chunk.FileName]
+						if chunk.Index < len(hashes) {
+							_ = p.Cache.SaveChunkResult(chunk.FileName, 1, chunk.Index, chunk.Total, hashes[chunk.Index], jsonResp)
+						}
+					}
+					return result, nil
+				}
+			}
 			return nil, fmt.Errorf("claude analysis: %w", err)
+		}
+		// Cache successful chunk result for multi-chunk files
+		if chunk.Total > 1 {
+			hashes := chunkHashes[chunk.FileName]
+			if chunk.Index < len(hashes) {
+				_ = p.Cache.SaveChunkResult(chunk.FileName, 1, chunk.Index, chunk.Total, hashes[chunk.Index], jsonResp)
+			}
 		}
 		return parser.ParsePass1Response(jsonResp, chunk.FileName)
 	}
 
-	resultsCh := pool.RunPass1(ctx, chunks, processFn, p.Config.Ingest.WorkersForPass(1), p.Logger)
+	resultsCh := pool.RunPass1(ctx, uncachedChunks, processFn, p.Config.Ingest.WorkersForPass(1), p.Logger)
 
 	// Accumulate multi-chunk results per file, write as soon as all chunks arrive.
 	// Single-chunk files (the common case) are written immediately.
@@ -155,9 +299,23 @@ func (p *Pipeline) RunPass1(ctx context.Context, scanResult *scanner.ScanResult)
 	successCount := 0
 	errorCount := 0
 
+	// Phase 4: Pre-populate pendingChunks with cached results
+	for filePath, cachedChunks := range cachedResults {
+		for chunkIdx, resultJSON := range cachedChunks {
+			result, err := parser.ParsePass1Response(resultJSON, filePath)
+			if err != nil {
+				p.Logger.Warn("pass 1: failed to parse cached chunk", zap.String("file", filePath), zap.Int("chunk", chunkIdx), zap.Error(err))
+				fileHasError[filePath] = true
+				continue
+			}
+			pendingChunks[filePath] = append(pendingChunks[filePath], result)
+		}
+	}
+
 	for r := range resultsCh {
 		if r.Err != nil {
 			errorCount++
+			p.Stats.ChunksFailed.Add(1)
 			fileHasError[r.FilePath] = true
 			continue
 		}
@@ -168,6 +326,7 @@ func (p *Pipeline) RunPass1(ctx context.Context, scanResult *scanner.ScanResult)
 			if err := p.Writer.WritePass1Result(ctx, r.Result); err != nil {
 				p.Logger.Error("failed to write to neo4j", zap.String("file", r.FilePath), zap.Error(err))
 				errorCount++
+				p.Stats.Pass1Failed.Add(1)
 				continue
 			}
 			if hash, ok := hashByPath[r.FilePath]; ok {
@@ -176,6 +335,7 @@ func (p *Pipeline) RunPass1(ctx context.Context, scanResult *scanner.ScanResult)
 				}
 			}
 			successCount++
+			p.Stats.Pass1Processed.Add(1)
 		} else {
 			// Multi-chunk file — accumulate and write when all chunks arrive
 			pendingChunks[r.FilePath] = append(pendingChunks[r.FilePath], r.Result)
@@ -185,6 +345,7 @@ func (p *Pipeline) RunPass1(ctx context.Context, scanResult *scanner.ScanResult)
 				if err := p.Writer.WritePass1Result(ctx, merged); err != nil {
 					p.Logger.Error("failed to write to neo4j", zap.String("file", r.FilePath), zap.Error(err))
 					errorCount++
+					p.Stats.Pass1Failed.Add(1)
 				} else {
 					if hash, ok := hashByPath[r.FilePath]; ok {
 						if err := p.Cache.MarkProcessed(r.FilePath, hash); err != nil {
@@ -192,9 +353,63 @@ func (p *Pipeline) RunPass1(ctx context.Context, scanResult *scanner.ScanResult)
 						}
 					}
 					successCount++
+					p.Stats.Pass1Processed.Add(1)
 				}
 				delete(pendingChunks, r.FilePath)
 			}
+		}
+	}
+
+	// Check for multi-chunk files where all cached chunks were ready (no LLM calls needed)
+	for filePath, results := range pendingChunks {
+		if fileHasError[filePath] {
+			continue
+		}
+		expected := chunksPerFile[filePath]
+		if len(results) == expected {
+			merged := graph.MergePass1Results(results)
+			if err := p.Writer.WritePass1Result(ctx, merged); err != nil {
+				p.Logger.Error("failed to write cached results to neo4j", zap.String("file", filePath), zap.Error(err))
+				errorCount++
+				p.Stats.Pass1Failed.Add(1)
+			} else {
+				if hash, ok := hashByPath[filePath]; ok {
+					if err := p.Cache.MarkProcessed(filePath, hash); err != nil {
+						p.Logger.Error("failed to update cache", zap.String("file", filePath), zap.Error(err))
+					}
+				}
+				successCount++
+				p.Stats.Pass1Processed.Add(1)
+			}
+		}
+	}
+
+	// Write partial results for multi-chunk files where some chunks failed
+	for filePath, results := range pendingChunks {
+		if !fileHasError[filePath] {
+			continue // already handled above
+		}
+		expected := chunksPerFile[filePath]
+		if len(results) == 0 {
+			continue // no successful chunks at all
+		}
+		p.Logger.Warn("pass 1: writing partial results for multi-chunk file",
+			zap.String("file", filePath),
+			zap.Int("successful_chunks", len(results)),
+			zap.Int("expected_chunks", expected),
+		)
+		merged := graph.MergePass1Results(results)
+		merged.Partial = true
+		if err := p.Writer.WritePass1Result(ctx, merged); err != nil {
+			p.Logger.Error("pass 1: failed to write partial results", zap.String("file", filePath), zap.Error(err))
+			p.Stats.Pass1Failed.Add(1)
+		} else {
+			if hash, ok := hashByPath[filePath]; ok {
+				if err := p.Cache.MarkPartiallyProcessed(filePath, hash); err != nil {
+					p.Logger.Error("pass 1: failed to mark partial cache", zap.String("file", filePath), zap.Error(err))
+				}
+			}
+			p.Stats.PartialRecoveries.Add(1)
 		}
 	}
 
@@ -302,30 +517,117 @@ func (p *Pipeline) RunPass2(ctx context.Context, scanResult *scanner.ScanResult)
 		contextPreambles[filePath] = n4j.FormatContextPreamble(pc)
 	}
 
+	// Phase 4: Build content hashes for per-chunk caching
+	pass2ChunkHashes := make(map[string][]string)
+	for _, chunk := range allChunks {
+		h := sha256.Sum256([]byte(chunk.Content))
+		hash := hex.EncodeToString(h[:])
+		pass2ChunkHashes[chunk.FileName] = append(pass2ChunkHashes[chunk.FileName], hash)
+	}
+
+	// Phase 4: Check for cached chunk results
+	var uncachedPass2Chunks []chunker.Chunk
+	cachedPass2Results := make(map[string]map[int]string)
+
+	for _, chunk := range allChunks {
+		p.Stats.ChunksTotal.Add(1)
+		if chunk.Total > 1 {
+			cached, err := p.Cache.LoadChunkResults(chunk.FileName, 2)
+			if err == nil && len(cached) > 0 {
+				hashes := pass2ChunkHashes[chunk.FileName]
+				for _, cr := range cached {
+					if cr.ChunkIndex == chunk.Index && chunk.Index < len(hashes) && cr.ContentHash == hashes[chunk.Index] {
+						if cachedPass2Results[chunk.FileName] == nil {
+							cachedPass2Results[chunk.FileName] = make(map[int]string)
+						}
+						cachedPass2Results[chunk.FileName][chunk.Index] = cr.ResultJSON
+						p.Stats.ChunksCached.Add(1)
+					}
+				}
+			}
+		}
+		if _, ok := cachedPass2Results[chunk.FileName][chunk.Index]; !ok {
+			uncachedPass2Chunks = append(uncachedPass2Chunks, chunk)
+		}
+	}
+
+	if len(cachedPass2Results) > 0 {
+		p.Logger.Info("pass 2: using cached chunk results",
+			zap.Int("cached_chunks", len(cachedPass2Results)),
+			zap.Int("uncached_chunks", len(uncachedPass2Chunks)),
+		)
+	}
+
 	pass2Fn := func(ctx context.Context, chunk chunker.Chunk) (*graph.Pass2Result, error) {
+		p.Stats.LLMCalls.Add(1)
 		preamble := contextPreambles[chunk.FileName]
 		jsonResp, err := p.Claude.AnalyzeDeep(ctx, chunk, preamble)
 		if err != nil {
+			if errors.Is(err, claude.ErrResponseTruncated) {
+				p.Stats.TruncationRetries.Add(1)
+			}
+			programID := fileProgramIDs[chunk.FileName]
+			if programID == "" {
+				programID = "UNKNOWN"
+			}
+			if jsonResp != "" {
+				result, parseErr := parser.ParsePass2Response(jsonResp, chunk.FileName, programID)
+				if parseErr == nil && result.Partial {
+					p.Stats.PartialRecoveries.Add(1)
+					if chunk.Total > 1 {
+						hashes := pass2ChunkHashes[chunk.FileName]
+						if chunk.Index < len(hashes) {
+							_ = p.Cache.SaveChunkResult(chunk.FileName, 2, chunk.Index, chunk.Total, hashes[chunk.Index], jsonResp)
+						}
+					}
+					return result, nil
+				}
+			}
 			return nil, fmt.Errorf("claude deep analysis: %w", err)
 		}
 		programID := fileProgramIDs[chunk.FileName]
 		if programID == "" {
 			programID = "UNKNOWN"
 		}
+		// Cache successful chunk result
+		if chunk.Total > 1 {
+			hashes := pass2ChunkHashes[chunk.FileName]
+			if chunk.Index < len(hashes) {
+				_ = p.Cache.SaveChunkResult(chunk.FileName, 2, chunk.Index, chunk.Total, hashes[chunk.Index], jsonResp)
+			}
+		}
 		return parser.ParsePass2Response(jsonResp, chunk.FileName, programID)
 	}
 
-	resultsCh := pool.RunPass2(ctx, allChunks, pass2Fn, p.Config.Ingest.WorkersForPass(2), p.Logger)
+	resultsCh := pool.RunPass2(ctx, uncachedPass2Chunks, pass2Fn, p.Config.Ingest.WorkersForPass(2), p.Logger)
 
 	// Stream results to Neo4j, merging multi-chunk files as they complete
-	pendingChunks := make(map[string][]*graph.Pass2Result)
+	pendingPass2Chunks := make(map[string][]*graph.Pass2Result)
 	fileHasError := make(map[string]bool)
 	successCount := 0
 	errorCount := 0
 
+	// Phase 4: Pre-populate with cached results
+	for filePath, cachedChunks := range cachedPass2Results {
+		programID := fileProgramIDs[filePath]
+		if programID == "" {
+			programID = "UNKNOWN"
+		}
+		for chunkIdx, resultJSON := range cachedChunks {
+			result, err := parser.ParsePass2Response(resultJSON, filePath, programID)
+			if err != nil {
+				p.Logger.Warn("pass 2: failed to parse cached chunk", zap.String("file", filePath), zap.Int("chunk", chunkIdx), zap.Error(err))
+				fileHasError[filePath] = true
+				continue
+			}
+			pendingPass2Chunks[filePath] = append(pendingPass2Chunks[filePath], result)
+		}
+	}
+
 	for cr := range resultsCh {
 		if cr.Err != nil {
 			errorCount++
+			p.Stats.ChunksFailed.Add(1)
 			fileHasError[cr.FileName] = true
 			continue
 		}
@@ -336,6 +638,7 @@ func (p *Pipeline) RunPass2(ctx context.Context, scanResult *scanner.ScanResult)
 			if err := p.Writer.WritePass2Result(ctx, cr.Result); err != nil {
 				p.Logger.Error("pass 2: failed to write to neo4j", zap.String("file", cr.FileName), zap.Error(err))
 				errorCount++
+				p.Stats.Pass2Failed.Add(1)
 				continue
 			}
 			if hash, ok := hashByPath[cr.FileName]; ok {
@@ -344,15 +647,17 @@ func (p *Pipeline) RunPass2(ctx context.Context, scanResult *scanner.ScanResult)
 				}
 			}
 			successCount++
+			p.Stats.Pass2Processed.Add(1)
 		} else {
 			// Multi-chunk file — accumulate and write when all chunks arrive
-			pendingChunks[cr.FileName] = append(pendingChunks[cr.FileName], cr.Result)
+			pendingPass2Chunks[cr.FileName] = append(pendingPass2Chunks[cr.FileName], cr.Result)
 
-			if len(pendingChunks[cr.FileName]) == expected && !fileHasError[cr.FileName] {
-				merged := graph.MergePass2Results(pendingChunks[cr.FileName])
+			if len(pendingPass2Chunks[cr.FileName]) == expected && !fileHasError[cr.FileName] {
+				merged := graph.MergePass2Results(pendingPass2Chunks[cr.FileName])
 				if err := p.Writer.WritePass2Result(ctx, merged); err != nil {
 					p.Logger.Error("pass 2: failed to write to neo4j", zap.String("file", cr.FileName), zap.Error(err))
 					errorCount++
+					p.Stats.Pass2Failed.Add(1)
 				} else {
 					if hash, ok := hashByPath[cr.FileName]; ok {
 						if err := p.Cache.MarkProcessedForPass(cr.FileName, hash, 2); err != nil {
@@ -360,9 +665,63 @@ func (p *Pipeline) RunPass2(ctx context.Context, scanResult *scanner.ScanResult)
 						}
 					}
 					successCount++
+					p.Stats.Pass2Processed.Add(1)
 				}
-				delete(pendingChunks, cr.FileName)
+				delete(pendingPass2Chunks, cr.FileName)
 			}
+		}
+	}
+
+	// Check for multi-chunk files where all cached chunks were ready
+	for filePath, results := range pendingPass2Chunks {
+		if fileHasError[filePath] {
+			continue
+		}
+		expected := chunksPerFile[filePath]
+		if len(results) == expected {
+			merged := graph.MergePass2Results(results)
+			if err := p.Writer.WritePass2Result(ctx, merged); err != nil {
+				p.Logger.Error("pass 2: failed to write cached results to neo4j", zap.String("file", filePath), zap.Error(err))
+				errorCount++
+				p.Stats.Pass2Failed.Add(1)
+			} else {
+				if hash, ok := hashByPath[filePath]; ok {
+					if err := p.Cache.MarkProcessedForPass(filePath, hash, 2); err != nil {
+						p.Logger.Error("pass 2: failed to update cache", zap.String("file", filePath), zap.Error(err))
+					}
+				}
+				successCount++
+				p.Stats.Pass2Processed.Add(1)
+			}
+		}
+	}
+
+	// Write partial results for multi-chunk files where some chunks failed
+	for filePath, results := range pendingPass2Chunks {
+		if !fileHasError[filePath] {
+			continue // already handled above
+		}
+		expected := chunksPerFile[filePath]
+		if len(results) == 0 {
+			continue // no successful chunks at all
+		}
+		p.Logger.Warn("pass 2: writing partial results for multi-chunk file",
+			zap.String("file", filePath),
+			zap.Int("successful_chunks", len(results)),
+			zap.Int("expected_chunks", expected),
+		)
+		merged := graph.MergePass2Results(results)
+		merged.Partial = true
+		if err := p.Writer.WritePass2Result(ctx, merged); err != nil {
+			p.Logger.Error("pass 2: failed to write partial results", zap.String("file", filePath), zap.Error(err))
+			p.Stats.Pass2Failed.Add(1)
+		} else {
+			if hash, ok := hashByPath[filePath]; ok {
+				if err := p.Cache.MarkPartiallyProcessed(filePath, hash); err != nil {
+					p.Logger.Error("pass 2: failed to mark partial cache", zap.String("file", filePath), zap.Error(err))
+				}
+			}
+			p.Stats.PartialRecoveries.Add(1)
 		}
 	}
 
@@ -607,7 +966,27 @@ func (p *Pipeline) RunPass4(ctx context.Context) error {
 		p.Logger.Warn("pass 4: shared DB2 flow detection failed", zap.Error(err))
 	}
 
-	// Step 3: LLM-assisted LINKAGE parameter mapping
+	// Step 3: Graph-only CICS LINK/XCTL flows
+	if err := p.Writer.DetectCICSFlows(ctx); err != nil {
+		p.Logger.Warn("pass 4: CICS flow detection failed", zap.Error(err))
+	}
+
+	// Step 4: Graph-only CICS TS/TD queue flows
+	if err := p.Writer.DetectCICSQueueFlows(ctx); err != nil {
+		p.Logger.Warn("pass 4: CICS queue flow detection failed", zap.Error(err))
+	}
+
+	// Step 5: Graph-only MQ queue flows
+	if err := p.Writer.DetectMQFlows(ctx); err != nil {
+		p.Logger.Warn("pass 4: MQ flow detection failed", zap.Error(err))
+	}
+
+	// Step 6: Graph-only JCL step sequence flows
+	if err := p.Writer.DetectJCLSequenceFlows(ctx); err != nil {
+		p.Logger.Warn("pass 4: JCL sequence flow detection failed", zap.Error(err))
+	}
+
+	// Step 7: LLM-assisted LINKAGE parameter mapping
 	callPairs, err := p.Neo4jClient.QueryCallPairsForPass4(ctx)
 	if err != nil {
 		p.Logger.Warn("pass 4: failed to query call pairs", zap.Error(err))
@@ -693,13 +1072,186 @@ func (p *Pipeline) RunPass4(ctx context.Context) error {
 		}
 	}
 
-	p.Logger.Info("pass 4 complete",
+	p.Logger.Info("pass 4 LINKAGE complete",
 		zap.Int("success", successCount),
 		zap.Int("errors", errorCount),
 		zap.Int("linkageFlows", len(pass4Result.Flows)),
 	)
 
+	// Step 8: LLM-assisted CICS COMMAREA field-level mapping
+	cicsPairs, cicsErr := p.Neo4jClient.QueryCICSPairsForPass4(ctx)
+	if cicsErr != nil {
+		p.Logger.Warn("pass 4: failed to query CICS pairs", zap.Error(cicsErr))
+	} else if len(cicsPairs) > 0 {
+		p.Logger.Info("pass 4: analyzing COMMAREA field mappings", zap.Int("cicsPairs", len(cicsPairs)))
+
+		commareaResult := &graph.Pass4Result{}
+		var commareaSuccess, commareaErrors int
+		var commareaMu sync.Mutex
+
+		commareaSem := make(chan struct{}, p.Config.Ingest.WorkersForPass(2))
+		var commareaWg sync.WaitGroup
+
+		for _, pair := range cicsPairs {
+			commareaWg.Add(1)
+			go func(pair n4j.CallPairContext) {
+				defer commareaWg.Done()
+				commareaSem <- struct{}{}
+				defer func() { <-commareaSem }()
+
+				if ctx.Err() != nil {
+					return
+				}
+
+				fieldContext := formatCommareaContext(pair)
+				jsonResp, err := p.Claude.AnalyzeCommareaFlow(ctx, pair.CallerID, pair.CalleeID, fieldContext)
+				if err != nil {
+					p.Logger.Warn("pass 4: COMMAREA analysis failed",
+						zap.String("caller", pair.CallerID),
+						zap.String("callee", pair.CalleeID),
+						zap.Error(err))
+					commareaMu.Lock()
+					commareaErrors++
+					commareaMu.Unlock()
+					return
+				}
+
+				fields, err := parser.ParsePass4Response(jsonResp)
+				if err != nil {
+					p.Logger.Warn("pass 4: COMMAREA parse failed",
+						zap.String("caller", pair.CallerID),
+						zap.String("callee", pair.CalleeID),
+						zap.Error(err))
+					commareaMu.Lock()
+					commareaErrors++
+					commareaMu.Unlock()
+					return
+				}
+
+				commareaMu.Lock()
+				if len(fields) > 0 {
+					commareaResult.Flows = append(commareaResult.Flows, graph.CrossProgramFlow{
+						FromProgram:    pair.CallerID,
+						ToProgram:      pair.CalleeID,
+						Channel:        "CICS_COMMAREA",
+						Fields:         fields,
+						SharedResource: "COMMAREA",
+					})
+				}
+				commareaSuccess++
+				commareaMu.Unlock()
+			}(pair)
+		}
+
+		commareaWg.Wait()
+
+		if len(commareaResult.Flows) > 0 {
+			if err := p.Writer.WritePass4Result(ctx, commareaResult); err != nil {
+				p.Logger.Warn("pass 4: COMMAREA result write failed", zap.Error(err))
+			}
+		}
+
+		p.Logger.Info("pass 4 COMMAREA complete",
+			zap.Int("success", commareaSuccess),
+			zap.Int("errors", commareaErrors),
+			zap.Int("commareaFlows", len(commareaResult.Flows)),
+		)
+	}
+
+	// Step 9: LLM-assisted shared file field-level enrichment
+	sharedFilePairs, sfErr := p.Neo4jClient.QuerySharedFilePairsWithCopybooks(ctx)
+	if sfErr != nil {
+		p.Logger.Warn("pass 4: failed to query shared file pairs", zap.Error(sfErr))
+	} else if len(sharedFilePairs) > 0 {
+		p.Logger.Info("pass 4: analyzing shared file field mappings", zap.Int("pairs", len(sharedFilePairs)))
+
+		fileFlowResult := &graph.Pass4Result{}
+		var fileFlowSuccess, fileFlowErrors int
+		var fileFlowMu sync.Mutex
+
+		fileFlowSem := make(chan struct{}, p.Config.Ingest.WorkersForPass(2))
+		var fileFlowWg sync.WaitGroup
+
+		for _, pair := range sharedFilePairs {
+			fileFlowWg.Add(1)
+			go func(pair n4j.SharedFilePairContext) {
+				defer fileFlowWg.Done()
+				fileFlowSem <- struct{}{}
+				defer func() { <-fileFlowSem }()
+
+				if ctx.Err() != nil {
+					return
+				}
+
+				jsonResp, err := p.Claude.AnalyzeFileFlow(ctx, pair.WriterID, pair.ReaderID, pair.FileName, pair.CopybookName)
+				if err != nil {
+					p.Logger.Warn("pass 4: file flow analysis failed",
+						zap.String("writer", pair.WriterID),
+						zap.String("reader", pair.ReaderID),
+						zap.Error(err))
+					fileFlowMu.Lock()
+					fileFlowErrors++
+					fileFlowMu.Unlock()
+					return
+				}
+
+				fields, err := parser.ParsePass4Response(jsonResp)
+				if err != nil {
+					p.Logger.Warn("pass 4: file flow parse failed",
+						zap.String("writer", pair.WriterID),
+						zap.String("reader", pair.ReaderID),
+						zap.Error(err))
+					fileFlowMu.Lock()
+					fileFlowErrors++
+					fileFlowMu.Unlock()
+					return
+				}
+
+				fileFlowMu.Lock()
+				if len(fields) > 0 {
+					fileFlowResult.Flows = append(fileFlowResult.Flows, graph.CrossProgramFlow{
+						FromProgram:    pair.WriterID,
+						ToProgram:      pair.ReaderID,
+						Channel:        "FILE",
+						Fields:         fields,
+						SharedResource: pair.FileName,
+					})
+				}
+				fileFlowSuccess++
+				fileFlowMu.Unlock()
+			}(pair)
+		}
+
+		fileFlowWg.Wait()
+
+		if len(fileFlowResult.Flows) > 0 {
+			if err := p.Writer.WritePass4Result(ctx, fileFlowResult); err != nil {
+				p.Logger.Warn("pass 4: file flow result write failed", zap.Error(err))
+			}
+		}
+
+		p.Logger.Info("pass 4 file flow enrichment complete",
+			zap.Int("success", fileFlowSuccess),
+			zap.Int("errors", fileFlowErrors),
+			zap.Int("fileFlows", len(fileFlowResult.Flows)),
+		)
+	}
+
+	p.Logger.Info("pass 4 complete")
 	return nil
+}
+
+// formatCommareaContext formats CICS pair context for the COMMAREA prompt.
+func formatCommareaContext(pair n4j.CallPairContext) string {
+	result := fmt.Sprintf("Caller WORKING-STORAGE fields (%s):\n", pair.CallerID)
+	for _, f := range pair.CallerFields {
+		result += fmt.Sprintf("  - %s (PIC: %s)\n", f.Name, f.Picture)
+	}
+	result += fmt.Sprintf("\nCallee LINKAGE SECTION / DFHCOMMAREA (%s):\n", pair.CalleeID)
+	for _, f := range pair.CalleeParams {
+		result += fmt.Sprintf("  - %s (PIC: %s)\n", f.Name, f.Picture)
+	}
+	return result
 }
 
 // formatFieldContext formats call pair context for the Pass 4 prompt.
@@ -736,31 +1288,63 @@ func (p *Pipeline) RunPass5(ctx context.Context, scanResult *scanner.ScanResult)
 		}
 	}
 
-	// Step 2: Fix Gap — Missing CALLS (repair before Pass 3 which needs call graph)
+	// Steps 2-4: Detect all repair needs and batch where possible
 	missingCalls, err := p.Neo4jClient.QueryProgramsMissingCalls(ctx)
 	if err != nil {
 		p.Logger.Warn("pass 5: failed to query missing CALLS", zap.Error(err))
-	} else if len(missingCalls) > 0 {
-		p.Logger.Info("pass 5: repairing CALLS gaps", zap.Int("count", len(missingCalls)))
-		p.repairRelationshipGap(ctx, missingCalls, "MISSING_CALLS")
 	}
-
-	// Step 3: Fix Gap — Missing CHILD_OF
 	missingChildOf, err := p.Neo4jClient.QueryProgramsMissingChildOf(ctx)
 	if err != nil {
 		p.Logger.Warn("pass 5: failed to query missing CHILD_OF", zap.Error(err))
-	} else if len(missingChildOf) > 0 {
-		p.Logger.Info("pass 5: repairing CHILD_OF gaps", zap.Int("count", len(missingChildOf)))
-		p.repairRelationshipGap(ctx, missingChildOf, "CHILD_OF")
 	}
-
-	// Step 4: Fix Gap — Missing MOVES_TO
 	missingMovesTo, err := p.Neo4jClient.QueryProgramsMissingMovesTo(ctx)
 	if err != nil {
 		p.Logger.Warn("pass 5: failed to query missing MOVES_TO", zap.Error(err))
-	} else if len(missingMovesTo) > 0 {
-		p.Logger.Info("pass 5: repairing MOVES_TO gaps", zap.Int("count", len(missingMovesTo)))
-		p.repairRelationshipGap(ctx, missingMovesTo, "MOVES_TO")
+	}
+
+	// Build per-program repair type map
+	repairNeeds := make(map[string][]string) // programID → []repairType
+	for _, pid := range missingCalls {
+		repairNeeds[pid] = append(repairNeeds[pid], "MISSING_CALLS")
+	}
+	for _, pid := range missingChildOf {
+		repairNeeds[pid] = append(repairNeeds[pid], "CHILD_OF")
+	}
+	for _, pid := range missingMovesTo {
+		repairNeeds[pid] = append(repairNeeds[pid], "MOVES_TO")
+	}
+
+	// Separate into single-type and multi-type repairs
+	type singleRepairItem struct {
+		pid        string
+		repairType string
+	}
+	var singleRepairs []singleRepairItem
+	var multiRepairs []multiRepairItem
+	for pid, types := range repairNeeds {
+		if len(types) == 1 {
+			singleRepairs = append(singleRepairs, singleRepairItem{pid, types[0]})
+		} else {
+			multiRepairs = append(multiRepairs, multiRepairItem{pid, types})
+		}
+	}
+
+	// Process multi-type repairs with combined calls
+	if len(multiRepairs) > 0 {
+		p.Logger.Info("pass 5: batching multi-type repairs", zap.Int("programs", len(multiRepairs)))
+		p.repairCombined(ctx, multiRepairs)
+	}
+
+	// Process single-type repairs with existing logic, grouped by type
+	singleByType := make(map[string][]string)
+	for _, sr := range singleRepairs {
+		singleByType[sr.repairType] = append(singleByType[sr.repairType], sr.pid)
+	}
+	for repairType, pids := range singleByType {
+		if len(pids) > 0 {
+			p.Logger.Info("pass 5: repairing gaps", zap.String("type", repairType), zap.Int("count", len(pids)))
+			p.repairRelationshipGap(ctx, pids, repairType)
+		}
 	}
 
 	// Step 5: Fix Gap — Dangling CALLS targets (graph-only, creates stub Programs)
@@ -784,6 +1368,9 @@ func (p *Pipeline) RunPass5(ctx context.Context, scanResult *scanner.ScanResult)
 		p.Logger.Info("pass 5: cleared false dead code flags", zap.Int("fixed", fixed))
 	}
 
+	// Step 5d: LLM-verified dead code — filter false positives from dead paragraph detection
+	p.verifyDeadParagraphs(ctx, scanResult)
+
 	// Step 6: Re-run Pass 3 for programs missing riskScore (needs relationships from steps 2-5)
 	missingPass3, err := p.Neo4jClient.QueryProgramsMissingPass3(ctx)
 	if err != nil {
@@ -801,6 +1388,9 @@ func (p *Pipeline) RunPass5(ctx context.Context, scanResult *scanner.ScanResult)
 	} else if merged > 0 {
 		p.Logger.Info("pass 5: merged duplicate domains", zap.Int("merged", merged))
 	}
+
+	// Step 7b: LLM-enhanced domain merge for ambiguous pairs (40-80% overlap)
+	p.mergeDomainCandidatesWithLLM(ctx)
 
 	// Step 8: Fix Gap — Unannotated paragraphs
 	unannotated, err := p.Neo4jClient.QueryUnannotatedParagraphs(ctx)
@@ -979,6 +1569,125 @@ func (p *Pipeline) repairRelationshipGap(ctx context.Context, programIDs []strin
 	wg.Wait()
 }
 
+// repairCombined sends a single combined repair prompt for programs needing multiple repair types.
+// On LLM or parse failure it falls back to individual repairRelationshipGap calls per type.
+func (p *Pipeline) repairCombined(ctx context.Context, repairs []multiRepairItem) {
+	sem := make(chan struct{}, p.pass5Workers())
+	var wg sync.WaitGroup
+
+	for _, repair := range repairs {
+		wg.Add(1)
+		go func(pid string, types []string) {
+			defer wg.Done()
+			sem <- struct{}{}
+			defer func() { <-sem }()
+
+			if ctx.Err() != nil {
+				return
+			}
+
+			filePath, err := p.Neo4jClient.GetProgramFilePath(ctx, pid)
+			if err != nil || filePath == "" {
+				p.Logger.Debug("pass 5: skipping combined repair (no source file)", zap.String("program", pid))
+				return
+			}
+
+			sourceCode, err := os.ReadFile(filePath)
+			if err != nil {
+				p.Logger.Debug("pass 5: cannot read source file", zap.String("file", filePath), zap.Error(err))
+				return
+			}
+
+			tokenBudget := p.Config.Ingest.Pass2TokenLimit
+			if tokenBudget <= 0 {
+				tokenBudget = p.Config.Ingest.TokenLimit
+			}
+			// Combined repairs always need DATA + PROCEDURE divisions
+			trimmedSource := truncateForRepair(string(sourceCode), tokenBudget, "CHILD_OF")
+
+			combinedType := strings.Join(types, "+")
+			jsonResp, err := p.Claude.AnalyzeRepair(ctx, combinedType, pid, "", trimmedSource, "")
+			if err != nil {
+				p.Logger.Warn("pass 5: combined repair LLM call failed",
+					zap.String("program", pid),
+					zap.String("repairTypes", combinedType),
+					zap.Error(err))
+				// Fall back to individual repairs
+				for _, rt := range types {
+					p.repairRelationshipGap(ctx, []string{pid}, rt)
+				}
+				return
+			}
+
+			// Parse each repair type's section from the combined response
+			var allRels []graph.Relationship
+			parseSuccess := true
+
+			for _, rt := range types {
+				var rels []graph.Relationship
+				var parseErr error
+				switch rt {
+				case "CHILD_OF":
+					rels, parseErr = parser.ParseRepairChildOf(jsonResp, pid)
+				case "MOVES_TO":
+					rels, parseErr = parser.ParseRepairMovesTo(jsonResp, pid)
+				case "MISSING_CALLS":
+					rels, parseErr = parser.ParseRepairCalls(jsonResp, pid)
+				}
+				if parseErr != nil {
+					p.Logger.Warn("pass 5: combined repair parse failed for type",
+						zap.String("program", pid),
+						zap.String("repairType", rt),
+						zap.Error(parseErr))
+					parseSuccess = false
+					break
+				}
+				allRels = append(allRels, rels...)
+			}
+
+			if !parseSuccess {
+				// Fall back to individual repairs
+				for _, rt := range types {
+					p.repairRelationshipGap(ctx, []string{pid}, rt)
+				}
+				return
+			}
+
+			// Ensure DataItem nodes exist before writing CHILD_OF relationships
+			for _, rt := range types {
+				if rt == "CHILD_OF" {
+					var childOfRels []graph.Relationship
+					for _, r := range allRels {
+						if r.Type == graph.RelChildOf {
+							childOfRels = append(childOfRels, r)
+						}
+					}
+					if len(childOfRels) > 0 {
+						p.ensureDataItemNodesForRepair(ctx, pid, childOfRels)
+					}
+					break
+				}
+			}
+
+			if len(allRels) > 0 {
+				if err := p.writeRepairRelationships(ctx, allRels); err != nil {
+					p.Logger.Warn("pass 5: combined repair write failed",
+						zap.String("program", pid),
+						zap.Error(err))
+				} else {
+					p.Logger.Info("pass 5: combined repair succeeded",
+						zap.String("program", pid),
+						zap.String("types", combinedType),
+						zap.Int("relationships", len(allRels)),
+					)
+				}
+			}
+		}(repair.pid, repair.types)
+	}
+
+	wg.Wait()
+}
+
 // repairAnnotations sends annotation repair prompts for programs with unannotated paragraphs.
 func (p *Pipeline) repairAnnotations(ctx context.Context, unannotated map[string][]string) {
 	sem := make(chan struct{}, p.pass5Workers())
@@ -1066,9 +1775,12 @@ func truncateForRepair(sourceCode string, tokenBudget int, repairType string) st
 	divs := chunker.SplitDivisions(sourceCode)
 
 	var trimmed string
-	switch repairType {
-	case "CHILD_OF", "MOVES_TO", "ANNOTATIONS":
+	switch {
+	case repairType == "CHILD_OF" || repairType == "MOVES_TO" || repairType == "ANNOTATIONS":
 		// These need DATA DIVISION context too
+		trimmed = divs["DATA"] + "\n" + divs["PROCEDURE"]
+	case strings.Contains(repairType, "CHILD_OF") || strings.Contains(repairType, "MOVES_TO"):
+		// Combined repair types that include data-flow repair also need DATA DIVISION
 		trimmed = divs["DATA"] + "\n" + divs["PROCEDURE"]
 	default:
 		// MISSING_CALLS only needs PROCEDURE
@@ -1178,6 +1890,79 @@ func mergeKeyForLabel(label string) string {
 	}
 }
 
+// runStaticDataHierarchy extracts CHILD_OF relationships deterministically from COBOL
+// level numbers, eliminating the need for LLM-based CHILD_OF repair in Pass 5.
+func (p *Pipeline) runStaticDataHierarchy(ctx context.Context, scanResult *scanner.ScanResult) {
+	var totalRels int
+	var filesProcessed int
+
+	for _, f := range scanResult.Files {
+		if f.Type != graph.FileTypeCOBOL {
+			continue
+		}
+
+		data, err := os.ReadFile(f.Path)
+		if err != nil {
+			continue
+		}
+
+		content := string(data)
+		if chunker.StripSequenceColumns {
+			content = chunker.SplitDivisions(content)["DATA"]
+		} else {
+			content = chunker.SplitDivisions(content)["DATA"]
+		}
+
+		if content == "" {
+			continue
+		}
+
+		// Look up program ID from Neo4j
+		session := p.Neo4jClient.NewSession(ctx)
+		result, err := session.Run(ctx,
+			"MATCH (prog:Program {filePath: $path}) RETURN prog.programId AS pid LIMIT 1",
+			map[string]any{"path": f.Path},
+		)
+		var programID string
+		if err == nil && result.Next(ctx) {
+			if pid, ok := result.Record().Get("pid"); ok {
+				programID, _ = pid.(string)
+			}
+		}
+		session.Close(ctx)
+
+		if programID == "" {
+			continue
+		}
+
+		rels := static.ExtractDataHierarchy(content, programID)
+		if len(rels) == 0 {
+			continue
+		}
+
+		// Ensure DataItem nodes exist
+		p.ensureDataItemNodesForRepair(ctx, programID, rels)
+
+		// Write CHILD_OF relationships
+		if err := p.writeRepairRelationships(ctx, rels); err != nil {
+			p.Logger.Warn("static CHILD_OF write failed",
+				zap.String("program", programID),
+				zap.Error(err))
+			continue
+		}
+
+		totalRels += len(rels)
+		filesProcessed++
+	}
+
+	if totalRels > 0 {
+		p.Logger.Info("static data hierarchy extraction complete",
+			zap.Int("files", filesProcessed),
+			zap.Int("child_of_relationships", totalRels),
+		)
+	}
+}
+
 // processPass3Batch runs Claude analysis and writes results for a batch of program slices.
 func (p *Pipeline) processPass3Batch(ctx context.Context, slices []n4j.ProgramSlice, orphans, hubs []string, existingDomains string) error {
 	graphText := n4j.FormatGraphSlice(slices, orphans, hubs)
@@ -1197,4 +1982,176 @@ func (p *Pipeline) processPass3Batch(ctx context.Context, slices []n4j.ProgramSl
 	}
 
 	return nil
+}
+
+// verifyDeadParagraphs uses LLM to verify that flagged dead paragraphs are truly unreachable.
+func (p *Pipeline) verifyDeadParagraphs(ctx context.Context, scanResult *scanner.ScanResult) {
+	deadSummary, err := p.Neo4jClient.GetDeadCodeSummary(ctx)
+	if err != nil {
+		p.Logger.Warn("pass 5: failed to get dead code summary for verification", zap.Error(err))
+		return
+	}
+
+	if len(deadSummary) == 0 {
+		return
+	}
+
+	p.Logger.Info("pass 5: verifying dead paragraphs with LLM", zap.Int("programs", len(deadSummary)))
+
+	totalCleared := 0
+	sem := make(chan struct{}, p.Config.Ingest.WorkersForPass(5))
+	var wg sync.WaitGroup
+	var mu sync.Mutex
+
+	for _, ds := range deadSummary {
+		wg.Add(1)
+		go func(programID string) {
+			defer wg.Done()
+			sem <- struct{}{}
+			defer func() { <-sem }()
+
+			if ctx.Err() != nil {
+				return
+			}
+
+			// Get dead paragraphs for this program
+			deadParas, err := p.Neo4jClient.GetDeadParagraphs(ctx, programID)
+			if err != nil || len(deadParas) == 0 {
+				return
+			}
+
+			// Build paragraph list for prompt
+			var paraList string
+			for _, dp := range deadParas {
+				paraList += fmt.Sprintf("- %s", dp.Name)
+				if dp.Description != "" {
+					paraList += fmt.Sprintf(" (%s)", dp.Description)
+				}
+				paraList += "\n"
+			}
+
+			// Get source code
+			filePath, _ := p.Neo4jClient.GetProgramFilePath(ctx, programID)
+			var sourceCode string
+			if filePath != "" {
+				if data, readErr := os.ReadFile(filePath); readErr == nil {
+					sourceCode = string(data)
+					// Truncate to avoid exceeding token limits
+					if len(sourceCode) > 50000 {
+						sourceCode = sourceCode[:50000] + "\n... (truncated)"
+					}
+				}
+			}
+
+			if sourceCode == "" {
+				return // Can't verify without source code
+			}
+
+			jsonResp, err := p.Claude.VerifyDeadParagraphs(ctx, programID, paraList, sourceCode)
+			if err != nil {
+				p.Logger.Warn("pass 5: dead code verification failed",
+					zap.String("program", programID), zap.Error(err))
+				return
+			}
+
+			verdicts, err := parser.ParseDeadCodeVerification(jsonResp)
+			if err != nil {
+				p.Logger.Warn("pass 5: dead code verification parse failed",
+					zap.String("program", programID), zap.Error(err))
+				return
+			}
+
+			// Collect false positives
+			var falsePositives []string
+			for _, v := range verdicts {
+				if v.IsFalsePositive {
+					falsePositives = append(falsePositives, v.ParagraphName)
+				}
+			}
+
+			if len(falsePositives) > 0 {
+				cleared, err := p.Writer.UnmarkFalsePositives(ctx, programID, falsePositives)
+				if err != nil {
+					p.Logger.Warn("pass 5: unmark false positives failed",
+						zap.String("program", programID), zap.Error(err))
+					return
+				}
+				mu.Lock()
+				totalCleared += cleared
+				mu.Unlock()
+			}
+		}(ds.ProgramID)
+	}
+
+	wg.Wait()
+
+	if totalCleared > 0 {
+		p.Logger.Info("pass 5: LLM dead code verification cleared false positives",
+			zap.Int("cleared", totalCleared))
+	}
+}
+
+// mergeDomainCandidatesWithLLM uses LLM to evaluate ambiguous domain pairs (40-80% overlap).
+func (p *Pipeline) mergeDomainCandidatesWithLLM(ctx context.Context) {
+	candidates, err := p.Writer.QueryDomainMergeCandidates(ctx)
+	if err != nil {
+		p.Logger.Warn("pass 5: failed to query domain merge candidates", zap.Error(err))
+		return
+	}
+
+	if len(candidates) == 0 {
+		return
+	}
+
+	p.Logger.Info("pass 5: evaluating ambiguous domain pairs with LLM", zap.Int("pairs", len(candidates)))
+
+	// Build context for prompt
+	var pairsContext string
+	for _, c := range candidates {
+		pairsContext += fmt.Sprintf("- Domain 1: %q (%d programs)\n  Domain 2: %q (%d programs)\n  Shared programs: %d (%.0f%% overlap)\n  Shared: %s\n\n",
+			c.Name1, c.Size1, c.Name2, c.Size2, c.Shared,
+			float64(c.Shared)/float64(min(c.Size1, c.Size2))*100,
+			c.SharedPrograms)
+	}
+
+	jsonResp, err := p.Claude.AnalyzeDomainMerge(ctx, pairsContext)
+	if err != nil {
+		p.Logger.Warn("pass 5: domain merge LLM analysis failed", zap.Error(err))
+		return
+	}
+
+	decisions, err := parser.ParseDomainMergeDecisions(jsonResp)
+	if err != nil {
+		p.Logger.Warn("pass 5: domain merge parse failed", zap.Error(err))
+		return
+	}
+
+	merged := 0
+	for _, d := range decisions {
+		if !d.ShouldMerge {
+			continue
+		}
+		keepName := d.KeepDomain
+		mergeName := d.Domain1
+		if mergeName == keepName {
+			mergeName = d.Domain2
+		}
+
+		if err := p.Writer.MergeDomainPair(ctx, keepName, mergeName); err != nil {
+			p.Logger.Warn("pass 5: LLM-directed domain merge failed",
+				zap.String("keep", keepName),
+				zap.String("merge", mergeName),
+				zap.Error(err))
+			continue
+		}
+		merged++
+		p.Logger.Info("pass 5: LLM-directed domain merge",
+			zap.String("keep", keepName),
+			zap.String("merge", mergeName),
+			zap.String("reason", d.Reason))
+	}
+
+	if merged > 0 {
+		p.Logger.Info("pass 5: LLM domain merges complete", zap.Int("merged", merged))
+	}
 }

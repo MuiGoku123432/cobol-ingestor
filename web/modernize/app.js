@@ -161,9 +161,14 @@ let isStreaming = false;
 let migrationMode = true;
 let swarmEnabled = false;
 let multiRoundEnabled = false;
+let gapAnalysisEnabled = false;
+let unlimitedIterationsEnabled = false;
 let messageCounter = 0;
 let activeSessionId = localStorage.getItem('activeSessionId') || null;
 let sessions = [];
+let swarmElements = [];   // swarm DOM elements to collapse when synthesis arrives
+let statusBubbles = [];   // ephemeral status wrappers to remove on first text
+let currentAbortController = null;
 
 function toggleMigrationMode() {
   migrationMode = !migrationMode;
@@ -188,9 +193,13 @@ function toggleMigrationMode() {
 function updatePlaceholder() {
   const sub = document.getElementById("chatPlaceholderSub");
   if (sub) {
-    sub.textContent = migrationMode
-      ? "I'll use the graph database to understand and translate them"
-      : "I'll use the graph database to explore and understand them";
+    if (gapAnalysisEnabled) {
+      sub.textContent = "I'll compare your COBOL mainframe logic against the target stack to find gaps";
+    } else if (migrationMode) {
+      sub.textContent = "I'll use the graph database to understand and translate them";
+    } else {
+      sub.textContent = "I'll use the graph database to explore and understand them";
+    }
   }
 }
 
@@ -203,6 +212,8 @@ function toggleSwarm() {
     toggle.classList.add("swarm-active");
     thumb.classList.add("swarm-thumb");
     document.getElementById("multiRoundContainer").classList.remove("hidden");
+    // Swarm and gap analysis are mutually exclusive
+    if (gapAnalysisEnabled) toggleGapAnalysis();
   } else {
     toggle.classList.remove("swarm-active");
     thumb.classList.remove("swarm-thumb");
@@ -224,6 +235,45 @@ function toggleMultiRound() {
     toggle.classList.remove("swarm-active");
     thumb.classList.remove("swarm-thumb");
   }
+}
+
+function toggleUnlimited() {
+  unlimitedIterationsEnabled = !unlimitedIterationsEnabled;
+  const toggle = document.getElementById("unlimitedToggle");
+  const thumb = document.getElementById("unlimitedToggleThumb");
+  toggle.setAttribute("aria-checked", unlimitedIterationsEnabled);
+  if (unlimitedIterationsEnabled) {
+    toggle.classList.add("bg-amber-600");
+    toggle.classList.remove("bg-gray-700");
+    thumb.classList.add("translate-x-5", "bg-white");
+    thumb.classList.remove("bg-gray-400");
+  } else {
+    toggle.classList.remove("bg-amber-600");
+    toggle.classList.add("bg-gray-700");
+    thumb.classList.remove("translate-x-5", "bg-white");
+    thumb.classList.add("bg-gray-400");
+  }
+}
+
+function toggleGapAnalysis() {
+  gapAnalysisEnabled = !gapAnalysisEnabled;
+  const toggle = document.getElementById("gapToggle");
+  const thumb = document.getElementById("gapToggleThumb");
+  toggle.setAttribute("aria-checked", gapAnalysisEnabled);
+  if (gapAnalysisEnabled) {
+    toggle.classList.add("bg-emerald-600");
+    toggle.classList.remove("bg-gray-700");
+    thumb.classList.add("translate-x-5", "bg-white");
+    thumb.classList.remove("bg-gray-400");
+    // Gap analysis and swarm are mutually exclusive
+    if (swarmEnabled) toggleSwarm();
+  } else {
+    toggle.classList.remove("bg-emerald-600");
+    toggle.classList.add("bg-gray-700");
+    thumb.classList.remove("translate-x-5", "bg-white");
+    thumb.classList.add("bg-gray-400");
+  }
+  updatePlaceholder();
 }
 
 // Framework options per language
@@ -279,9 +329,29 @@ function addMessage(role, html) {
   bubble.innerHTML = html;
 
   wrapper.appendChild(bubble);
+  if (role === "assistant") {
+    wrapper.classList.add("group", "relative");
+    wrapper.appendChild(createCopyButton(bubble));
+  }
   container.appendChild(wrapper);
   container.scrollTop = container.scrollHeight;
   return bubble;
+}
+
+function createCopyButton(bubble) {
+  const btn = document.createElement("button");
+  btn.className = "copy-btn text-gray-500 hover:text-indigo-400 cursor-pointer";
+  btn.title = "Copy to clipboard";
+  btn.innerHTML = `<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="9" y="9" width="13" height="13" rx="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/></svg>`;
+  btn.addEventListener("click", () => {
+    navigator.clipboard.writeText(bubble.innerText).then(() => {
+      btn.innerHTML = `<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="20 6 9 17 4 12"/></svg>`;
+      setTimeout(() => {
+        btn.innerHTML = `<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="9" y="9" width="13" height="13" rx="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/></svg>`;
+      }, 1500);
+    });
+  });
+  return btn;
 }
 
 function addToolIndicator(name, id) {
@@ -371,6 +441,41 @@ function appendAgentDetail(id, html) {
   const entry = document.createElement("div");
   entry.innerHTML = html;
   detail.appendChild(entry);
+}
+
+function collapseSwarmArtifacts() {
+  if (swarmElements.length === 0) return;
+  const container = document.getElementById("chatMessages");
+
+  const details = document.createElement("details");
+  details.className = "my-2 rounded-lg border border-gray-700 bg-gray-900/50 text-xs";
+  const summary = document.createElement("summary");
+  summary.className = "px-3 py-2 text-gray-400 cursor-pointer hover:text-gray-200 select-none";
+
+  const agentCount = swarmElements.filter(el => el.classList && el.classList.contains("agent-card") && !el.classList.contains("border-indigo-800")).length;
+  summary.textContent = agentCount > 0
+    ? `${agentCount} agent${agentCount !== 1 ? "s" : ""} investigated — click to expand`
+    : "Investigation details — click to expand";
+
+  details.appendChild(summary);
+
+  const wrapper = document.createElement("div");
+  wrapper.className = "px-2 pb-2 space-y-1";
+  for (const el of swarmElements) {
+    el.querySelectorAll(".pulse-dot").forEach(dot => {
+      dot.classList.remove("pulse-dot", "bg-amber-400", "bg-indigo-400");
+      dot.classList.add("bg-gray-600");
+    });
+    el.querySelectorAll(".animate-pulse").forEach(p => p.classList.remove("animate-pulse"));
+    if (el.parentNode) wrapper.appendChild(el);
+  }
+  details.appendChild(wrapper);
+
+  // Insert before the last child (the new assistant response bubble)
+  const lastChild = container.lastElementChild;
+  container.insertBefore(details, lastChild);
+
+  swarmElements = [];
 }
 
 function escapeHtml(text) {
@@ -526,15 +631,25 @@ async function sendMessage(e) {
   input.value = "";
   setLoading(true);
 
+  swarmElements = [];
+  statusBubbles = [];
+  currentAbortController = new AbortController();
+
   let assistantBubble = null;
   let assistantText = "";
 
   try {
-    const endpoint = swarmEnabled ? "/api/swarm" : "/api/chat";
-    const response = await fetch(endpoint, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
+    let endpoint, body;
+    if (gapAnalysisEnabled) {
+      endpoint = "/api/gap-analysis";
+      body = JSON.stringify({
+        messages: messages,
+        sessionId: activeSessionId || '',
+        multiRound: multiRoundEnabled,
+      });
+    } else {
+      endpoint = swarmEnabled ? "/api/swarm" : "/api/chat";
+      body = JSON.stringify({
         messages: messages,
         targetLanguage: migrationMode ? langSelect.value : "",
         framework: migrationMode ? fwSelect.value : "",
@@ -542,7 +657,14 @@ async function sendMessage(e) {
         discoveryMode: !migrationMode,
         sessionId: activeSessionId || '',
         multiRound: swarmEnabled && multiRoundEnabled,
-      }),
+        unlimitedIterations: unlimitedIterationsEnabled,
+      });
+    }
+    const response = await fetch(endpoint, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body,
+      signal: currentAbortController.signal,
     });
 
     if (!response.ok) {
@@ -580,12 +702,31 @@ async function sendMessage(e) {
         data = dataStr;
       }
 
+      // Normalize gap analysis events: {agent: name} → {id: slugified-name, name: name}
+      // and content event → text event
+      if (event === "content" && data.text !== undefined) {
+        event = "text";
+        data = { content: data.text };
+      }
+      if ((event === "agent_start" || event === "agent_complete" || event === "agent_tool_start" || event === "agent_tool_result") && data.agent && !data.id) {
+        const agentId = data.agent.toLowerCase().replace(/\s+/g, "-");
+        data = { ...data, id: agentId, name: data.agent, toolName: data.tool, summary: data.status === "error" ? "Error" : "" };
+      }
+      if (event === "coordinator_start") {
+        const bubble = addMessage("assistant", '<span class="text-emerald-400 text-sm animate-pulse">Gap analysis coordinator synthesizing findings...</span>');
+        statusBubbles.push(bubble.parentElement);
+        return;
+      }
+
       switch (event) {
         case "text":
           assistantText += data.content || "";
           const rendered = marked.parse(assistantText);
           if (!assistantBubble) {
+            statusBubbles.forEach(el => el.remove());
+            statusBubbles = [];
             assistantBubble = addMessage("assistant", rendered);
+            collapseSwarmArtifacts();
           } else {
             assistantBubble.innerHTML = rendered;
           }
@@ -598,9 +739,13 @@ async function sendMessage(e) {
           });
           break;
 
-        case "tool_start":
-          addToolIndicator(data.name, `${messageCounter}-${data.id}`);
+        case "tool_start": {
+          const toolId = `${messageCounter}-${data.id}`;
+          addToolIndicator(data.name, toolId);
+          const toolEl = document.getElementById(`tool-${toolId}`);
+          if (toolEl) swarmElements.push(toolEl);
           break;
+        }
 
         case "tool_result":
           updateToolIndicator(
@@ -610,9 +755,13 @@ async function sendMessage(e) {
           );
           break;
 
-        case "agent_start":
-          addAgentCard(`${messageCounter}-${data.id}`, data.name);
+        case "agent_start": {
+          const agentCardId = `${messageCounter}-${data.id}`;
+          addAgentCard(agentCardId, data.name);
+          const agentEl = document.getElementById(`agent-${agentCardId}`);
+          if (agentEl) swarmElements.push(agentEl);
           break;
+        }
 
         case "agent_tool_start":
           updateAgentCard(`${messageCounter}-${data.id}`, `Calling ${data.toolName}...`, false, false);
@@ -631,32 +780,44 @@ async function sendMessage(e) {
           break;
 
         case "agent_complete":
-          updateAgentCard(`${messageCounter}-${data.id}`, "Complete", true, (data.summary || "").startsWith("Error:"));
+          updateAgentCard(`${messageCounter}-${data.id}`, "Complete", true, (data.summary || "").startsWith("Error:") || data.status === "error");
           break;
 
-        case "round_start":
-          addRoundDivider(`${messageCounter}-${data.round}`, data.maxRounds);
+        case "round_start": {
+          const roundKey = `${messageCounter}-${data.round}`;
+          addRoundDivider(roundKey, data.maxRounds);
+          const roundEl = document.getElementById(`round-divider-${roundKey}`);
+          if (roundEl) swarmElements.push(roundEl);
           break;
+        }
 
         case "round_complete":
           updateRoundDivider(`${messageCounter}-${data.round}`);
           break;
 
-        case "coordinator_decision":
-          addCoordinatorDecision(`${messageCounter}-${data.round}`, data.satisfied, data.reasoning, data.followUps);
+        case "coordinator_decision": {
+          const coordCard = addCoordinatorDecision(`${messageCounter}-${data.round}`, data.satisfied, data.reasoning, data.followUps);
+          if (coordCard) swarmElements.push(coordCard);
           break;
+        }
 
-        case "coordinator_tool_start":
-          addToolIndicator(data.toolName, `${messageCounter}-${data.toolId}`);
+        case "coordinator_tool_start": {
+          const ctoolId = `${messageCounter}-${data.toolId}`;
+          addToolIndicator(data.toolName, ctoolId);
+          const ctoolEl = document.getElementById(`tool-${ctoolId}`);
+          if (ctoolEl) swarmElements.push(ctoolEl);
           break;
+        }
 
         case "coordinator_tool_result":
           updateToolIndicator(`${messageCounter}-${data.toolId}`, data.result, false);
           break;
 
-        case "synthesis_start":
-          addMessage("assistant", '<span class="text-indigo-400 text-sm">Compiling results from all agents...</span>');
+        case "synthesis_start": {
+          const synthBubble = addMessage("assistant", '<span class="text-indigo-400 text-sm">Compiling results from all agents...</span>');
+          statusBubbles.push(synthBubble.parentElement);
           break;
+        }
 
         case "session_created":
           activeSessionId = data.id;
@@ -680,16 +841,31 @@ async function sendMessage(e) {
       }
     }
   } catch (err) {
-    addMessage(
-      "assistant",
-      `<span class="text-red-400">Connection error: ${escapeHtml(err.message)}</span>`
-    );
+    if (err.name !== "AbortError") {
+      addMessage(
+        "assistant",
+        `<span class="text-red-400">Connection error: ${escapeHtml(err.message)}</span>`
+      );
+    }
   } finally {
+    // Stop any remaining pulse animations (handles error/disconnect mid-stream)
+    document.querySelectorAll('#chatMessages .pulse-dot').forEach(dot => {
+      dot.classList.remove('pulse-dot', 'bg-amber-400', 'bg-indigo-400');
+      dot.classList.add('bg-gray-600');
+    });
+    document.querySelectorAll('#chatMessages .animate-pulse').forEach(el => {
+      el.classList.remove('animate-pulse');
+    });
+    statusBubbles.forEach(el => el.remove());
+    statusBubbles = [];
+    swarmElements = [];
+    currentAbortController = null;
     setLoading(false);
   }
 }
 
 function clearChat() {
+  currentAbortController?.abort();
   createSession();
 }
 
@@ -745,4 +921,5 @@ function addCoordinatorDecision(round, satisfied, reasoning, followUps) {
   `;
   container.appendChild(card);
   container.scrollTop = container.scrollHeight;
+  return card;
 }

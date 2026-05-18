@@ -1,0 +1,48 @@
+# Desktop app — not needed for API server image
+cmd/desktop/
+
+# Build artifacts
+bin/
+output/
+*.exe
+*.test
+*.out
+
+# Config / secrets
+.env
+.env.backup
+
+# Git / CI
+.git
+.gitignore
+azure-pipelines.yaml
+docker-compose.yml
+
+# Documentation
+*.md
+
+# OS files
+**/.DS_Store
+
+# Logs
+*.log
+
+# Test directories
+bw-test/
+test-d1/
+
+# Scripts
+run-bw.sh
+run.sh
+start-colima.sh
+test.sh
+
+# API docs (regenerated)
+api/docs/
+
+# Cache / data
+cache.sqlite
+cache-bw.sqlite
+
+# Tools / config
+opencode.json

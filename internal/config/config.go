@@ -11,25 +11,47 @@ import (
 )
 
 type Config struct {
-	DataDir    string // COBOL_GRAPH_DATA_DIR — base directory for persistent data (default ~/.cobol-graph)
-	LLM        LLMConfig
-	Claude     ClaudeConfig
-	Neo4j      Neo4jConfig
-	Ingest     IngestConfig
-	API        APIConfig
-	MCP        MCPConfig
-	Modernize  ModernizeConfig
-	ExternalDB ExternalDBConfig
-	BW         BWConfig
+	DataDir     string // COBOL_GRAPH_DATA_DIR — base directory for persistent data (default ~/.cobol-graph)
+	LLM         LLMConfig
+	Claude      ClaudeConfig
+	Neo4j       Neo4jConfig
+	Ingest      IngestConfig
+	API         APIConfig
+	MCP         MCPConfig
+	Modernize   ModernizeConfig
+	ExternalDB  ExternalDBConfig
+	BW          BWConfig
+	TargetStack TargetStackConfig
+}
+
+// TargetStackConfig holds settings for target stack repo analysis and gap analysis.
+type TargetStackConfig struct {
+	CloneDir      string // TS_CLONE_DIR — where to clone repos (default: <DataDir>/target-repos)
+	MaxWorkers    int    // TS_MAX_WORKERS — concurrent file analysis workers (default 10)
+	MaxTokens     int    // TS_MAX_TOKENS — max output tokens per LLM call (default 16000)
+	TokenLimit    int    // TS_TOKEN_LIMIT — input chunking token limit (default 30000)
+	Extensions    string // TS_EXTENSIONS — comma-separated file extensions
+	GapMaxIter    int    // TS_GAP_MAX_ITER — gap analysis agent max iterations (default 30)
+	Token         string // TS_TOKEN — PAT for GitHub or Azure DevOps repo access
+	ShallowClone  bool   // TS_SHALLOW_CLONE — use depth=1 clone (default true)
+	Pass2Batch    int    // TS_PASS2_BATCH — entities per synthesis batch (default 25)
+	Pass2MaxTokens int   // TS_PASS2_MAX_TOKENS — max tokens for synthesis pass (default 8000)
 }
 
 // BWConfig holds settings for Businessware ingestion.
 type BWConfig struct {
-	Dir        string // BW_DIR — root directory of Businessware files
-	Extensions string // BW_EXTENSIONS — comma-separated file extensions (default ".java,.md,.bw,.txt,.xml")
-	MaxWorkers int    // BW_MAX_WORKERS — concurrent analysis workers (default 5)
-	MaxTokens  int    // BW_MAX_TOKENS — max output tokens per LLM call (default 16000)
-	TokenLimit int    // BW_TOKEN_LIMIT — input chunking token limit (default 30000)
+	Dir            string // BW_DIR — root directory of Businessware files
+	Extensions     string // BW_EXTENSIONS — comma-separated file extensions (default ".java,.md,.bw,.txt,.xml,.vsdx,.drawio,.svg,.puml,.plantuml,.jar,.war,.ear")
+	MaxWorkers     int    // BW_MAX_WORKERS — concurrent analysis workers (default 15)
+	MaxTokens      int    // BW_MAX_TOKENS — max output tokens per LLM call (default 16000)
+	TokenLimit     int    // BW_TOKEN_LIMIT — input chunking token limit (default 30000)
+	JavapPath      string // BW_JAVAP_PATH — path to javap binary (auto-detected if empty)
+	MaxJARDepth    int    // BW_MAX_JAR_DEPTH — max recursion depth for nested JAR/WAR/EAR extraction (default 3)
+	EnablePass2    bool   // BW_ENABLE_PASS2 — enable cross-file synthesis pass (default true)
+	EnablePass3    bool   // BW_ENABLE_PASS3 — enable validation & repair pass (default true)
+	Pass2BatchSize int    // BW_PASS2_BATCH_SIZE — entities per synthesis batch (default 30)
+	Pass2MaxTokens int    // BW_PASS2_MAX_TOKENS — max output tokens for pass 2 (default 4000)
+	Pass3MaxTokens int    // BW_PASS3_MAX_TOKENS — max output tokens for pass 3 (default 4000)
 }
 
 // ExternalDBConfig holds settings for external database gap analysis via MCP.
@@ -81,6 +103,8 @@ type LLMConfig struct {
 	OpenAIBaseURL         string        // OPENAI_BASE_URL (for Azure or proxies)
 	OpenAIOrgID           string        // OPENAI_ORG_ID
 	OpenAIModel           string        // OPENAI_MODEL (default "gpt-4o")
+	OpenAIAzure           bool          // OPENAI_AZURE — enable Azure OpenAI mode (api-key header, deployments path, api-version)
+	OpenAIAPIVersion      string        // OPENAI_API_VERSION (default "2025-04-01-preview")
 	Timeout               time.Duration // Overall HTTP client timeout (LLM_TIMEOUT)
 	ResponseHeaderTimeout time.Duration // Time to wait for first response byte (LLM_RESPONSE_HEADER_TIMEOUT)
 }
@@ -94,6 +118,7 @@ type ClaudeConfig struct {
 	Pass2MaxTokens   int
 	Pass3MaxTokens   int
 	Pass4MaxTokens   int
+	MaxOutputTokensCap int // upper limit for auto-retry max_tokens doubling (default 65536)
 	RequestTimeout   time.Duration
 	DisableRateLimit bool
 }
@@ -107,6 +132,7 @@ type Neo4jConfig struct {
 
 type IngestConfig struct {
 	RootDir         string
+	Codebase        string // INGEST_CODEBASE — codebase identifier for multi-codebase support (default "default")
 	BatchSize       int
 	CacheDB         string
 	TokenLimit      int
@@ -117,7 +143,9 @@ type IngestConfig struct {
 	Pass2TokenLimit int
 	OverlapLines    int
 	Pass3BatchSize        int
-	StripSequenceColumns  bool // STRIP_SEQUENCE_COLUMNS — strip columns 1-6 and 73-80 from fixed-format COBOL
+	StripSequenceColumns  bool    // STRIP_SEQUENCE_COLUMNS — strip columns 1-6 and 73-80 from fixed-format COBOL
+	ContentDetect         bool    // CONTENT_DETECT — enable content-based detection of COBOL/copybook/JCL in .txt files
+	TokenEstimationRatio  float64 // TOKEN_ESTIMATION_RATIO — chars per token for estimation (default 3.2, old=4.0)
 }
 
 // WorkersForPass returns the worker count for a specific pass, falling back to MaxWorkers.
@@ -156,15 +184,18 @@ func Load() (*Config, error) {
 	viper.SetDefault("LLM_TIMEOUT", "600s")
 	viper.SetDefault("LLM_RESPONSE_HEADER_TIMEOUT", "300s")
 	viper.SetDefault("OPENAI_MODEL", "gpt-4o")
+	viper.SetDefault("OPENAI_AZURE", false)
+	viper.SetDefault("OPENAI_API_VERSION", "2025-04-01-preview")
 
 	// Claude model defaults (used by both providers)
 	viper.SetDefault("CLAUDE_OPUS_MODEL", "claude-opus-4-6")
 	viper.SetDefault("CLAUDE_SONNET_MODEL", "claude-sonnet-4-6")
 	viper.SetDefault("CLAUDE_MAX_RETRIES", 3)
-	viper.SetDefault("CLAUDE_PASS1_MAX_TOKENS", 8192)
-	viper.SetDefault("CLAUDE_PASS2_MAX_TOKENS", 16000)
+	viper.SetDefault("CLAUDE_PASS1_MAX_TOKENS", 16384)
+	viper.SetDefault("CLAUDE_PASS2_MAX_TOKENS", 32000)
 	viper.SetDefault("CLAUDE_PASS3_MAX_TOKENS", 16000)
 	viper.SetDefault("CLAUDE_PASS4_MAX_TOKENS", 4000)
+	viper.SetDefault("CLAUDE_MAX_OUTPUT_CAP", 65536)
 	viper.SetDefault("DISABLE_RATE_LIMIT", false)
 
 	// Neo4j defaults
@@ -174,6 +205,7 @@ func Load() (*Config, error) {
 	viper.SetDefault("NEO4J_DATABASE", "cobol")
 
 	// Ingest defaults
+	viper.SetDefault("INGEST_CODEBASE", "default")
 	viper.SetDefault("INGEST_BATCH_SIZE", 500)
 	viper.SetDefault("INGEST_CACHE_DB", "./cache.sqlite")
 	viper.SetDefault("INGEST_TOKEN_LIMIT", 30000)
@@ -185,6 +217,8 @@ func Load() (*Config, error) {
 	viper.SetDefault("PASS2_OVERLAP_LINES", 20)
 	viper.SetDefault("PASS3_BATCH_SIZE", 50)
 	viper.SetDefault("STRIP_SEQUENCE_COLUMNS", true)
+	viper.SetDefault("CONTENT_DETECT", false)
+	viper.SetDefault("TOKEN_ESTIMATION_RATIO", 3.2)
 
 	// API defaults
 	viper.SetDefault("API_PORT", "8080")
@@ -209,10 +243,28 @@ func Load() (*Config, error) {
 
 	// BW defaults
 	viper.SetDefault("BW_DIR", "")
-	viper.SetDefault("BW_EXTENSIONS", ".java,.md,.bw,.txt,.xml")
-	viper.SetDefault("BW_MAX_WORKERS", 5)
+	viper.SetDefault("BW_EXTENSIONS", ".java,.md,.bw,.txt,.xml,.vsdx,.drawio,.svg,.puml,.plantuml,.jar,.war,.ear")
+	viper.SetDefault("BW_MAX_WORKERS", 15)
+	viper.SetDefault("BW_MAX_JAR_DEPTH", 3)
 	viper.SetDefault("BW_MAX_TOKENS", 16000)
 	viper.SetDefault("BW_TOKEN_LIMIT", 30000)
+	viper.SetDefault("BW_ENABLE_PASS2", true)
+	viper.SetDefault("BW_ENABLE_PASS3", true)
+	viper.SetDefault("BW_PASS2_BATCH_SIZE", 30)
+	viper.SetDefault("BW_PASS2_MAX_TOKENS", 4000)
+	viper.SetDefault("BW_PASS3_MAX_TOKENS", 4000)
+
+	// Target stack defaults
+	viper.SetDefault("TS_CLONE_DIR", "")
+	viper.SetDefault("TS_MAX_WORKERS", 10)
+	viper.SetDefault("TS_MAX_TOKENS", 16000)
+	viper.SetDefault("TS_TOKEN_LIMIT", 30000)
+	viper.SetDefault("TS_EXTENSIONS", ".java,.cs,.py,.ts,.js,.go,.kt,.scala,.rb,.xml,.yaml,.yml,.json,.graphql,.proto")
+	viper.SetDefault("TS_GAP_MAX_ITER", 30)
+	viper.SetDefault("TS_TOKEN", "")
+	viper.SetDefault("TS_SHALLOW_CLONE", true)
+	viper.SetDefault("TS_PASS2_BATCH", 25)
+	viper.SetDefault("TS_PASS2_MAX_TOKENS", 8000)
 
 	// Oracle SQLcl defaults
 	viper.SetDefault("ORACLE_HOST", "localhost")
@@ -250,17 +302,20 @@ func Load() (*Config, error) {
 			OpenAIBaseURL:         viper.GetString("OPENAI_BASE_URL"),
 			OpenAIOrgID:           viper.GetString("OPENAI_ORG_ID"),
 			OpenAIModel:          viper.GetString("OPENAI_MODEL"),
+			OpenAIAzure:           viper.GetBool("OPENAI_AZURE"),
+			OpenAIAPIVersion:      viper.GetString("OPENAI_API_VERSION"),
 			Timeout:               llmTimeout,
 			ResponseHeaderTimeout: llmResponseHeaderTimeout,
 		},
 		Claude: ClaudeConfig{
-			OpusModel:      viper.GetString("CLAUDE_OPUS_MODEL"),
-			SonnetModel:    viper.GetString("CLAUDE_SONNET_MODEL"),
-			MaxRetries:     viper.GetInt("CLAUDE_MAX_RETRIES"),
-			Pass1MaxTokens: viper.GetInt("CLAUDE_PASS1_MAX_TOKENS"),
-			Pass2MaxTokens: viper.GetInt("CLAUDE_PASS2_MAX_TOKENS"),
-			Pass3MaxTokens: viper.GetInt("CLAUDE_PASS3_MAX_TOKENS"),
+			OpusModel:        viper.GetString("CLAUDE_OPUS_MODEL"),
+			SonnetModel:      viper.GetString("CLAUDE_SONNET_MODEL"),
+			MaxRetries:       viper.GetInt("CLAUDE_MAX_RETRIES"),
+			Pass1MaxTokens:   viper.GetInt("CLAUDE_PASS1_MAX_TOKENS"),
+			Pass2MaxTokens:   viper.GetInt("CLAUDE_PASS2_MAX_TOKENS"),
+			Pass3MaxTokens:   viper.GetInt("CLAUDE_PASS3_MAX_TOKENS"),
 			Pass4MaxTokens:   viper.GetInt("CLAUDE_PASS4_MAX_TOKENS"),
+			MaxOutputTokensCap: viper.GetInt("CLAUDE_MAX_OUTPUT_CAP"),
 			RequestTimeout:   llmTimeout,
 			DisableRateLimit: viper.GetBool("DISABLE_RATE_LIMIT"),
 		},
@@ -272,6 +327,7 @@ func Load() (*Config, error) {
 		},
 		Ingest: IngestConfig{
 			RootDir:         viper.GetString("INGEST_ROOT_DIR"),
+			Codebase:        viper.GetString("INGEST_CODEBASE"),
 			BatchSize:       viper.GetInt("INGEST_BATCH_SIZE"),
 			CacheDB:         viper.GetString("INGEST_CACHE_DB"),
 			TokenLimit:      viper.GetInt("INGEST_TOKEN_LIMIT"),
@@ -283,6 +339,8 @@ func Load() (*Config, error) {
 			OverlapLines:    viper.GetInt("PASS2_OVERLAP_LINES"),
 			Pass3BatchSize:       viper.GetInt("PASS3_BATCH_SIZE"),
 			StripSequenceColumns: viper.GetBool("STRIP_SEQUENCE_COLUMNS"),
+			ContentDetect:        viper.GetBool("CONTENT_DETECT"),
+			TokenEstimationRatio: viper.GetFloat64("TOKEN_ESTIMATION_RATIO"),
 		},
 		API: APIConfig{
 			Port:     viper.GetString("API_PORT"),
@@ -310,11 +368,18 @@ func Load() (*Config, error) {
 			OracleSQLclPath: viper.GetString("ORACLE_SQLCL_PATH"),
 		},
 		BW: BWConfig{
-			Dir:        viper.GetString("BW_DIR"),
-			Extensions: viper.GetString("BW_EXTENSIONS"),
-			MaxWorkers: viper.GetInt("BW_MAX_WORKERS"),
-			MaxTokens:  viper.GetInt("BW_MAX_TOKENS"),
-			TokenLimit: viper.GetInt("BW_TOKEN_LIMIT"),
+			Dir:            viper.GetString("BW_DIR"),
+			Extensions:     viper.GetString("BW_EXTENSIONS"),
+			MaxWorkers:     viper.GetInt("BW_MAX_WORKERS"),
+			MaxTokens:      viper.GetInt("BW_MAX_TOKENS"),
+			TokenLimit:     viper.GetInt("BW_TOKEN_LIMIT"),
+			JavapPath:      viper.GetString("BW_JAVAP_PATH"),
+			MaxJARDepth:    viper.GetInt("BW_MAX_JAR_DEPTH"),
+			EnablePass2:    viper.GetBool("BW_ENABLE_PASS2"),
+			EnablePass3:    viper.GetBool("BW_ENABLE_PASS3"),
+			Pass2BatchSize: viper.GetInt("BW_PASS2_BATCH_SIZE"),
+			Pass2MaxTokens: viper.GetInt("BW_PASS2_MAX_TOKENS"),
+			Pass3MaxTokens: viper.GetInt("BW_PASS3_MAX_TOKENS"),
 		},
 		Modernize: ModernizeConfig{
 			Port:          viper.GetString("MODERNIZE_PORT"),
@@ -323,6 +388,18 @@ func Load() (*Config, error) {
 			MCPServerURL:  viper.GetString("MCP_SERVER_URL"),
 			ChatModel:     viper.GetString("MODERNIZE_CHAT_MODEL"),
 			ChatMaxTokens: viper.GetInt("MODERNIZE_CHAT_MAX_TOKENS"),
+		},
+		TargetStack: TargetStackConfig{
+			CloneDir:       viper.GetString("TS_CLONE_DIR"),
+			MaxWorkers:     viper.GetInt("TS_MAX_WORKERS"),
+			MaxTokens:      viper.GetInt("TS_MAX_TOKENS"),
+			TokenLimit:     viper.GetInt("TS_TOKEN_LIMIT"),
+			Extensions:     viper.GetString("TS_EXTENSIONS"),
+			GapMaxIter:     viper.GetInt("TS_GAP_MAX_ITER"),
+			Token:          viper.GetString("TS_TOKEN"),
+			ShallowClone:   viper.GetBool("TS_SHALLOW_CLONE"),
+			Pass2Batch:     viper.GetInt("TS_PASS2_BATCH"),
+			Pass2MaxTokens: viper.GetInt("TS_PASS2_MAX_TOKENS"),
 		},
 	}
 

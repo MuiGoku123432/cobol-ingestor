@@ -122,6 +122,14 @@ func classifyBWFileType(path string) string {
 		return "Businessware"
 	case hasExtCI(path, ".txt"):
 		return "Text"
+	case hasExtCI(path, ".vsdx"):
+		return "Visio Diagram"
+	case hasExtCI(path, ".drawio"):
+		return "DrawIO Diagram"
+	case hasExtCI(path, ".svg"):
+		return "SVG Diagram"
+	case hasExtCI(path, ".puml"), hasExtCI(path, ".plantuml"):
+		return "PlantUML Diagram"
 	default:
 		return "Unknown"
 	}

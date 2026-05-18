@@ -1,31 +1,85 @@
 <script lang="ts">
   // @ts-ignore - Wails runtime
   import { EventsOn } from 'wailsjs/runtime/runtime';
+  import { usePersistedState } from '../../stores/persisted.svelte';
 
-  let directory = $state('');
-  let selectedPass = $state(0);
+  let saved = usePersistedState('ingest', {
+    activeTab: 'cobol' as 'cobol' | 'bw' | 'oracle',
+    directory: '',
+    selectedPass: 0,
+    bwDirectory: '',
+    bwExtensions: '',
+    contentDetect: false,
+  });
+
   let running = $state(false);
   let logs = $state<string[]>([]);
   let status = $state('idle');
+  let config = $state<any>(null);
 
-  async function pickDirectory() {
+  // Load config on mount for defaults
+  $effect(() => {
+    (async () => {
+      try {
+        // @ts-ignore - Wails bindings
+        config = await window.go.main.ConfigService.GetConfig();
+        if (config?.bwExtensions && !saved.bwExtensions) saved.bwExtensions = config.bwExtensions;
+      } catch (e) {
+        console.error('Failed to load config:', e);
+      }
+    })();
+  });
+
+  async function pickDirectory(title: string, target: 'cobol' | 'bw') {
     try {
       // @ts-ignore - Wails bindings
-      const dir = await window.go.main.IngestService.SelectDirectory();
-      if (dir) directory = dir;
+      const dir = await window.go.main.IngestService.SelectDirectory(title);
+      if (dir) {
+        if (target === 'cobol') saved.directory = dir;
+        else saved.bwDirectory = dir;
+      }
     } catch (e) {
       console.error('Directory picker failed:', e);
     }
   }
 
   async function startIngestion() {
-    if (!directory) return;
+    if (!saved.directory) return;
     logs = [];
     status = 'running';
     running = true;
     try {
       // @ts-ignore - Wails bindings
-      await window.go.main.IngestService.StartIngestion(directory, selectedPass);
+      await window.go.main.IngestService.StartIngestion(saved.directory, saved.selectedPass, saved.contentDetect);
+    } catch (e: any) {
+      status = 'error';
+      logs = [...logs, `Error: ${e.message || e}`];
+      running = false;
+    }
+  }
+
+  async function startBWIngestion() {
+    if (!saved.bwDirectory) return;
+    logs = [];
+    status = 'running';
+    running = true;
+    try {
+      // @ts-ignore - Wails bindings
+      await window.go.main.IngestService.StartBWIngestion(saved.bwDirectory, saved.bwExtensions);
+    } catch (e: any) {
+      status = 'error';
+      logs = [...logs, `Error: ${e.message || e}`];
+      running = false;
+    }
+  }
+
+  async function startOracleAnalysis() {
+    logs = [];
+    status = 'running';
+    running = true;
+    try {
+      // @ts-ignore - Wails bindings
+      await window.go.main.IngestService.StartOracleAnalysis();
     } catch (e: any) {
       status = 'error';
       logs = [...logs, `Error: ${e.message || e}`];
@@ -80,38 +134,100 @@
 </script>
 
 <div class="ingest">
-  <h1>Ingest COBOL Codebase</h1>
+  <h1>Ingest</h1>
+
+  <div class="tabs">
+    <button class="tab" class:active={saved.activeTab === 'cobol'} onclick={() => (saved.activeTab = 'cobol')}>COBOL</button>
+    <button class="tab" class:active={saved.activeTab === 'bw'} onclick={() => (saved.activeTab = 'bw')}>BusinessWare</button>
+    <button class="tab" class:active={saved.activeTab === 'oracle'} onclick={() => (saved.activeTab = 'oracle')}>Oracle</button>
+  </div>
 
   <div class="controls">
-    <div class="field">
-      <label>Source Directory</label>
-      <div class="dir-picker">
-        <input type="text" bind:value={directory} placeholder="/path/to/cobol/sources" readonly />
-        <button onclick={pickDirectory}>Browse</button>
+    {#if saved.activeTab === 'cobol'}
+      <div class="field">
+        <label>Source Directory</label>
+        <div class="dir-picker">
+          <input type="text" bind:value={saved.directory} placeholder="/path/to/cobol/sources" readonly />
+          <button onclick={() => pickDirectory('Select COBOL Source Directory', 'cobol')}>Browse</button>
+        </div>
       </div>
-    </div>
 
-    <div class="field">
-      <label>Pass</label>
-      <select bind:value={selectedPass}>
-        {#each passes as p}
-          <option value={p.value}>{p.label}</option>
-        {/each}
-      </select>
-    </div>
+      <div class="field">
+        <label>Pass</label>
+        <select bind:value={saved.selectedPass}>
+          {#each passes as p}
+            <option value={p.value}>{p.label}</option>
+          {/each}
+        </select>
+      </div>
 
-    <div class="actions">
-      {#if running}
-        <button class="btn-danger" onclick={cancelIngestion}>Cancel</button>
-      {:else}
-        <button class="btn-primary" disabled={!directory} onclick={startIngestion}>
-          Start Ingestion
-        </button>
+      <div class="field">
+        <label>
+          <input type="checkbox" bind:checked={saved.contentDetect} />
+          Detect COBOL in .txt files
+        </label>
+      </div>
+
+      <div class="actions">
+        {#if running}
+          <button class="btn-danger" onclick={cancelIngestion}>Cancel</button>
+        {:else}
+          <button class="btn-primary" disabled={!saved.directory} onclick={startIngestion}>
+            Start Ingestion
+          </button>
+        {/if}
+        <span class="status-badge" class:running class:complete={status === 'complete'} class:error={status === 'error'}>
+          {status}
+        </span>
+      </div>
+    {:else if saved.activeTab === 'bw'}
+      <div class="field">
+        <label>Source Directory</label>
+        <div class="dir-picker">
+          <input type="text" bind:value={saved.bwDirectory} placeholder="/path/to/businessware/sources" readonly />
+          <button onclick={() => pickDirectory('Select BusinessWare Source Directory', 'bw')}>Browse</button>
+        </div>
+      </div>
+
+      <div class="field">
+        <label>File Extensions</label>
+        <input type="text" bind:value={saved.bwExtensions} placeholder=".java,.md,.bw,.txt,.xml" />
+      </div>
+
+      <div class="actions">
+        {#if running}
+          <button class="btn-danger" onclick={cancelIngestion}>Cancel</button>
+        {:else}
+          <button class="btn-primary" disabled={!saved.bwDirectory} onclick={startBWIngestion}>
+            Start BW Ingestion
+          </button>
+        {/if}
+        <span class="status-badge" class:running class:complete={status === 'complete'} class:error={status === 'error'}>
+          {status}
+        </span>
+      </div>
+    {:else if saved.activeTab === 'oracle'}
+      {#if config}
+        <div class="oracle-summary">
+          <p><strong>Connection:</strong> {config.oracleHost || 'localhost'}:{config.oraclePort || '1521'}/{config.oracleService || '(not set)'}</p>
+          <p><strong>Database:</strong> {config.extDbName || '(not set)'} ({config.extDbType || 'not set'})</p>
+          <p class="hint">Configure connection details in Settings.</p>
+        </div>
       {/if}
-      <span class="status-badge" class:running class:complete={status === 'complete'} class:error={status === 'error'}>
-        {status}
-      </span>
-    </div>
+
+      <div class="actions">
+        {#if running}
+          <button class="btn-danger" onclick={cancelIngestion}>Cancel</button>
+        {:else}
+          <button class="btn-primary" onclick={startOracleAnalysis}>
+            Run Analysis
+          </button>
+        {/if}
+        <span class="status-badge" class:running class:complete={status === 'complete'} class:error={status === 'error'}>
+          {status}
+        </span>
+      </div>
+    {/if}
   </div>
 
   <div class="log-output">
@@ -121,7 +237,7 @@
         <div class="log-line">{line}</div>
       {/each}
       {#if logs.length === 0}
-        <p class="muted">No output yet. Select a directory and start ingestion.</p>
+        <p class="muted">No output yet. Select a tab and start ingestion.</p>
       {/if}
     </div>
   </div>
@@ -131,6 +247,34 @@
   .ingest h1 {
     font-size: 20px;
     margin-bottom: 16px;
+  }
+
+  .tabs {
+    display: flex;
+    gap: 0;
+    margin-bottom: 16px;
+    border-bottom: 1px solid #21262d;
+  }
+
+  .tab {
+    background: none;
+    border: none;
+    border-bottom: 2px solid transparent;
+    color: #8b949e;
+    padding: 8px 16px;
+    cursor: pointer;
+    font-size: 13px;
+    font-weight: 500;
+    transition: color 0.15s, border-color 0.15s;
+  }
+
+  .tab:hover {
+    color: #e1e4e8;
+  }
+
+  .tab.active {
+    color: #58a6ff;
+    border-bottom-color: #58a6ff;
   }
 
   .controls {
@@ -149,6 +293,16 @@
     font-size: 12px;
     color: #8b949e;
     margin-bottom: 4px;
+  }
+
+  .field input[type='text'] {
+    width: 100%;
+    background: #161b22;
+    border: 1px solid #30363d;
+    border-radius: 4px;
+    color: #e1e4e8;
+    padding: 8px;
+    font-size: 13px;
   }
 
   .dir-picker {
@@ -180,6 +334,21 @@
 
   select {
     width: 100%;
+  }
+
+  .oracle-summary {
+    font-size: 13px;
+    color: #e1e4e8;
+  }
+
+  .oracle-summary p {
+    margin: 4px 0;
+  }
+
+  .oracle-summary .hint {
+    color: #8b949e;
+    font-size: 12px;
+    margin-top: 8px;
   }
 
   .actions {
@@ -253,7 +422,7 @@
   }
 
   .log-scroll {
-    height: calc(100vh - 380px);
+    height: calc(100vh - 420px);
     overflow-y: auto;
     font-family: 'SF Mono', 'Fira Code', monospace;
     font-size: 12px;

@@ -6,6 +6,8 @@ import (
 	"os/exec"
 	"strings"
 
+	"cobol-ingestor/internal/llm"
+
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 )
 
@@ -81,6 +83,30 @@ func (c *MCPClient) ListTools(ctx context.Context) ([]*mcp.Tool, error) {
 		return nil, fmt.Errorf("mcp list tools: %w", err)
 	}
 	return result.Tools, nil
+}
+
+// BuildLLMToolDefinitions queries the MCP server for its full tool catalog and
+// converts each entry to an llm.ToolDefinition for use in chat/swarm prompts.
+// Falls back to the hardcoded GetToolDefinitions() list if discovery fails.
+func (c *MCPClient) BuildLLMToolDefinitions(ctx context.Context) []llm.ToolDefinition {
+	tools, err := c.ListTools(ctx)
+	if err != nil || len(tools) == 0 {
+		return GetToolDefinitions()
+	}
+
+	defs := make([]llm.ToolDefinition, 0, len(tools))
+	for _, t := range tools {
+		schema, _ := t.InputSchema.(map[string]any)
+		if schema == nil {
+			schema = map[string]any{"type": "object", "properties": map[string]any{}}
+		}
+		defs = append(defs, llm.ToolDefinition{
+			Name:        t.Name,
+			Description: t.Description,
+			InputSchema: schema,
+		})
+	}
+	return defs
 }
 
 // CallTool calls an MCP tool and returns the text content from the result.

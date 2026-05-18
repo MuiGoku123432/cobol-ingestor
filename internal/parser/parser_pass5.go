@@ -139,6 +139,92 @@ type ParagraphAnnotation struct {
 	Category    string
 }
 
+// DeadCodeVerificationJSON matches the JSON schema for dead code verification.
+type DeadCodeVerificationJSON struct {
+	Verifications []DeadCodeVerdictJSON `json:"verifications"`
+}
+
+// DeadCodeVerdictJSON represents a single dead code verification result.
+type DeadCodeVerdictJSON struct {
+	ParagraphName string `json:"paragraphName"`
+	Verdict       string `json:"verdict"` // "confirmed_dead" or "false_positive"
+	Reason        string `json:"reason"`
+}
+
+// DeadCodeVerdict is the parsed result for a single paragraph verification.
+type DeadCodeVerdict struct {
+	ParagraphName   string
+	IsFalsePositive bool
+	Reason          string
+}
+
+// ParseDeadCodeVerification parses Claude's JSON response for dead code verification.
+func ParseDeadCodeVerification(jsonStr string) ([]DeadCodeVerdict, error) {
+	cleaned := stripMarkdownFences(jsonStr)
+
+	var raw DeadCodeVerificationJSON
+	if err := json.Unmarshal([]byte(cleaned), &raw); err != nil {
+		return nil, fmt.Errorf("parsing dead code verification JSON: %w\nraw response: %.500s", err, cleaned)
+	}
+
+	var verdicts []DeadCodeVerdict
+	for _, v := range raw.Verifications {
+		verdicts = append(verdicts, DeadCodeVerdict{
+			ParagraphName:   v.ParagraphName,
+			IsFalsePositive: v.Verdict == "false_positive",
+			Reason:          v.Reason,
+		})
+	}
+
+	return verdicts, nil
+}
+
+// DomainMergeDecisionJSON matches the JSON schema for domain merge decisions.
+type DomainMergeDecisionJSON struct {
+	Decisions []DomainMergeItemJSON `json:"decisions"`
+}
+
+// DomainMergeItemJSON represents a single domain merge decision.
+type DomainMergeItemJSON struct {
+	Domain1    string `json:"domain1"`
+	Domain2    string `json:"domain2"`
+	Action     string `json:"action"`     // "merge" or "keep_separate"
+	KeepDomain string `json:"keepDomain"`
+	Reason     string `json:"reason"`
+}
+
+// DomainMergeDecision is the parsed result for a single domain merge decision.
+type DomainMergeDecision struct {
+	Domain1     string
+	Domain2     string
+	ShouldMerge bool
+	KeepDomain  string
+	Reason      string
+}
+
+// ParseDomainMergeDecisions parses Claude's JSON response for domain merge decisions.
+func ParseDomainMergeDecisions(jsonStr string) ([]DomainMergeDecision, error) {
+	cleaned := stripMarkdownFences(jsonStr)
+
+	var raw DomainMergeDecisionJSON
+	if err := json.Unmarshal([]byte(cleaned), &raw); err != nil {
+		return nil, fmt.Errorf("parsing domain merge JSON: %w\nraw response: %.500s", err, cleaned)
+	}
+
+	var decisions []DomainMergeDecision
+	for _, d := range raw.Decisions {
+		decisions = append(decisions, DomainMergeDecision{
+			Domain1:     d.Domain1,
+			Domain2:     d.Domain2,
+			ShouldMerge: d.Action == "merge",
+			KeepDomain:  d.KeepDomain,
+			Reason:      d.Reason,
+		})
+	}
+
+	return decisions, nil
+}
+
 // ParseRepairAnnotations parses LLM repair response into paragraph annotations.
 func ParseRepairAnnotations(jsonResp string) ([]ParagraphAnnotation, error) {
 	cleaned := stripMarkdownFences(jsonResp)

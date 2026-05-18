@@ -9,15 +9,21 @@ type GetProgramInput struct {
 }
 
 type SearchProgramsInput struct {
-	Query string `json:"query" jsonschema:"Search query (supports fuzzy matching)"`
-	Limit int    `json:"limit,omitempty" jsonschema:"Max results (default 20)"`
+	Query    string `json:"query" jsonschema:"Search query (supports fuzzy matching)"`
+	Limit    int    `json:"limit,omitempty" jsonschema:"Max results (default 20)"`
+	Codebase string `json:"codebase,omitempty" jsonschema:"Filter to a specific codebase"`
 }
 
 type ListProgramsInput struct {
 	Search   string `json:"search,omitempty" jsonschema:"Filter programs by ID substring"`
 	Page     int    `json:"page,omitempty" jsonschema:"Page number (default 1)"`
 	PageSize int    `json:"pageSize,omitempty" jsonschema:"Results per page (default 20)"`
+	Codebase string `json:"codebase,omitempty" jsonschema:"Filter to a specific codebase"`
 }
+
+type ListCodebasesInput struct{}
+
+type GetCrossCodebaseCallsInput struct{}
 
 type GetCallChainInput struct {
 	ProgramID string `json:"programId" jsonschema:"The program ID to trace"`
@@ -107,3 +113,23 @@ type GetCobolToExternalMappingsInput struct {
 type GetDataFlowPathsInput struct {
 	TableName string `json:"tableName,omitempty" jsonschema:"Filter by table name (DB2 or external). Leave empty for all flows."`
 }
+
+type GenerateMermaidDiagramInput struct {
+	Code     string `json:"code" jsonschema:"Mermaid diagram code (flowchart, sequence, class, ER)"`
+	Theme    string `json:"theme,omitempty" jsonschema:"Theme name: github-dark, tokyo-night, nord, catppuccin-mocha, etc."`
+	FileName string `json:"fileName,omitempty" jsonschema:"Output file name without extension"`
+}
+
+type RunCypherReadonlyInput struct {
+	Query  string         `json:"query" jsonschema:"Read-only Cypher query to execute"`
+	Params map[string]any `json:"params,omitempty" jsonschema:"Query parameters (optional)"`
+	Limit  int            `json:"limit,omitempty" jsonschema:"Max rows to return (default 100, max 1000)"`
+}
+
+type RunNamedQueryInput struct {
+	Name   string         `json:"name" jsonschema:"Named query identifier (use list_named_queries to discover)"`
+	Params map[string]any `json:"params,omitempty" jsonschema:"Query parameters as declared by the named query"`
+	Limit  int            `json:"limit,omitempty" jsonschema:"Max rows to return (default 100, max 1000)"`
+}
+
+type ListNamedQueriesInput struct{}

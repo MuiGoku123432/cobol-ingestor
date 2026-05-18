@@ -18,7 +18,50 @@ import (
 type Client struct {
 	driver   neo4j.DriverWithContext
 	database string
+	codebase string // scopes listing queries; empty = all codebases
 	logger   *zap.Logger
+}
+
+// WithCodebase returns a shallow copy of the client scoped to the given codebase.
+// Listing queries on the returned client filter to that codebase only.
+func (c *Client) WithCodebase(codebase string) *Client {
+	copy := *c
+	copy.codebase = codebase
+	return &copy
+}
+
+// codebaseWhere returns a WHERE clause fragment filtering by codebase property.
+// Returns empty string when no codebase scoping is active.
+func codebaseWhere(alias, codebase string) string {
+	if codebase == "" || codebase == "default" {
+		return ""
+	}
+	return fmt.Sprintf(" WHERE %s.codebase = '%s'", alias, codebase)
+}
+
+// codebaseWhereAnd returns an AND clause fragment filtering by codebase property.
+// Returns empty string when no codebase scoping is active.
+func codebaseWhereAnd(alias, codebase string) string {
+	if codebase == "" || codebase == "default" {
+		return ""
+	}
+	return fmt.Sprintf(" AND %s.codebase = '%s'", alias, codebase)
+}
+
+// codebaseOrFilter returns the effective codebase: filter value takes precedence over client default.
+func codebaseOrFilter(filterCB, clientCB string) string {
+	if filterCB != "" {
+		return filterCB
+	}
+	return clientCB
+}
+
+// codebasesWhereAnd returns an AND clause fragment filtering shared nodes by codebases list property.
+func codebasesWhereAnd(alias, codebase string) string {
+	if codebase == "" || codebase == "default" {
+		return ""
+	}
+	return fmt.Sprintf(" AND '%s' IN %s.codebases", codebase, alias)
 }
 
 // NewClient creates a new Neo4j client from config.
@@ -87,6 +130,14 @@ func (c *Client) RunMigrations(ctx context.Context, migrationsDir string) error 
 // NewSession creates a new Neo4j session.
 func (c *Client) NewSession(ctx context.Context) neo4j.SessionWithContext {
 	return c.driver.NewSession(ctx, neo4j.SessionConfig{DatabaseName: c.database})
+}
+
+// NewReadOnlySession creates a new Neo4j session scoped to read-only access.
+func (c *Client) NewReadOnlySession(ctx context.Context) neo4j.SessionWithContext {
+	return c.driver.NewSession(ctx, neo4j.SessionConfig{
+		DatabaseName: c.database,
+		AccessMode:   neo4j.AccessModeRead,
+	})
 }
 
 // Close shuts down the Neo4j driver.

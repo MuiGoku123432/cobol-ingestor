@@ -1,0 +1,226 @@
+# Azure Pipelines — cobol-graph
+# Builds CLI/server binaries (linux, darwin, windows), Wails desktop app,
+# and pushes a Docker image to Azure Container Registry.
+#
+# Requires a Docker Registry service connection named "winacr02" in Azure DevOps.
+
+trigger:
+  branches:
+    include:
+      - main
+
+pr: none
+
+variables:
+- name: GO_VERSION
+  value: "1.26"
+- name: NODE_VERSION
+  value: "20"
+- name: CGO_ENABLED
+  value: "0"
+- name: GOFLAGS
+  value: "-trimpath"
+
+# ---------------------------------------------------------------------------
+# Stage 1 — Test & Lint
+# ---------------------------------------------------------------------------
+stages:
+  - stage: Test
+    displayName: "Test"
+    jobs:
+      - job: TestAndLint
+        displayName: "test"
+        pool:
+          vmImage: ubuntu-latest
+        steps:
+          - task: GoTool@0
+            displayName: "Install Go $(GO_VERSION)"
+            inputs:
+              version: $(GO_VERSION)
+
+          - script: go mod download
+            displayName: "Download modules"
+
+          - script: mkdir -p cmd/desktop/frontend/dist && touch cmd/desktop/frontend/dist/.gitkeep
+            displayName: "Stub frontend/dist for embed"
+
+          - script: go test ./... -v
+            displayName: "Unit tests"
+
+  # ---------------------------------------------------------------------------
+  # Stage 2 — Build binaries (all platforms, parallel)
+  # ---------------------------------------------------------------------------
+  - stage: Build
+    displayName: "Build Binaries"
+    dependsOn: Test
+    jobs:
+      # -----------------------------------------------------------------------
+      # CLI / Server binaries — Linux amd64
+      # -----------------------------------------------------------------------
+      - job: BuildLinux
+        displayName: "CLI — linux/amd64"
+        pool:
+          vmImage: ubuntu-latest
+        steps:
+          - task: GoTool@0
+            displayName: "Install Go $(GO_VERSION)"
+            inputs:
+              version: $(GO_VERSION)
+
+          - script: go mod download
+            displayName: "Download modules"
+
+          - script: |
+              mkdir -p $(Build.ArtifactStagingDirectory)/bin
+              GOOS=linux GOARCH=amd64 CGO_ENABLED=0 go build $(GOFLAGS) -o $(Build.ArtifactStagingDirectory)/bin/cobol-graph         ./cmd/ingest
+              GOOS=linux GOARCH=amd64 CGO_ENABLED=0 go build $(GOFLAGS) -o $(Build.ArtifactStagingDirectory)/bin/cobol-graph-api     ./cmd/server
+              GOOS=linux GOARCH=amd64 CGO_ENABLED=0 go build $(GOFLAGS) -o $(Build.ArtifactStagingDirectory)/bin/cobol-graph-mcp     ./cmd/mcp
+              GOOS=linux GOARCH=amd64 CGO_ENABLED=0 go build $(GOFLAGS) -o $(Build.ArtifactStagingDirectory)/bin/cobol-graph-modernize ./cmd/modernize
+            displayName: "Build binaries"
+
+          - publish: $(Build.ArtifactStagingDirectory)/bin
+            artifact: binaries-linux-amd64
+            displayName: "Publish linux/amd64 binaries"
+
+      # -----------------------------------------------------------------------
+      # CLI / Server binaries — Darwin arm64
+      # -----------------------------------------------------------------------
+      - job: BuildDarwin
+        displayName: "CLI — darwin/arm64"
+        pool:
+          vmImage: macOS-latest
+        steps:
+          - task: GoTool@0
+            displayName: "Install Go $(GO_VERSION)"
+            inputs:
+              version: $(GO_VERSION)
+
+          - script: go mod download
+            displayName: "Download modules"
+
+          - script: |
+              mkdir -p $(Build.ArtifactStagingDirectory)/bin
+              GOOS=darwin GOARCH=arm64 CGO_ENABLED=0 go build $(GOFLAGS) -o $(Build.ArtifactStagingDirectory)/bin/cobol-graph         ./cmd/ingest
+              GOOS=darwin GOARCH=arm64 CGO_ENABLED=0 go build $(GOFLAGS) -o $(Build.ArtifactStagingDirectory)/bin/cobol-graph-api     ./cmd/server
+              GOOS=darwin GOARCH=arm64 CGO_ENABLED=0 go build $(GOFLAGS) -o $(Build.ArtifactStagingDirectory)/bin/cobol-graph-mcp     ./cmd/mcp
+              GOOS=darwin GOARCH=arm64 CGO_ENABLED=0 go build $(GOFLAGS) -o $(Build.ArtifactStagingDirectory)/bin/cobol-graph-modernize ./cmd/modernize
+            displayName: "Build binaries"
+
+          - publish: $(Build.ArtifactStagingDirectory)/bin
+            artifact: binaries-darwin-arm64
+            displayName: "Publish darwin/arm64 binaries"
+
+      # -----------------------------------------------------------------------
+      # CLI / Server binaries — Windows amd64
+      # -----------------------------------------------------------------------
+      - job: BuildWindows
+        displayName: "CLI — windows/amd64"
+        pool:
+          vmImage: windows-latest
+        steps:
+          - task: GoTool@0
+            displayName: "Install Go $(GO_VERSION)"
+            inputs:
+              version: $(GO_VERSION)
+
+          - script: go mod download
+            displayName: "Download modules"
+
+          - script: |
+              mkdir $(Build.ArtifactStagingDirectory)\bin
+              set GOOS=windows
+              set GOARCH=amd64
+              set CGO_ENABLED=0
+              go build -trimpath -o $(Build.ArtifactStagingDirectory)\bin\cobol-graph.exe         .\cmd\ingest
+              go build -trimpath -o $(Build.ArtifactStagingDirectory)\bin\cobol-graph-api.exe     .\cmd\server
+              go build -trimpath -o $(Build.ArtifactStagingDirectory)\bin\cobol-graph-mcp.exe     .\cmd\mcp
+              go build -trimpath -o $(Build.ArtifactStagingDirectory)\bin\cobol-graph-modernize.exe .\cmd\modernize
+            displayName: "Build binaries"
+
+          - publish: $(Build.ArtifactStagingDirectory)\bin
+            artifact: binaries-windows-amd64
+            displayName: "Publish windows/amd64 binaries"
+
+      # -----------------------------------------------------------------------
+      # Desktop (Wails) — macOS universal (arm64 + amd64)
+      # -----------------------------------------------------------------------
+      - job: DesktopMac
+        displayName: "Desktop — darwin/universal"
+        pool:
+          vmImage: macOS-latest
+        steps:
+          - task: GoTool@0
+            displayName: "Install Go $(GO_VERSION)"
+            inputs:
+              version: $(GO_VERSION)
+
+          - task: NodeTool@0
+            displayName: "Install Node.js $(NODE_VERSION)"
+            inputs:
+              versionSpec: $(NODE_VERSION)
+
+          - script: go install github.com/wailsapp/wails/v2/cmd/wails@latest
+            displayName: "Install Wails CLI"
+
+          - script: echo "##vso[task.prependpath]$(go env GOPATH)/bin"
+            displayName: "Add GOPATH/bin to PATH"
+
+          - script: go mod download
+            displayName: "Download modules"
+
+          - script: |
+              cd cmd/desktop
+              wails build -platform darwin/universal
+            displayName: "Build desktop app"
+
+          - script: |
+              mkdir -p $(Build.ArtifactStagingDirectory)/desktop
+              cp -r cmd/desktop/build/bin/cobol-graph-desktop.app $(Build.ArtifactStagingDirectory)/desktop/
+            displayName: "Copy .app bundle"
+
+          - publish: $(Build.ArtifactStagingDirectory)/desktop
+            artifact: desktop-darwin-universal
+            displayName: "Publish macOS desktop app"
+
+      # -----------------------------------------------------------------------
+      # Desktop (Wails) — Windows amd64
+      # -----------------------------------------------------------------------
+      - job: DesktopWindows
+        displayName: "Desktop — windows/amd64"
+        pool:
+          vmImage: windows-latest
+        steps:
+          - task: GoTool@0
+            displayName: "Install Go $(GO_VERSION)"
+            inputs:
+              version: $(GO_VERSION)
+
+          - task: NodeTool@0
+            displayName: "Install Node.js $(NODE_VERSION)"
+            inputs:
+              versionSpec: $(NODE_VERSION)
+
+          - script: go install github.com/wailsapp/wails/v2/cmd/wails@latest
+            displayName: "Install Wails CLI"
+
+          - script: |
+              for /f "delims=" %%i in ('go env GOPATH') do echo ##vso[task.prependpath]%%i\bin
+            displayName: "Add GOPATH/bin to PATH"
+
+          - script: go mod download
+            displayName: "Download modules"
+
+          - script: |
+              cd cmd\desktop
+              wails build -platform windows/amd64
+            displayName: "Build desktop app"
+
+          - script: |
+              mkdir $(Build.ArtifactStagingDirectory)\desktop
+              copy cmd\desktop\build\bin\cobol-graph-desktop.exe $(Build.ArtifactStagingDirectory)\desktop\
+            displayName: "Copy executable"
+
+          - publish: $(Build.ArtifactStagingDirectory)\desktop
+            artifact: desktop-windows-amd64
+            displayName: "Publish Windows desktop app"
+

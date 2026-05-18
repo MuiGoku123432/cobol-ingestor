@@ -26,6 +26,8 @@
     .agent-card-header { display: flex; align-items: center; gap: 0.5rem; cursor: pointer; }
     .agent-card-detail { max-height: 0; overflow: hidden; transition: max-height 0.3s ease; }
     .agent-card-detail.expanded { max-height: 500px; overflow-y: auto; }
+    .copy-btn { position: absolute; top: 0.5rem; right: -2rem; opacity: 0; transition: opacity 0.15s; }
+    .group:hover .copy-btn { opacity: 1; }
   </style>
 </head>
 <body class="h-full bg-gray-950 text-gray-100 flex">
@@ -139,6 +141,28 @@
         <button id="multiRoundToggle" onclick="toggleMultiRound()" role="switch" aria-checked="false"
           class="relative w-11 h-6 bg-gray-700 rounded-full transition-colors focus:ring-2 focus:ring-indigo-500">
           <span id="multiRoundThumb" class="absolute left-0.5 top-0.5 w-5 h-5 bg-gray-400 rounded-full transition-transform"></span>
+        </button>
+      </div>
+
+      <div class="flex items-center justify-between">
+        <div>
+          <label class="text-sm font-medium text-gray-400">Unlimited Iterations</label>
+          <p class="text-xs text-gray-500">Remove tool-call caps. Use Stop to abort.</p>
+        </div>
+        <button id="unlimitedToggle" onclick="toggleUnlimited()" role="switch" aria-checked="false"
+          class="relative w-11 h-6 bg-gray-700 rounded-full transition-colors focus:ring-2 focus:ring-amber-500">
+          <span id="unlimitedToggleThumb" class="absolute left-0.5 top-0.5 w-5 h-5 bg-gray-400 rounded-full transition-transform"></span>
+        </button>
+      </div>
+
+      <div class="flex items-center justify-between">
+        <div>
+          <label class="text-sm font-medium text-gray-400">Gap Analysis</label>
+          <p class="text-xs text-gray-500">Compare COBOL vs target stack</p>
+        </div>
+        <button id="gapToggle" onclick="toggleGapAnalysis()" role="switch" aria-checked="false"
+          class="relative w-11 h-6 bg-gray-700 rounded-full transition-colors focus:ring-2 focus:ring-emerald-500">
+          <span id="gapToggleThumb" class="absolute left-0.5 top-0.5 w-5 h-5 bg-gray-400 rounded-full transition-transform"></span>
         </button>
       </div>
     </div>
